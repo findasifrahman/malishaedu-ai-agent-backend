@@ -99,6 +99,25 @@ class R2Service:
             print(f"Error deleting file from R2: {e}")
             return False
     
+    def download_file(self, file_url: str, local_path: str) -> bool:
+        """Download file from R2 to local path"""
+        try:
+            # Extract key from URL
+            if settings.R2_BUCKET_URL and settings.R2_BUCKET_URL in file_url:
+                key = file_url.split(settings.R2_BUCKET_URL + '/')[-1].split('?')[0]
+            else:
+                # Try to extract from URL path
+                key = file_url.split('/')[-1].split('?')[0]
+            
+            # Download file
+            with open(local_path, 'wb') as f:
+                self.s3_client.download_fileobj(self.bucket_name, key, f)
+            
+            return True
+        except Exception as e:
+            print(f"Error downloading file from R2: {e}")
+            return False
+    
     def _get_content_type(self, filename: str) -> str:
         """Get content type based on file extension"""
         ext = filename.split('.')[-1].lower()

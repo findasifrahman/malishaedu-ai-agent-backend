@@ -14,13 +14,13 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Create database tables
+    # Startup: Ensure database tables exist (create only if they don't)
     try:
-        logger.info("Creating database tables...")
+        logger.info("Checking database tables...")
         Base.metadata.create_all(bind=engine)
-        logger.info("Database tables created successfully")
+        logger.info("Database tables ready")
     except Exception as e:
-        logger.error(f"Error creating database tables: {e}")
+        logger.error(f"Error checking database tables: {e}")
         # Don't fail startup if tables already exist
         pass
     yield

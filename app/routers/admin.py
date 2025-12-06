@@ -10,6 +10,9 @@ from app.models import (
     Application, AdminSettings, DocumentType, ApplicationStatus, ProgramIntake
 )
 from app.routers.auth import get_current_user
+from app.services.application_automation import ApplicationAutomation
+from app.services.r2_service import R2Service
+from app.services.portals import HITPortal, BeihangPortal, BNUZPortal
 
 router = APIRouter()
 
@@ -469,4 +472,96 @@ async def natural_language_query(
         "query": query,
         "message": "Natural language to SQL conversion not fully implemented. Use direct database queries for now."
     }
+
+
+class ApplicationAutomationRequest(BaseModel):
+    student_id: int
+    apply_url: str
+    username: Optional[str] = None
+    password: Optional[str] = None
+    portal_type: Optional[str] = None  # "hit", "beihang", "bnuz", etc.
+
+
+@router.post("/automation/run")
+async def run_application_automation(
+    request: ApplicationAutomationRequest,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Run application automation for a student"""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    
+    def run_automation_in_thread(student_id, apply_url, username, password, portal_type):
+        """Run automation in a thread with a new event loop"""
+        # Set event loop policy for Windows before creating loop
+        import asyncio
+        import sys
+        if sys.platform == 'win32':
+            # Windows requires ProactorEventLoop for subprocess support
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        
+        # Create a new event loop for this thread (Playwright sync API needs it)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            # Get portal override if specified
+            portal_override = None
+            if portal_type:
+                portal_map = {
+                    "hit": HITPortal(),
+                    "beihang": BeihangPortal(),
+                    "bnuz": BNUZPortal(),
+                }
+                portal_override = portal_map.get(portal_type.lower())
+            
+            # Initialize services (need to get a new DB session for this thread)
+            from app.database import SessionLocal
+            thread_db = SessionLocal()
+            try:
+                r2_service = R2Service()
+                automation = ApplicationAutomation(thread_db, r2_service)
+                
+                # Run automation (sync Playwright will work with the new event loop)
+                result = automation.run(
+                    student_id=student_id,
+                    apply_url=apply_url,
+                    username=username,
+                    password=password,
+                    portal_override=portal_override
+                )
+                return result
+            finally:
+                thread_db.close()
+        finally:
+            try:
+                # Close all pending tasks
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except:
+                pass
+            loop.close()
+    
+    try:
+        # Run automation in a thread executor with a new event loop
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as executor:
+            result = await loop.run_in_executor(
+                executor,
+                run_automation_in_thread,
+                request.student_id,
+                request.apply_url,
+                request.username,
+                request.password,
+                request.portal_type
+            )
+        
+        return result
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Automation failed: {str(e)}")
 
