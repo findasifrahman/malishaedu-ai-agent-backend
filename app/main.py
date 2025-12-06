@@ -43,7 +43,7 @@ logger.info(f"CORS allowed origins: {allowed_origins}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins if allowed_origins else ["*"],  # Fallback to allow all if empty
+    allow_origins=allowed_origins if allowed_origins else ["*"],  # Fallback to allow all if
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
