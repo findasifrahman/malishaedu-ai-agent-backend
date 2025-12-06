@@ -15,8 +15,13 @@ class RAGService:
         if top_k is None:
             top_k = self.top_k
         
-        # Generate query embedding
-        query_embedding = self.openai_service.generate_embedding(query)
+        # Generate query embedding - handle errors gracefully
+        try:
+            query_embedding = self.openai_service.generate_embedding(query)
+        except Exception as e:
+            # If embedding generation fails (e.g., regional restriction), return empty results
+            print(f"RAG search skipped due to embedding error: {e}")
+            return []
         
         # Convert to PostgreSQL array format string (safe since it's numeric)
         embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'

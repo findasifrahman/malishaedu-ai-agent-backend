@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from app.database import get_db
 from app.models import Conversation, User, Lead, Student
 from app.services.rag_service import RAGService
@@ -26,13 +26,40 @@ openai_service = OpenAIService()
 groq_service = GroqService()
 tavily_service = TavilyService()
 
+# In-memory conversation history storage
+# Maps chat_session_id or device_fingerprint to list of messages
+# Format: {"role": "user" | "assistant", "content": str}
+_conversation_history_store: Dict[str, List[Dict[str, str]]] = {}
+
+def get_conversation_history(session_key: str) -> List[Dict[str, str]]:
+    """Get conversation history for a session key (chat_session_id or device_fingerprint)"""
+    return _conversation_history_store.get(session_key, [])
+
+def append_to_conversation_history(session_key: str, role: str, content: str):
+    """Append a message to conversation history for a session key"""
+    if session_key not in _conversation_history_store:
+        _conversation_history_store[session_key] = []
+    
+    _conversation_history_store[session_key].append({"role": role, "content": content})
+    
+    # Keep only last 12 messages (6 exchanges)
+    if len(_conversation_history_store[session_key]) > 12:
+        _conversation_history_store[session_key] = _conversation_history_store[session_key][-12:]
+
+def clear_conversation_history(session_key: str):
+    """Clear conversation history for a session (for new chat sessions)"""
+    if session_key in _conversation_history_store:
+        del _conversation_history_store[session_key]
+
 class ChatMessage(BaseModel):
     role: str
     content: str
 
 class ChatRequest(BaseModel):
     message: str
-    device_fingerprint: Optional[str] = None
+    device_fingerprint: Optional[str] = None  # Keep for backward compatibility
+    chat_session_id: Optional[str] = None  # New: per-chat session identifier
+    messages: Optional[List[ChatMessage]] = None  # New: frontend can send conversation history
     use_groq: bool = False
 
 class ChatResponse(BaseModel):
@@ -44,6 +71,8 @@ class ChatResponse(BaseModel):
     used_tavily: bool = False
     missing_documents: Optional[List[str]] = None
     days_to_deadline: Optional[int] = None
+    show_lead_form: bool = False  # Flag to show lead capture form
+    lead_form_prefill: Optional[Dict[str, Any]] = None  # Pre-fill data for lead form
 
 # System prompt for the agent
 AGENT_SYSTEM_PROMPT = """You are the MalishaEdu AI Enrollment Agent, a friendly and knowledgeable assistant helping students with:
@@ -82,31 +111,50 @@ AGENT_SYSTEM_PROMPT = """You are the MalishaEdu AI Enrollment Agent, a friendly 
 def get_or_create_conversation(
     db: Session, 
     user_id: Optional[int] = None, 
-    device_fingerprint: Optional[str] = None
-) -> Conversation:
-    """Get or create conversation for user/device"""
+    device_fingerprint: Optional[str] = None,
+    chat_session_id: Optional[str] = None
+) -> Optional[Conversation]:
+    """
+    Get or create conversation for user/device/session.
+    
+    For logged-in users: Use user_id (persist in DB).
+    For anonymous users: Use chat_session_id (persist in DB only if chat_session_id provided).
+    If no chat_session_id for anonymous users, return None (don't persist).
+    """
     if user_id:
+        # Logged-in user: use user_id
         conversation = db.query(Conversation).filter(
             Conversation.user_id == user_id
         ).first()
-    elif device_fingerprint:
+        if not conversation:
+            conversation = Conversation(
+                user_id=user_id,
+                chat_session_id=chat_session_id,
+                messages=[]
+            )
+            db.add(conversation)
+            db.commit()
+            db.refresh(conversation)
+        return conversation
+    elif chat_session_id:
+        # Anonymous user with chat_session_id: use chat_session_id
         conversation = db.query(Conversation).filter(
-            Conversation.device_fingerprint == device_fingerprint
+            Conversation.chat_session_id == chat_session_id,
+            Conversation.user_id.is_(None)  # Only anonymous conversations
         ).first()
+        if not conversation:
+            conversation = Conversation(
+                chat_session_id=chat_session_id,
+                device_fingerprint=device_fingerprint,  # Keep for backward compatibility
+                messages=[]
+            )
+            db.add(conversation)
+            db.commit()
+            db.refresh(conversation)
+        return conversation
     else:
-        conversation = None
-    
-    if not conversation:
-        conversation = Conversation(
-            user_id=user_id,
-            device_fingerprint=device_fingerprint or str(uuid.uuid4()),
-            messages=[]
-        )
-        db.add(conversation)
-        db.commit()
-        db.refresh(conversation)
-    
-    return conversation
+        # Anonymous user without chat_session_id: don't persist
+        return None
 
 def update_conversation_messages(
     db: Session,
@@ -145,15 +193,56 @@ def collect_lead(db: Session, name: Optional[str], email: Optional[str],
 
 # Optional authentication for chat
 async def get_optional_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(HTTPBearer(auto_error=False))
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(HTTPBearer(auto_error=False)),
+    db: Session = Depends(get_db)
 ) -> Optional[User]:
     """Optional authentication - returns None if no token provided"""
+    from app.routers.auth import get_current_user
+    from jose import JWTError, jwt
+    from app.config import settings
+    from app.models import User
+    from fastapi import HTTPException, status
+    
     if not credentials:
+        print("DEBUG: get_optional_current_user - No credentials provided")
         return None
+    
+    token = credentials.credentials
+    print(f"DEBUG: get_optional_current_user - Token received: {token[:50] if token else 'None'}...")
+    
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
     try:
-        return get_current_user(credentials.credentials)
-    except:
+        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        user_id_str = payload.get("sub")
+        if user_id_str is None:
+            print(f"DEBUG: get_optional_current_user - No 'sub' claim in token. Payload: {payload}")
+            return None
+        try:
+            user_id: int = int(user_id_str)
+        except (ValueError, TypeError):
+            print(f"DEBUG: get_optional_current_user - Invalid user_id format: {user_id_str}")
+            return None
+    except JWTError as e:
+        print(f"DEBUG: get_optional_current_user - JWT Error: {str(e)}")
         return None
+    except Exception as e:
+        print(f"DEBUG: get_optional_current_user - Unexpected error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
+    
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        print(f"DEBUG: get_optional_current_user - User not found for ID: {user_id}")
+        return None
+    
+    print(f"DEBUG: get_optional_current_user - User authenticated: {user.id} ({user.role.value})")
+    return user
 
 @router.post("/", response_model=ChatResponse)
 async def chat(
@@ -180,24 +269,85 @@ async def chat(
         user_id = current_user.id if current_user else None
         user_role = current_user.role.value if current_user else "guest"
         
-        # Get or create conversation
-        conversation = get_or_create_conversation(
-            db, 
-            user_id=user_id, 
-            device_fingerprint=request.device_fingerprint
-        )
+        # DEBUG: Log authentication status
+        print(f"\n{'='*80}")
+        print(f"DEBUG: Chat Router - Authentication Check")
+        print(f"DEBUG: is_authenticated = {is_authenticated}")
+        print(f"DEBUG: user_id = {user_id}")
+        print(f"DEBUG: user_role = {user_role}")
+        print(f"DEBUG: current_user = {current_user}")
+        print(f"{'='*80}\n")
         
-        # Get conversation history (last 12 messages) - ALWAYS pass to agent
-        messages_history = conversation.messages or []
+        # Determine session key for in-memory storage
+        # Priority: chat_session_id > device_fingerprint > user_id
+        session_key = None
+        if request.chat_session_id:
+            session_key = f"session_{request.chat_session_id}"
+        elif request.device_fingerprint:
+            session_key = f"device_{request.device_fingerprint}"
+        elif user_id:
+            session_key = f"user_{user_id}"
+        
+        # Get conversation history from in-memory store
+        messages_history = []
+        conversation = None
+        
+        if is_authenticated:
+            # Logged-in user: use DB as primary, but also check in-memory store
+            conversation = get_or_create_conversation(
+                db, 
+                user_id=user_id, 
+                chat_session_id=request.chat_session_id
+            )
+            # Prefer in-memory store if available (more up-to-date), fallback to DB
+            if session_key:
+                messages_history = get_conversation_history(session_key)
+            if not messages_history and conversation:
+                messages_history = conversation.messages or []
+        else:
+            # Anonymous user: use in-memory store as primary source
+            if session_key:
+                messages_history = get_conversation_history(session_key)
+            
+            # Fallback: if no in-memory history and chat_session_id provided, try DB
+            if not messages_history and request.chat_session_id:
+                conversation = get_or_create_conversation(
+                    db,
+                    chat_session_id=request.chat_session_id,
+                    device_fingerprint=request.device_fingerprint
+                )
+                if conversation:
+                    messages_history = conversation.messages or []
+                    # Sync DB history to in-memory store
+                    if session_key and messages_history:
+                        _conversation_history_store[session_key] = messages_history.copy()
+        
+        # Append current user message to history BEFORE calling agent
+        if session_key:
+            append_to_conversation_history(session_key, "user", request.message)
+            # Refresh messages_history to include the new user message
+            messages_history = get_conversation_history(session_key)
+        
+        # Check if lead exists for this chat_session_id (for anonymous users)
+        use_db = False
+        if not is_authenticated and request.chat_session_id:
+            from app.models import Lead
+            lead = db.query(Lead).filter(
+                Lead.chat_session_id == request.chat_session_id
+            ).first()
+            use_db = lead is not None
         
         # Route to appropriate agent
+        show_lead_form = False  # Initialize to False, will be set by SalesAgent
+        
         if not is_authenticated:
             # NO authenticated user_id → Use SalesAgent
             agent = SalesAgent(db)
             result = agent.generate_response(
                 user_message=request.message,
                 conversation_history=messages_history,
-                device_fingerprint=request.device_fingerprint
+                chat_session_id=request.chat_session_id,
+                use_db=use_db
             )
             
             agent_type = "sales"
@@ -206,6 +356,16 @@ async def chat(
             used_tavily = bool(result.get('tavily_context'))
             missing_documents = None
             days_to_deadline = None
+            show_lead_form = result.get('show_lead_form', False)
+            lead_form_prefill = result.get('lead_form_prefill', {})
+            
+            # DEBUG: Log show_lead_form flag to verify it's being set
+            print(f"\n{'='*80}")
+            print(f"DEBUG: SalesAgent result - show_lead_form = {show_lead_form}")
+            print(f"DEBUG: lead_form_prefill = {lead_form_prefill}")
+            print(f"DEBUG: result keys = {list(result.keys())}")
+            print(f"DEBUG: result['show_lead_form'] = {result.get('show_lead_form')}")
+            print(f"{'='*80}\n")
             
         elif user_role == "admin":
             # Admin users → Route to admin tools (not LLM chat)
@@ -217,11 +377,13 @@ async def chat(
                 used_rag=False,
                 used_tavily=False,
                 missing_documents=None,
-                days_to_deadline=None
+                days_to_deadline=None,
+                show_lead_form=False
             )
             
         elif user_role == "student":
             # Authenticated user_id AND Student row exists → Use AdmissionAgent
+            print("DEBUG: Routing to AdmissionAgent (student role)")
             db_query_service = DBQueryService(db)
             student = db_query_service.get_student_profile(user_id)
             
@@ -247,10 +409,35 @@ async def chat(
         else:
             raise HTTPException(status_code=400, detail=f"Unknown user role: {user_role}")
         
-        # Update conversation with new messages
-        update_conversation_messages(db, conversation, request.message, result['response'])
+        # Append assistant response to in-memory history
+        if session_key:
+            append_to_conversation_history(session_key, "assistant", result['response'])
+        
+        # Update conversation in DB (only if conversation exists or should be created)
+        if conversation:
+            update_conversation_messages(db, conversation, request.message, result['response'])
+        elif not is_authenticated and request.chat_session_id:
+            # Anonymous user with chat_session_id: create conversation if it doesn't exist
+            conversation = get_or_create_conversation(
+                db,
+                chat_session_id=request.chat_session_id,
+                device_fingerprint=request.device_fingerprint
+            )
+            if conversation:
+                update_conversation_messages(db, conversation, request.message, result['response'])
         
         # Return agent's structured output
+        final_show_lead_form = show_lead_form if 'show_lead_form' in locals() else False
+        final_lead_form_prefill = result.get('lead_form_prefill', {}) if 'lead_form_prefill' in result else (lead_form_prefill if 'lead_form_prefill' in locals() else {})
+        
+        # DEBUG: Log final response to verify show_lead_form is being sent
+        print(f"\n{'='*80}")
+        print(f"DEBUG: ChatResponse being returned - show_lead_form = {final_show_lead_form}")
+        print(f"DEBUG: lead_form_prefill = {final_lead_form_prefill}")
+        print(f"DEBUG: agent_type = {agent_type}")
+        print(f"DEBUG: response length = {len(result['response']) if 'response' in result else 'N/A'} chars")
+        print(f"{'='*80}\n")
+        
         return ChatResponse(
             response=result['response'],
             agent_type=agent_type,
@@ -259,7 +446,9 @@ async def chat(
             used_rag=used_rag,
             used_tavily=used_tavily,
             missing_documents=missing_documents,
-            days_to_deadline=days_to_deadline
+            days_to_deadline=days_to_deadline,
+            show_lead_form=final_show_lead_form,
+            lead_form_prefill=final_lead_form_prefill
         )
     
     except HTTPException:
@@ -285,28 +474,88 @@ async def chat_stream(
         user_id = current_user.id if current_user else None
         user_role = current_user.role.value if current_user else "guest"
         
-        # Get or create conversation
-        conversation = get_or_create_conversation(
-            db, 
-            user_id=user_id, 
-            device_fingerprint=request.device_fingerprint
-        )
+        # Determine session key for in-memory storage
+        session_key = None
+        if request.chat_session_id:
+            session_key = f"session_{request.chat_session_id}"
+        elif request.device_fingerprint:
+            session_key = f"device_{request.device_fingerprint}"
+        elif user_id:
+            session_key = f"user_{user_id}"
         
-        # Get conversation history (last 12 messages)
-        messages_history = conversation.messages or []
+        # Get conversation history from in-memory store
+        messages_history = []
+        conversation = None
+        
+        if is_authenticated:
+            # Logged-in user: use DB as primary, but also check in-memory store
+            conversation = get_or_create_conversation(
+                db, 
+                user_id=user_id, 
+                chat_session_id=request.chat_session_id
+            )
+            # Prefer in-memory store if available (more up-to-date), fallback to DB
+            if session_key:
+                messages_history = get_conversation_history(session_key)
+            if not messages_history and conversation:
+                messages_history = conversation.messages or []
+        else:
+            # Anonymous user: use in-memory store as primary source
+            if session_key:
+                messages_history = get_conversation_history(session_key)
+            
+            # Fallback: if no in-memory history and chat_session_id provided, try DB
+            if not messages_history and request.chat_session_id:
+                conversation = get_or_create_conversation(
+                    db,
+                    chat_session_id=request.chat_session_id,
+                    device_fingerprint=request.device_fingerprint
+                )
+                if conversation:
+                    messages_history = conversation.messages or []
+                    # Sync DB history to in-memory store
+                    if session_key and messages_history:
+                        _conversation_history_store[session_key] = messages_history.copy()
+        
+        # Append current user message to history BEFORE calling agent
+        if session_key:
+            append_to_conversation_history(session_key, "user", request.message)
+            # Refresh messages_history to include the new user message
+            messages_history = get_conversation_history(session_key)
+        
+        # Check if lead exists for this chat_session_id (for anonymous users)
+        use_db = False
+        if not is_authenticated and request.chat_session_id:
+            from app.models import Lead
+            lead = db.query(Lead).filter(
+                Lead.chat_session_id == request.chat_session_id
+            ).first()
+            use_db = lead is not None
         
         # Route to appropriate agent (same logic as regular endpoint)
+        show_lead_form = False
         if not is_authenticated:
             # SalesAgent for non-authenticated users
             agent = SalesAgent(db)
             result = agent.generate_response(
                 user_message=request.message,
                 conversation_history=messages_history,
-                device_fingerprint=request.device_fingerprint
+                chat_session_id=request.chat_session_id,
+                use_db=use_db
             )
             full_response = result['response']
             used_rag = bool(result.get('rag_context'))
             used_tavily = bool(result.get('tavily_context'))
+            show_lead_form = result.get('show_lead_form', False)
+            lead_form_prefill = result.get('lead_form_prefill', {})
+            
+            # DEBUG: Log show_lead_form in streaming endpoint
+            print(f"\n{'='*80}")
+            print(f"DEBUG: chat_stream - show_lead_form = {show_lead_form}")
+            print(f"DEBUG: lead_form_prefill = {lead_form_prefill}")
+            print(f"DEBUG: result keys = {list(result.keys())}")
+            print(f"DEBUG: result['show_lead_form'] = {result.get('show_lead_form')}")
+            print(f"{'='*80}\n")
             
         elif user_role == "admin":
             # Admin users → Return admin tools message
@@ -339,8 +588,21 @@ async def chat_stream(
             used_rag = False
             used_tavily = False
         
-        # Update conversation
-        update_conversation_messages(db, conversation, request.message, full_response)
+        # Append assistant response to in-memory history
+        if session_key:
+            append_to_conversation_history(session_key, "assistant", full_response)
+        
+        # Update conversation in DB (only if conversation exists or should be created)
+        if conversation:
+            update_conversation_messages(db, conversation, request.message, full_response)
+        elif not is_authenticated and request.chat_session_id:
+            conversation = get_or_create_conversation(
+                db,
+                chat_session_id=request.chat_session_id,
+                device_fingerprint=request.device_fingerprint
+            )
+            if conversation:
+                update_conversation_messages(db, conversation, request.message, full_response)
         
         # Stream the response
         async def generate_stream():
@@ -349,7 +611,8 @@ async def chat_stream(
             for i, word in enumerate(words):
                 chunk = word + (' ' if i < len(words) - 1 else '')
                 yield f"data: {json.dumps({'content': chunk, 'done': False})}\n\n"
-            yield f"data: {json.dumps({'content': '', 'done': True, 'used_rag': used_rag, 'used_tavily': used_tavily})}\n\n"
+            lead_form_prefill = result.get('lead_form_prefill', {}) if 'lead_form_prefill' in result else {}
+            yield f"data: {json.dumps({'content': '', 'done': True, 'used_rag': used_rag, 'used_tavily': used_tavily, 'show_lead_form': show_lead_form, 'lead_form_prefill': lead_form_prefill})}\n\n"
         
         return StreamingResponse(generate_stream(), media_type="text/event-stream")
     

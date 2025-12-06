@@ -45,8 +45,8 @@ class DBQueryService:
         self,
         university_id: Optional[int] = None,
         name: Optional[str] = None,
-        degree_level: Optional[DegreeLevel] = None,
-        teaching_language: Optional[TeachingLanguage] = None,
+        degree_level: Optional[str] = None,  # Changed from DegreeLevel enum to str
+        teaching_language: Optional[str] = None,  # Changed from TeachingLanguage enum to str
         discipline: Optional[str] = None,
         is_featured: Optional[bool] = None,
         limit: int = 10
@@ -57,11 +57,30 @@ class DBQueryService:
         if university_id:
             query = query.filter(Major.university_id == university_id)
         if name:
-            query = query.filter(Major.name.ilike(f"%{name}%"))
+            # Use ILIKE for case-insensitive partial matching
+            # This handles variations like "Computer Science & Technology" vs "Computer Science and Technology"
+            # Split name into words and match each word
+            name_words = name.split()
+            if len(name_words) > 1:
+                # Multiple words - match all words (AND condition)
+                conditions = [Major.name.ilike(f"%{word}%") for word in name_words]
+                query = query.filter(and_(*conditions))
+            else:
+                # Single word or abbreviation
+                query = query.filter(Major.name.ilike(f"%{name}%"))
         if degree_level:
-            query = query.filter(Major.degree_level == degree_level)
+            # Handle both string and enum types for backward compatibility
+            if isinstance(degree_level, str):
+                query = query.filter(Major.degree_level.ilike(f"%{degree_level}%"))
+            else:
+                # If it's an enum, convert to string for comparison
+                query = query.filter(Major.degree_level == str(degree_level.value) if hasattr(degree_level, 'value') else str(degree_level))
         if teaching_language:
-            query = query.filter(Major.teaching_language == teaching_language)
+            # Handle both string and enum types
+            if isinstance(teaching_language, str):
+                query = query.filter(Major.teaching_language.ilike(f"%{teaching_language}%"))
+            else:
+                query = query.filter(Major.teaching_language == str(teaching_language.value) if hasattr(teaching_language, 'value') else str(teaching_language))
         if discipline:
             query = query.filter(Major.discipline.ilike(f"%{discipline}%"))
         if is_featured is not None:
@@ -133,8 +152,11 @@ class DBQueryService:
     def format_major_info(self, major: Major) -> str:
         """Format major information as text for LLM"""
         info = f"Major: {major.name}\n"
-        info += f"Degree Level: {major.degree_level.value}\n"
-        info += f"Teaching Language: {major.teaching_language.value}\n"
+        # Handle both string and enum types
+        degree_level = major.degree_level if isinstance(major.degree_level, str) else (major.degree_level.value if hasattr(major.degree_level, 'value') else str(major.degree_level))
+        teaching_lang = major.teaching_language if isinstance(major.teaching_language, str) else (major.teaching_language.value if hasattr(major.teaching_language, 'value') else str(major.teaching_language))
+        info += f"Degree Level: {degree_level}\n"
+        info += f"Teaching Language: {teaching_lang}\n"
         if major.duration_years:
             info += f"Duration: {major.duration_years} years\n"
         if major.discipline:
@@ -146,14 +168,21 @@ class DBQueryService:
     def format_program_intake_info(self, intake: ProgramIntake) -> str:
         """Format program intake information as text for LLM with explicit EXACT value markers"""
         info = f"=== EXACT DATABASE VALUES - USE THESE EXACT NUMBERS ===\n"
-        info += f"Program Intake: {intake.intake_term.value} {intake.intake_year}\n"
+        # Handle intake_term (still enum) and convert to string
+        intake_term = intake.intake_term.value if hasattr(intake.intake_term, 'value') else str(intake.intake_term)
+        info += f"Program Intake: {intake_term} {intake.intake_year}\n"
         
         # Include major information (for duration calculation)
         if intake.major:
             info += f"Major: {intake.major.name}\n"
             # Use intake's degree_type if available, otherwise use major's degree_level
-            degree_info = intake.degree_type.value if intake.degree_type else (intake.major.degree_level.value if intake.major.degree_level else "N/A")
-            info += f"Degree Type: {degree_info}\n"
+            # Handle both string and enum types
+            degree_info = None
+            if intake.degree_type:
+                degree_info = intake.degree_type if isinstance(intake.degree_type, str) else (intake.degree_type.value if hasattr(intake.degree_type, 'value') else str(intake.degree_type))
+            elif intake.major.degree_level:
+                degree_info = intake.major.degree_level if isinstance(intake.major.degree_level, str) else (intake.major.degree_level.value if hasattr(intake.major.degree_level, 'value') else str(intake.major.degree_level))
+            info += f"Degree Type: {degree_info or 'N/A'}\n"
             
             # Use intake's duration if available, otherwise use major's duration
             duration = intake.duration_years if intake.duration_years is not None else (intake.major.duration_years if intake.major.duration_years else None)
@@ -164,8 +193,13 @@ class DBQueryService:
                 info += f"Expected Graduation Year: {expected_end_year}\n"
         
         # Teaching language (use intake's if available, otherwise major's)
-        teaching_lang = intake.teaching_language.value if intake.teaching_language else (intake.major.teaching_language.value if intake.major and intake.major.teaching_language else "N/A")
-        info += f"Teaching Language: {teaching_lang}\n"
+        # Handle both string and enum types
+        teaching_lang = None
+        if intake.teaching_language:
+            teaching_lang = intake.teaching_language if isinstance(intake.teaching_language, str) else (intake.teaching_language.value if hasattr(intake.teaching_language, 'value') else str(intake.teaching_language))
+        elif intake.major and intake.major.teaching_language:
+            teaching_lang = intake.major.teaching_language if isinstance(intake.major.teaching_language, str) else (intake.major.teaching_language.value if hasattr(intake.major.teaching_language, 'value') else str(intake.major.teaching_language))
+        info += f"Teaching Language: {teaching_lang or 'N/A'}\n"
         
         if intake.application_deadline:
             deadline = intake.application_deadline

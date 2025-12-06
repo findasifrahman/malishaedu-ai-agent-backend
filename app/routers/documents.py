@@ -84,6 +84,42 @@ async def upload_document(
                 student.passport_expiry = datetime.fromisoformat(extracted_data["expiry_date"])
             except:
                 pass
+        # Update passport_scanned_url
+        student.passport_scanned_url = r2_url
+    
+    # Update Student table URL fields based on document type
+    if doc_type_enum == DocumentType.PHOTO:
+        student.passport_photo_url = r2_url
+    elif doc_type_enum == DocumentType.DIPLOMA:
+        student.highest_degree_diploma_url = r2_url
+    elif doc_type_enum == DocumentType.TRANSCRIPT:
+        student.academic_transcript_url = r2_url
+    elif doc_type_enum == DocumentType.NON_CRIMINAL:
+        student.police_clearance_url = r2_url
+    elif doc_type_enum == DocumentType.PHYSICAL_EXAM:
+        student.physical_examination_form_url = r2_url
+    elif doc_type_enum == DocumentType.BANK_STATEMENT:
+        student.bank_statement_url = r2_url
+    elif doc_type_enum == DocumentType.RECOMMENDATION_LETTER:
+        # Use recommendation_letter_1_url if empty, else recommendation_letter_2_url
+        if not student.recommendation_letter_1_url:
+            student.recommendation_letter_1_url = r2_url
+        elif not student.recommendation_letter_2_url:
+            student.recommendation_letter_2_url = r2_url
+    elif doc_type_enum == DocumentType.STUDY_PLAN:
+        student.study_plan_url = r2_url
+    elif doc_type_enum == DocumentType.ENGLISH_PROFICIENCY:
+        student.english_certificate_url = r2_url
+    elif doc_type_enum == DocumentType.PASSPORT_PAGE:
+        student.passport_page_url = r2_url
+    elif doc_type_enum == DocumentType.CV_RESUME:
+        student.cv_resume_url = r2_url
+    elif doc_type_enum == DocumentType.JW202_JW201:
+        student.jw202_jw201_url = r2_url
+    elif doc_type_enum == DocumentType.GUARANTEE_LETTER:
+        student.guarantee_letter_url = r2_url
+    elif doc_type_enum == DocumentType.BANK_GUARANTOR_LETTER:
+        student.bank_guarantor_letter_url = r2_url
     
     # Create document record
     document = Document(

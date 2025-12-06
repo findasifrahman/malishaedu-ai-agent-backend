@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, JSON, Float, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, JSON, Float, Enum as SQLEnum, TypeDecorator
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from pgvector.sqlalchemy import Vector
@@ -11,6 +11,7 @@ class UserRole(str, enum.Enum):
 
 class DocumentType(str, enum.Enum):
     PASSPORT = "passport"
+    PASSPORT_PAGE = "passport_page"
     PHOTO = "photo"
     DIPLOMA = "diploma"
     TRANSCRIPT = "transcript"
@@ -21,13 +22,20 @@ class DocumentType(str, enum.Enum):
     SELF_INTRO_VIDEO = "self_intro_video"
     STUDY_PLAN = "study_plan"
     ENGLISH_PROFICIENCY = "english_proficiency"
+    CV_RESUME = "cv_resume"
+    JW202_JW201 = "jw202_jw201"
+    GUARANTEE_LETTER = "guarantee_letter"
+    BANK_GUARANTOR_LETTER = "bank_guarantor_letter"
 
 class ApplicationStatus(str, enum.Enum):
+    NOT_APPLIED = "not_applied"
     DRAFT = "draft"
+    APPLIED = "applied"
     SUBMITTED = "submitted"
     UNDER_REVIEW = "under_review"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
+    SUCCEEDED = "succeeded"
 
 class ComplaintStatus(str, enum.Enum):
     PENDING = "pending"
@@ -65,10 +73,60 @@ class ApplicationStage(str, enum.Enum):
     ENROLLED = "enrolled"
 
 class ScholarshipPreference(str, enum.Enum):
-    CSC = "CSC"
-    UNIVERSITY = "University"
-    PROVINCE = "Province"
-    SELF_FUNDED = "Self-funded"
+    TYPE_A = "Type-A"  # Tuition free, accommodation free, stipend up to 35000 CNY (depends on university and major)
+    TYPE_B = "Type-B"  # Tuition free, accommodation free, no stipend
+    TYPE_C = "Type-C"  # Only tuition fee free
+    TYPE_D = "Type-D"  # Only tuition fee free (alternative)
+    PARTIAL_LOW = "Partial-Low"  # Partial Scholarship (<5000 CNY/year): 500 USD
+    PARTIAL_MID = "Partial-Mid"  # Partial Scholarship (5100-10000 CNY/year): 350 USD
+    PARTIAL_HIGH = "Partial-High"  # Partial Scholarship (10000-15000 CNY/year): 300 USD
+    SELF_PAID = "Self-Paid"  # Self-Paid: 150 USD
+    NONE = "None"  # No scholarship (for Language programs)
+
+# Custom TypeDecorator to handle enum value mapping for VARCHAR columns
+class ScholarshipPreferenceType(TypeDecorator):
+    """Custom type that maps VARCHAR values to ScholarshipPreference enum values"""
+    impl = String
+    cache_ok = True
+    
+    def __init__(self):
+        super().__init__(50)  # VARCHAR(50)
+    
+    def process_bind_param(self, value, dialect):
+        """Convert enum to string value when writing to database"""
+        if value is None:
+            return None
+        if isinstance(value, ScholarshipPreference):
+            return value.value
+        if isinstance(value, str):
+            # Validate that the string is a valid enum value
+            try:
+                return ScholarshipPreference(value).value
+            except ValueError:
+                # If it's already a valid value string, return it
+                valid_values = [e.value for e in ScholarshipPreference]
+                if value in valid_values:
+                    return value
+                raise ValueError(f"Invalid scholarship preference: {value}")
+        return str(value)
+    
+    def process_result_value(self, value, dialect):
+        """Convert string value to enum when reading from database"""
+        if value is None:
+            return None
+        if isinstance(value, ScholarshipPreference):
+            return value
+        # Map string value to enum member
+        try:
+            # Find enum member by value
+            for member in ScholarshipPreference:
+                if member.value == value:
+                    return member
+            # If not found, try direct lookup (for backwards compatibility)
+            return ScholarshipPreference(value)
+        except (ValueError, KeyError):
+            # If value doesn't match any enum, return None or raise
+            return None
 
 class CSCAStatus(str, enum.Enum):
     NOT_REGISTERED = "not_registered"
@@ -110,10 +168,13 @@ class Lead(Base):
     email = Column(String)
     phone = Column(String)
     country = Column(String)
-    device_fingerprint = Column(String)
+    device_fingerprint = Column(String, nullable=True)  # Keep for backward compatibility
+    chat_session_id = Column(String, nullable=True, index=True)  # New: per-chat session identifier
     source = Column(String, default="chat")
     interested_university_id = Column(Integer, ForeignKey("universities.id"), nullable=True)
     interested_major_id = Column(Integer, ForeignKey("majors.id"), nullable=True)
+    intake_term = Column(String, nullable=True)  # "March", "September", "Other"
+    intake_year = Column(Integer, nullable=True)  # e.g., 2026
     notes = Column(Text, nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # Link to user when converted
     converted_at = Column(DateTime(timezone=True), nullable=True)  # When lead was converted to user
@@ -128,7 +189,8 @@ class Conversation(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    device_fingerprint = Column(String, nullable=True)
+    device_fingerprint = Column(String, nullable=True)  # Keep for backward compatibility
+    chat_session_id = Column(String, nullable=True, index=True)  # New: per-chat session identifier for anonymous users
     messages = Column(JSON)  # Store last 12 messages
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -280,6 +342,8 @@ class Student(Base):
     highest_degree_name = Column(String, nullable=True)
     highest_degree_institution = Column(String, nullable=True)
     highest_degree_country = Column(String, nullable=True)
+    highest_degree_year = Column(Integer, nullable=True)  # Year of graduation
+    highest_degree_cgpa = Column(Float, nullable=True)  # CGPA/GPA score
     academic_transcript_url = Column(String, nullable=True)
     
     # Other Required Docs
@@ -292,8 +356,13 @@ class Student(Base):
     residence_permit_url = Column(String, nullable=True)
     study_certificate_china_url = Column(String, nullable=True)
     application_form_url = Column(String, nullable=True)
-    chinese_language_certificate_url = Column(String, nullable=True)
     study_plan_url = Column(String, nullable=True)  # Study plan / motivation letter
+    passport_page_url = Column(String, nullable=True)  # Additional passport pages
+    cv_resume_url = Column(String, nullable=True)  # CV/Resume
+    jw202_jw201_url = Column(String, nullable=True)  # JW202/JW201 form
+    bank_guarantor_letter_url = Column(String, nullable=True)  # Bank guarantor letter (if bank guarantee is not in student's name)
+    relation_with_guarantor = Column(String, nullable=True)  # Relationship with guarantor (optional)
+    is_the_bank_guarantee_in_students_name = Column(Boolean, nullable=False, default=True)  # Mandatory field
     others_1_url = Column(String, nullable=True)
     others_2_url = Column(String, nullable=True)
     
@@ -302,7 +371,7 @@ class Student(Base):
     target_major_id = Column(Integer, ForeignKey("majors.id"), nullable=True)
     target_intake_id = Column(Integer, ForeignKey("program_intakes.id"), nullable=True)
     study_level = Column(SQLEnum(DegreeLevel), nullable=True)
-    scholarship_preference = Column(SQLEnum(ScholarshipPreference), nullable=True)
+    scholarship_preference = Column(ScholarshipPreferenceType(), nullable=True)
     application_stage = Column(SQLEnum(ApplicationStage), default=ApplicationStage.LEAD)
     missing_documents = Column(Text, nullable=True)  # Auto-filled summary
     
@@ -339,9 +408,15 @@ class Application(Base):
     id = Column(Integer, primary_key=True, index=True)
     student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
     program_intake_id = Column(Integer, ForeignKey("program_intakes.id"), nullable=False)  # Link to specific intake
+    degree_level = Column(String, nullable=True)  # Degree level: Bachelor, Master, PhD, Language, etc. (for LLM understanding)
+    application_state = Column(SQLEnum(ApplicationStatus), default=ApplicationStatus.NOT_APPLIED)  # Application state: not_applied, applied, rejected, succeeded
     application_fee_paid = Column(Boolean, default=False)  # Whether application fee has been paid
     application_fee_amount = Column(Float, nullable=True)  # Amount paid (stored at time of application)
-    status = Column(SQLEnum(ApplicationStatus), default=ApplicationStatus.DRAFT)
+    payment_fee_paid = Column(Float, default=0.0)  # Total payment fee paid so far
+    payment_fee_due = Column(Float, default=0.0)  # Total payment fee due
+    payment_fee_required = Column(Float, default=0.0)  # Total payment fee required for this program
+    scholarship_preference = Column(ScholarshipPreferenceType(), nullable=True)  # Type-A, Type-B, Type-C, Type-D, or None for Language programs
+    status = Column(SQLEnum(ApplicationStatus), default=ApplicationStatus.DRAFT)  # Legacy field, use application_state instead
     admin_notes = Column(Text, nullable=True)  # Admin can add notes about the application
     submitted_at = Column(DateTime(timezone=True), nullable=True)  # When student submitted application
     admin_reviewed_at = Column(DateTime(timezone=True), nullable=True)  # When admin started processing
@@ -369,6 +444,26 @@ class Document(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     student = relationship("Student", back_populates="documents")
+
+# Student Documents table - stores verification results
+class StudentDocument(Base):
+    __tablename__ = "student_documents"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
+    document_type = Column(String, nullable=False)  # e.g., "passport", "diploma", etc.
+    file_url = Column(String, nullable=False)  # Temporary URL before verification
+    r2_url = Column(String, nullable=True)  # Cloudflare R2 URL after verification
+    filename = Column(String, nullable=False)
+    file_size = Column(Integer, nullable=True)
+    verification_status = Column(String, nullable=False)  # "ok", "blurry", "fake", "incomplete"
+    verification_reason = Column(Text, nullable=True)  # AI explanation
+    extracted_data = Column(JSON, nullable=True)  # Extracted data from AI
+    verified = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    student = relationship("Student")
 
 # Complaints table
 class Complaint(Base):

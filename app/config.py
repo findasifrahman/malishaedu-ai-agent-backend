@@ -6,7 +6,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     OPENAI_API_KEY: str
     TAVILY_API_KEY: str
-    OPENAI_MODEL: str = "gpt-4.1"
+    OPENAI_MODEL: str = "gpt-4.1-mini"
     OPENAI_ROUTER_MODEL: str = "gpt-4.1-mini"
     OPENAI_DISTILL_MODEL: str = "gpt-4.1"
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"

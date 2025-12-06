@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
-from typing import Optional, List
-from datetime import datetime
+from pydantic import BaseModel, field_validator
+from typing import Optional, List, Union
+from datetime import datetime, date
 from app.database import get_db
 from app.models import Student, User, Application, Document, DocumentType, ApplicationStatus
 from app.routers.auth import get_current_user
@@ -14,8 +14,10 @@ class StudentProfile(BaseModel):
     full_name: Optional[str] = None
     given_name: Optional[str] = None
     family_name: Optional[str] = None
+    father_name: Optional[str] = None
+    mother_name: Optional[str] = None
     gender: Optional[str] = None
-    date_of_birth: Optional[datetime] = None
+    date_of_birth: Optional[Union[str, datetime, date]] = None
     country_of_citizenship: Optional[str] = None
     current_country_of_residence: Optional[str] = None
     phone: Optional[str] = None
@@ -24,7 +26,24 @@ class StudentProfile(BaseModel):
     
     # Passport information
     passport_number: Optional[str] = None
-    passport_expiry_date: Optional[datetime] = None
+    passport_expiry_date: Optional[Union[str, datetime, date]] = None
+    
+    class Config:
+        # Allow empty strings to be converted to None
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None,
+            date: lambda v: v.isoformat() if v else None
+        }
+    
+    # Scores
+    hsk_level: Optional[int] = None
+    csca_status: Optional[str] = None
+    csca_score_math: Optional[float] = None
+    csca_score_specialized_chinese: Optional[float] = None
+    csca_score_physics: Optional[float] = None
+    csca_score_chemistry: Optional[float] = None
+    english_test_type: Optional[str] = None
+    english_test_score: Optional[float] = None
     
     # Application intent
     target_university_id: Optional[int] = None
@@ -39,15 +58,68 @@ class StudentProfile(BaseModel):
     emergency_contact_name: Optional[str] = None
     emergency_contact_phone: Optional[str] = None
     emergency_contact_relationship: Optional[str] = None
-    planned_arrival_date: Optional[datetime] = None
+    planned_arrival_date: Optional[Union[str, datetime, date]] = None
     intended_address_china: Optional[str] = None
     previous_visa_china: Optional[bool] = None
     previous_visa_details: Optional[str] = None
     previous_travel_to_china: Optional[bool] = None
     previous_travel_details: Optional[str] = None
+    
+    # Highest degree information
+    highest_degree_name: Optional[str] = None
+    highest_degree_institution: Optional[str] = None
+    highest_degree_country: Optional[str] = None
+    highest_degree_year: Optional[int] = None
+    highest_degree_cgpa: Optional[float] = None
+    
+    # Guarantor information
+    relation_with_guarantor: Optional[str] = None
+    is_the_bank_guarantee_in_students_name: Optional[bool] = None
+    
+    @field_validator('full_name', 'given_name', 'family_name', 'father_name', 'mother_name', 
+                     'gender', 'country_of_citizenship', 'current_country_of_residence', 
+                     'phone', 'email', 'wechat_id', 'passport_number', 'home_address', 
+                     'current_address', 'emergency_contact_name', 'emergency_contact_phone', 
+                     'emergency_contact_relationship', 'intended_address_china', 
+                     'previous_visa_details', 'previous_travel_details', mode='before')
+    @classmethod
+    def empty_str_to_none(cls, v):
+        """Convert empty strings to None for optional string fields"""
+        if isinstance(v, str) and v.strip() == '':
+            return None
+        return v
+    
+    @field_validator('date_of_birth', 'passport_expiry_date', 'planned_arrival_date', mode='before')
+    @classmethod
+    def parse_date(cls, v):
+        """Parse date string to datetime object"""
+        if v is None or v == '':
+            return None
+        if isinstance(v, datetime) or isinstance(v, date):
+            return v
+        if isinstance(v, str):
+            # Try parsing YYYY-MM-DD format (from HTML date input)
+            try:
+                parsed = datetime.strptime(v, '%Y-%m-%d')
+                return parsed
+            except:
+                pass
+            # Try parsing ISO format
+            try:
+                return datetime.fromisoformat(v.replace('Z', '+00:00'))
+            except:
+                pass
+            # Try parsing other common formats
+            try:
+                return datetime.strptime(v, '%Y-%m-%dT%H:%M:%S')
+            except:
+                pass
+        return v
 
 class ApplicationCreate(BaseModel):
     program_intake_id: int  # Link to specific program intake
+    degree_level: Optional[str] = None  # Degree level: Bachelor, Master, PhD, Language, etc.
+    scholarship_preference: Optional[str] = None  # Type-A, Type-B, Type-C, Type-D, or None
 
 class ApplicationResponse(BaseModel):
     id: int
@@ -56,6 +128,7 @@ class ApplicationResponse(BaseModel):
     major_name: str
     intake_term: str
     intake_year: int
+    degree_level: Optional[str] = None
     application_fee: Optional[float] = None
     application_fee_paid: bool
     status: str
@@ -81,6 +154,8 @@ async def get_student_profile(
         "full_name": student.full_name,
         "given_name": student.given_name,
         "family_name": student.family_name,
+        "father_name": student.father_name,
+        "mother_name": student.mother_name,
         "gender": student.gender,
         "date_of_birth": student.date_of_birth.isoformat() if student.date_of_birth else None,
         "country_of_citizenship": student.country_of_citizenship,
@@ -98,6 +173,13 @@ async def get_student_profile(
         "application_stage": student.application_stage.value if student.application_stage else None,
         "home_address": student.home_address,
         "current_address": student.current_address,
+        "highest_degree_name": student.highest_degree_name,
+        "highest_degree_institution": student.highest_degree_institution,
+        "highest_degree_country": student.highest_degree_country,
+        "highest_degree_year": student.highest_degree_year,
+        "highest_degree_cgpa": student.highest_degree_cgpa,
+        "relation_with_guarantor": student.relation_with_guarantor,
+        "is_the_bank_guarantee_in_students_name": student.is_the_bank_guarantee_in_students_name,
         "emergency_contact_name": student.emergency_contact_name,
         "emergency_contact_phone": student.emergency_contact_phone,
         "emergency_contact_relationship": student.emergency_contact_relationship,
@@ -110,6 +192,7 @@ async def get_student_profile(
         "education_history": student.education_history,
         "employment_history": student.employment_history,
         "family_members": student.family_members,
+        "created_at": student.created_at.isoformat() if student.created_at else None,
     }
     
     return jsonable_encoder(student_dict)
@@ -134,6 +217,10 @@ async def update_student_profile(
         student.given_name = profile.given_name
     if profile.family_name is not None:
         student.family_name = profile.family_name
+    if profile.father_name is not None:
+        student.father_name = profile.father_name
+    if profile.mother_name is not None:
+        student.mother_name = profile.mother_name
     if profile.gender is not None:
         student.gender = profile.gender
     if profile.date_of_birth is not None:
@@ -153,7 +240,37 @@ async def update_student_profile(
     if profile.passport_number is not None:
         student.passport_number = profile.passport_number
     if profile.passport_expiry_date is not None:
-        student.passport_expiry_date = profile.passport_expiry_date
+        # Convert to datetime if it's a date object
+        if isinstance(profile.passport_expiry_date, date) and not isinstance(profile.passport_expiry_date, datetime):
+            student.passport_expiry_date = datetime.combine(profile.passport_expiry_date, datetime.min.time())
+        else:
+            student.passport_expiry_date = profile.passport_expiry_date
+    
+    # Scores
+    if profile.hsk_level is not None:
+        student.hsk_level = profile.hsk_level
+    if profile.csca_status is not None:
+        from app.models import CSCAStatus
+        try:
+            student.csca_status = CSCAStatus(profile.csca_status)
+        except ValueError:
+            pass
+    if profile.csca_score_math is not None:
+        student.csca_score_math = profile.csca_score_math
+    if profile.csca_score_specialized_chinese is not None:
+        student.csca_score_specialized_chinese = profile.csca_score_specialized_chinese
+    if profile.csca_score_physics is not None:
+        student.csca_score_physics = profile.csca_score_physics
+    if profile.csca_score_chemistry is not None:
+        student.csca_score_chemistry = profile.csca_score_chemistry
+    if profile.english_test_type is not None:
+        from app.models import EnglishTestType
+        try:
+            student.english_test_type = EnglishTestType(profile.english_test_type)
+        except ValueError:
+            pass
+    if profile.english_test_score is not None:
+        student.english_test_score = profile.english_test_score
     
     # Application intent
     if profile.target_university_id is not None:
@@ -187,7 +304,11 @@ async def update_student_profile(
     if profile.emergency_contact_relationship is not None:
         student.emergency_contact_relationship = profile.emergency_contact_relationship
     if profile.planned_arrival_date is not None:
-        student.planned_arrival_date = profile.planned_arrival_date
+        # Convert to datetime if it's a date object
+        if isinstance(profile.planned_arrival_date, date) and not isinstance(profile.planned_arrival_date, datetime):
+            student.planned_arrival_date = datetime.combine(profile.planned_arrival_date, datetime.min.time())
+        else:
+            student.planned_arrival_date = profile.planned_arrival_date
     if profile.intended_address_china is not None:
         student.intended_address_china = profile.intended_address_china
     if profile.previous_visa_china is not None:
@@ -198,6 +319,24 @@ async def update_student_profile(
         student.previous_travel_to_china = profile.previous_travel_to_china
     if profile.previous_travel_details is not None:
         student.previous_travel_details = profile.previous_travel_details
+    
+    # Highest degree information
+    if hasattr(profile, 'highest_degree_name') and profile.highest_degree_name is not None:
+        student.highest_degree_name = profile.highest_degree_name
+    if hasattr(profile, 'highest_degree_institution') and profile.highest_degree_institution is not None:
+        student.highest_degree_institution = profile.highest_degree_institution
+    if hasattr(profile, 'highest_degree_country') and profile.highest_degree_country is not None:
+        student.highest_degree_country = profile.highest_degree_country
+    if hasattr(profile, 'highest_degree_year') and profile.highest_degree_year is not None:
+        student.highest_degree_year = profile.highest_degree_year
+    if hasattr(profile, 'highest_degree_cgpa') and profile.highest_degree_cgpa is not None:
+        student.highest_degree_cgpa = profile.highest_degree_cgpa
+    
+    # Guarantor information
+    if hasattr(profile, 'relation_with_guarantor') and profile.relation_with_guarantor is not None:
+        student.relation_with_guarantor = profile.relation_with_guarantor
+    if hasattr(profile, 'is_the_bank_guarantee_in_students_name') and profile.is_the_bank_guarantee_in_students_name is not None:
+        student.is_the_bank_guarantee_in_students_name = profile.is_the_bank_guarantee_in_students_name
     
     db.commit()
     db.refresh(student)
@@ -229,14 +368,50 @@ async def create_application(
     if existing:
         raise HTTPException(status_code=400, detail="You already have an application for this program intake")
     
+    # Get degree_level from request or try to get from program_intake
+    degree_level = application.degree_level
+    if not degree_level and program_intake.degree_type:
+        degree_level = program_intake.degree_type
+    
+    # Set scholarship preference if provided
+    scholarship_pref = None
+    if application.scholarship_preference:
+        from app.models import ScholarshipPreference
+        try:
+            scholarship_pref = ScholarshipPreference(application.scholarship_preference)
+        except ValueError:
+            pass
+    
+    # Calculate payment fee required
+    from app.services.service_charge_calculator import calculate_payment_fee_required
+    
+    # Get application fee from program_intakes table (use 0 if null or 0)
+    university_application_fee = program_intake.application_fee if (program_intake.application_fee and program_intake.application_fee > 0) else 0.0
+    
+    payment_fee_required = calculate_payment_fee_required(
+        application_fee_rmb=university_application_fee,  # From program_intakes.application_fee (or 0 if null/0)
+        degree_level=degree_level or program_intake.degree_type or "",
+        teaching_language=program_intake.teaching_language or "",
+        scholarship_preference=application.scholarship_preference,
+        tuition_per_year=program_intake.tuition_per_year,
+        accommodation_fee=program_intake.accommodation_fee,
+        scholarship_info=program_intake.scholarship_info
+    )
+    
     # Create new application
     new_application = Application(
         student_id=student.id,
         program_intake_id=application.program_intake_id,
+        degree_level=degree_level,  # Store degree level for LLM understanding
         application_fee_amount=program_intake.application_fee,
         application_fee_paid=False,  # Fee payment handled separately
+        payment_fee_required=payment_fee_required,  # Total payment required (application fee + deposit + service charge)
+        payment_fee_due=payment_fee_required,  # Initially, all is due
+        payment_fee_paid=0.0,  # Nothing paid yet
+        scholarship_preference=scholarship_pref,
         status=ApplicationStatus.DRAFT
     )
+    
     db.add(new_application)
     db.commit()
     db.refresh(new_application)
@@ -248,6 +423,7 @@ async def create_application(
         major_name=program_intake.major.name,
         intake_term=program_intake.intake_term.value,
         intake_year=program_intake.intake_year,
+        degree_level=new_application.degree_level or program_intake.degree_type,
         application_fee=program_intake.application_fee,
         application_fee_paid=new_application.application_fee_paid,
         status=new_application.status.value,
@@ -278,9 +454,15 @@ async def get_applications(
                 "major_name": intake.major.name,
                 "intake_term": intake.intake_term.value,
                 "intake_year": intake.intake_year,
+                "degree_level": app.degree_level or intake.degree_type,  # Use stored degree_level or fallback to program_intake
                 "application_fee": intake.application_fee,
                 "application_fee_paid": app.application_fee_paid,
-                "status": app.status.value,
+                "application_state": app.application_state.value if app.application_state else (app.status.value if app.status else "not_applied"),
+                "status": app.status.value if app.status else "draft",  # Legacy field
+                "payment_fee_paid": app.payment_fee_paid or 0.0,
+                "payment_fee_due": app.payment_fee_due or 0.0,
+                "payment_fee_required": app.payment_fee_required or 0.0,
+                "scholarship_preference": app.scholarship_preference.value if app.scholarship_preference else None,
                 "submitted_at": app.submitted_at.isoformat() if app.submitted_at else None,
                 "result": app.result,
                 "created_at": app.created_at.isoformat() if app.created_at else None
@@ -327,4 +509,112 @@ async def get_document_status(
         "total": len(required_docs),
         "documents": doc_status
     }
+
+class ApplicationUpdate(BaseModel):
+    scholarship_preference: Optional[str] = None
+
+@router.put("/applications/{application_id}")
+async def update_application(
+    application_id: int,
+    application_update: ApplicationUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update an application (student can only update scholarship_preference)"""
+    student = db.query(Student).filter(Student.user_id == current_user.id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student profile not found")
+    
+    application = db.query(Application).filter(
+        Application.id == application_id,
+        Application.student_id == student.id
+    ).first()
+    
+    if not application:
+        raise HTTPException(status_code=404, detail="Application not found")
+    
+    # Student can only update scholarship_preference
+    if application_update.scholarship_preference is not None:
+        from app.models import ScholarshipPreference
+        try:
+            application.scholarship_preference = ScholarshipPreference(application_update.scholarship_preference)
+            
+            # Recalculate payment_fee_required when scholarship preference changes
+            if application.program_intake:
+                intake = application.program_intake
+                from app.services.service_charge_calculator import calculate_payment_fee_required
+                
+                # Get application fee from program_intakes table (use 0 if null or 0)
+                university_application_fee = intake.application_fee if (intake.application_fee and intake.application_fee > 0) else 0.0
+                
+                payment_fee_required = calculate_payment_fee_required(
+                    application_fee_rmb=university_application_fee,  # From program_intakes.application_fee (or 0 if null/0)
+                    degree_level=application.degree_level or intake.degree_type or "",
+                    teaching_language=intake.teaching_language or "",
+                    scholarship_preference=application_update.scholarship_preference,
+                    tuition_per_year=intake.tuition_per_year,
+                    accommodation_fee=intake.accommodation_fee,
+                    scholarship_info=intake.scholarship_info
+                )
+                
+                # Update payment fields
+                old_payment_required = application.payment_fee_required or 0.0
+                application.payment_fee_required = payment_fee_required
+                
+                # Adjust payment_fee_due based on the difference
+                # If payment_fee_paid exists, recalculate due amount
+                payment_paid = application.payment_fee_paid or 0.0
+                application.payment_fee_due = max(0.0, payment_fee_required - payment_paid)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid scholarship preference")
+    
+    db.commit()
+    db.refresh(application)
+    
+    # Return updated application
+    if application.program_intake:
+        intake = application.program_intake
+        return {
+            "id": application.id,
+            "program_intake_id": application.program_intake_id,
+            "university_name": intake.university.name,
+            "major_name": intake.major.name,
+            "intake_term": intake.intake_term.value,
+            "intake_year": intake.intake_year,
+            "application_state": application.application_state.value if application.application_state else "not_applied",
+            "scholarship_preference": application.scholarship_preference.value if application.scholarship_preference else None,
+            "payment_fee_paid": application.payment_fee_paid or 0.0,
+            "payment_fee_due": application.payment_fee_due or 0.0,
+            "payment_fee_required": application.payment_fee_required or 0.0
+        }
+    
+    return {"message": "Application updated successfully"}
+
+@router.delete("/applications/{application_id}")
+async def delete_application(
+    application_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete an application (only if not submitted)"""
+    student = db.query(Student).filter(Student.user_id == current_user.id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student profile not found")
+    
+    application = db.query(Application).filter(
+        Application.id == application_id,
+        Application.student_id == student.id
+    ).first()
+    
+    if not application:
+        raise HTTPException(status_code=404, detail="Application not found")
+    
+    # Only allow deletion if not submitted
+    if application.application_state and application.application_state.value in ['applied', 'submitted', 'under_review', 'accepted', 'succeeded']:
+        raise HTTPException(status_code=400, detail="Cannot delete submitted application")
+    
+    db.delete(application)
+    db.commit()
+    
+    return {"message": "Application deleted successfully"}
 

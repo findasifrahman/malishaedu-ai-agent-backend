@@ -1,68 +1,83 @@
 """
-Migration script to add application_fee and accommodation_fee to program_intakes table
-and update applications table to link to program_intake_id
-
-Run this script: python migrate_application_fields.py
-Or run the SQL file directly: psql -U postgres -d malishaedu -f migrate_application_fields.sql
+Migration script to add new fields to applications table:
+- application_state (replaces/extends status)
+- payment_fee_paid
+- payment_fee_due
+- payment_fee_required
+- scholarship_preference
 """
-import os
-import sys
+from sqlalchemy import create_engine, text
+from app.config import settings
 
-# Try to use psycopg2 if available
-try:
-    import psycopg2
-    from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-    from dotenv import load_dotenv
-    
-    load_dotenv()
-    
-    def migrate():
-        # Try to get DATABASE_URL first, then fall back to individual components
-        database_url = os.getenv("DATABASE_URL")
-        if database_url:
-            # Parse postgresql://user:password@host:port/database
-            # or postgresql+psycopg2://user:password@host:port/database
-            database_url = database_url.replace("postgresql+psycopg2://", "postgresql://")
-            database_url = database_url.replace("postgres://", "postgresql://")
-            conn = psycopg2.connect(database_url)
+def migrate():
+    db_url = settings.DATABASE_URL
+    # Ensure postgresql:// prefix
+    if not db_url.startswith('postgresql://') and not db_url.startswith('postgresql+psycopg2://'):
+        if db_url.startswith('postgres://'):
+            db_url = db_url.replace('postgres://', 'postgresql+psycopg2://', 1)
         else:
-            # Fall back to individual components
-            conn = psycopg2.connect(
-                host=os.getenv("DB_HOST", "localhost"),
-                port=os.getenv("DB_PORT", "5432"),
-                database=os.getenv("DB_NAME", "malishaedu"),
-                user=os.getenv("DB_USER", "postgres"),
-                password=os.getenv("DB_PASSWORD", "")
-            )
-        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-        cur = conn.cursor()
-        
+            db_url = f'postgresql+psycopg2://{db_url}'
+    engine = create_engine(db_url)
+    
+    with engine.connect() as conn:
+        # Start transaction
+        trans = conn.begin()
         try:
-            # Read and execute SQL file
-            sql_file_path = os.path.join(os.path.dirname(__file__), "migrate_application_fields.sql")
-            with open(sql_file_path, 'r') as f:
-                sql = f.read()
+            # Add new columns
+            print("Adding application_state column...")
+            conn.execute(text("""
+                ALTER TABLE applications 
+                ADD COLUMN IF NOT EXISTS application_state VARCHAR(50) DEFAULT 'not_applied'
+            """))
             
-            print("Running migration...")
-            cur.execute(sql)
+            print("Adding payment_fee_paid column...")
+            conn.execute(text("""
+                ALTER TABLE applications 
+                ADD COLUMN IF NOT EXISTS payment_fee_paid FLOAT DEFAULT 0.0
+            """))
+            
+            print("Adding payment_fee_due column...")
+            conn.execute(text("""
+                ALTER TABLE applications 
+                ADD COLUMN IF NOT EXISTS payment_fee_due FLOAT DEFAULT 0.0
+            """))
+            
+            print("Adding payment_fee_required column...")
+            conn.execute(text("""
+                ALTER TABLE applications 
+                ADD COLUMN IF NOT EXISTS payment_fee_required FLOAT DEFAULT 0.0
+            """))
+            
+            print("Adding scholarship_preference column...")
+            conn.execute(text("""
+                ALTER TABLE applications 
+                ADD COLUMN IF NOT EXISTS scholarship_preference VARCHAR(50)
+            """))
+            
+            # Migrate existing status to application_state
+            print("Migrating existing status to application_state...")
+            # Cast enum to text for comparison
+            conn.execute(text("""
+                UPDATE applications 
+                SET application_state = CASE 
+                    WHEN status::text = 'draft' THEN 'not_applied'
+                    WHEN status::text = 'submitted' THEN 'applied'
+                    WHEN status::text = 'under_review' THEN 'applied'
+                    WHEN status::text = 'accepted' THEN 'succeeded'
+                    WHEN status::text = 'rejected' THEN 'rejected'
+                    ELSE 'not_applied'
+                END
+                WHERE application_state IS NULL OR application_state = 'not_applied'
+            """))
+            
+            # Commit transaction
+            trans.commit()
             print("Migration completed successfully!")
             
         except Exception as e:
-            print(f"Error during migration: {e}")
+            trans.rollback()
+            print(f"Migration failed: {e}")
             raise
-        finally:
-            cur.close()
-            conn.close()
-    
-    if __name__ == "__main__":
-        migrate()
-        
-except ImportError:
-    print("=" * 60)
-    print("psycopg2 is not installed.")
-    print("\nPlease run the SQL file directly in your database:")
-    print("  psql -U postgres -d malishaedu -f migrate_application_fields.sql")
-    print("\nOr install psycopg2-binary:")
-    print("  pip install psycopg2-binary")
-    print("=" * 60)
-    sys.exit(1)
+
+if __name__ == "__main__":
+    migrate()

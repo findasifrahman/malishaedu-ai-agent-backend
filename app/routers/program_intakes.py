@@ -112,7 +112,9 @@ async def list_program_intakes(
         result.append({
             'id': intake.id,
             'university_id': intake.university_id,
+            'university_name': intake.university.name if intake.university else None,
             'major_id': intake.major_id,
+            'major_name': intake.major.name if intake.major else None,
             'intake_term': intake.intake_term.value if hasattr(intake.intake_term, 'value') else str(intake.intake_term),
             'intake_year': intake.intake_year,
             'application_deadline': intake.application_deadline.isoformat() if intake.application_deadline else None,

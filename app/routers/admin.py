@@ -63,12 +63,13 @@ async def get_admin_stats(
         Document.document_type == DocumentType.PASSPORT
     ).distinct(Document.student_id).count()
     
+    # is_ is a method on SQLAlchemy columns, not a direct import
     students_without_diploma = db.query(Student).outerjoin(
         Document, and_(
             Document.student_id == Student.id,
             Document.document_type == DocumentType.DIPLOMA
         )
-    ).filter(Document.id == None).count()
+    ).filter(Document.id.is_(None)).count()
     
     return {
         "leads": {

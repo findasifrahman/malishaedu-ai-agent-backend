@@ -13,11 +13,16 @@ class OpenAIService:
     
     def generate_embedding(self, text: str) -> List[float]:
         """Generate embedding using text-embedding-3-small"""
-        response = self.client.embeddings.create(
-            model=self.embedding_model,
-            input=text
-        )
-        return response.data[0].embedding
+        try:
+            response = self.client.embeddings.create(
+                model=self.embedding_model,
+                input=text
+            )
+            return response.data[0].embedding
+        except Exception as e:
+            # Handle regional restrictions or API errors gracefully
+            print(f"Error generating embedding (may be regional restriction): {e}")
+            raise
     
     def generate_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for multiple texts"""
