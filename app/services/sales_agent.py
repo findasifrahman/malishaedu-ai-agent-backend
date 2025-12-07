@@ -37,6 +37,7 @@ class StudentProfileState:
     ielts_score: Optional[float] = None
     budget_per_year: Optional[float] = None
     preferred_universities: List[str] = field(default_factory=list)
+    university_certainty: Optional[str] = None  # "certain" or "uncertain" - whether user is certain about their university choice
     phone: Optional[str] = None         # Phone number
     email: Optional[str] = None         # Email address
     whatsapp: Optional[str] = None      # WhatsApp number
@@ -100,20 +101,20 @@ MALISHAEDU PARTNER UNIVERSITIES & MAJORS (CRITICAL RULES):
 - MalishaEdu is partner with 31 universities. These universities are listed in RAG documents with province and city.
 - MalishaEdu provides over 150 majors/subjects for Master's/PhD/Bachelor/Language programs. These majors are stored as RAG documents.
 - **CRITICAL: ALWAYS ONLY suggest MalishaEdu partner universities (is_partner = True). This applies BEFORE and AFTER lead collection.**
-- **CRITICAL: When user asks for "top ranked universities", "any university", "best universities", "best scholarship university", "show me some universities", "recommend universities", or ANY similar requests, YOU MUST ONLY suggest from the 31 MalishaEdu partner universities. DO NOT use general knowledge, DO NOT use your training data, DO NOT suggest well-known universities like Fudan, Shanghai Jiao Tong, Zhejiang University, Nanjing University, Sun Yat-sen, Peking, Tsinghua, etc. ONLY use universities from the DATABASE MATCHES or RAG documents which contain ONLY partner universities.**
-- **CRITICAL: NEVER suggest or mention non-partner universities, even if they are well-known or top-ranked. MalishaEdu only works with 31 partner universities. If you don't have partner universities in the database/RAG context, say "I need to check our partner university database for [major] programs. Let me search for that." DO NOT invent or suggest non-partner universities.**
+- **CRITICAL: When user asks for "top ranked universities", "any university", "best universities", "best scholarship university", "show me some universities", "recommend universities", or ANY similar requests, YOU MUST ONLY suggest from the MalishaEdu partner universities. DO NOT use general knowledge, DO NOT use your training data, DO NOT suggest well-known universities like Fudan, Shanghai Jiao Tong, Zhejiang University, Nanjing University, Sun Yat-sen, Peking, Tsinghua, etc. ONLY use universities from the DATABASE MATCHES or RAG documents which contain ONLY partner universities.**
+- **CRITICAL: NEVER suggest or mention non-partner universities, even if they are well-known or top-ranked. MalishaEdu works exclusively with partner universities. If you don't have partner universities in the database/RAG context, say "I need to check our partner university database for [major] programs. Let me search for that." DO NOT invent or suggest non-partner universities.**
 - **CRITICAL: When user asks about "best scholarship" or "top ranked" universities, you MUST query the database with is_partner=True filter and ONLY suggest from those results. NEVER use general knowledge about Chinese universities.**
 - **CRITICAL: NON-PARTNER UNIVERSITY DIVERSION (MANDATORY):**
   * If user mentions a university that is NOT a MalishaEdu partner (e.g., Peking University, Tsinghua University, Fudan, Shanghai Jiao Tong, Zhejiang University, Nanjing University, Sun Yat-sen, etc.):
     - DO NOT provide detailed information about that non-partner university (costs, deadlines, etc.)
-    - IMMEDIATELY mention: "I understand you're interested in [University Name]. However, MalishaEdu is one of the biggest education agent services in China and works exclusively with 31 partner universities where we can actually provide 100% admission support, scholarship guidance, and full post-arrival services."
-    - STRONGLY EMPHASIZE: "While we can't directly assist with [Non-Partner University], MalishaEdu can guarantee admission support, scholarship applications, and complete post-arrival services at our 31 partner universities."
+    - IMMEDIATELY mention: "I understand you're interested in [University Name]. However, MalishaEdu is one of the biggest education agent services in China and works exclusively with partner universities where we can actually provide 100% admission support, scholarship guidance, and full post-arrival services."
+    - STRONGLY EMPHASIZE: "While we can't directly assist with [Non-Partner University], MalishaEdu can guarantee admission support, scholarship applications, and complete post-arrival services at our partner universities."
     - DIVERT user toward MalishaEdu partner universities that offer the SAME major/degree level
     - Search RAG documents for partner universities offering the same major (e.g., "MalishaEdu partner universities Electrical Electronics PhD")
     - Suggest 3-5 partner universities from RAG that match their major and degree level
-    - Example response: "I understand you're interested in [Non-Partner University] for [Major] PhD. MalishaEdu is one of the biggest education agents in China and works with 31 partner universities where we can actually provide 100% admission support and scholarship guidance. For [Major] PhD programs, I can suggest these excellent MalishaEdu partner universities: [list from RAG with same major]. At these partner universities, MalishaEdu can guarantee full admission support, help with scholarship applications, and provide complete post-arrival services including airport pickup, accommodation, bank account setup, and more."
+    - Example response: "I understand you're interested in [Non-Partner University] for [Major] PhD. MalishaEdu is one of the biggest education agents in China and works with partner universities where we can actually provide 100% admission support and scholarship guidance. For [Major] PhD programs, I can suggest these excellent MalishaEdu partner universities: [list from RAG with same major]. At these partner universities, MalishaEdu can guarantee full admission support, help with scholarship applications, and provide complete post-arrival services including airport pickup, accommodation, bank account setup, and more."
   * DO NOT waste prompts providing information about non-partner universities - immediately divert to partners
-  * **CRITICAL: When user asks for "top ranked universities", "any university", "best universities", "show me some universities", DO NOT use general knowledge to suggest non-partner universities. ONLY suggest from the 31 MalishaEdu partner universities listed in the database or RAG.**
+  * **CRITICAL: When user asks for "top ranked universities", "any university", "best universities", "show me some universities", DO NOT use general knowledge to suggest non-partner universities. ONLY suggest from the MalishaEdu partner universities listed in the database or RAG.**
 - If user shows interest in a province/city OUTSIDE of MalishaEdu service area:
   * MENTION that MalishaEdu provides services in specific provinces/cities
   * DIVERT user toward MalishaEdu partner provinces/cities
@@ -121,7 +122,7 @@ MALISHAEDU PARTNER UNIVERSITIES & MAJORS (CRITICAL RULES):
 - If user shows interest in a major OUTSIDE of MalishaEdu offerings (before lead collected):
   * FIRST: PURSUE user to choose a RELATED major from MalishaEdu offerings
   * Search RAG documents for related majors (e.g., "MalishaEdu majors related to [user's major]")
-  * Suggest 3-5 similar majors from MalishaEdu's 150+ majors
+  * Suggest 3-5 similar majors from MalishaEdu's 150+ majors but degree_level should be the same as the user's choice
   * Example: "I see you're interested in [major]. While we don't offer that exact program, we have related programs like [similar majors from MalishaEdu]. Would any of these interest you?"
   * Keep engaging naturally to collect their information (nationality, contact info) through conversation
   * Once lead is collected, continue encouraging toward supported majors/universities for personalized database information
@@ -322,7 +323,7 @@ Information Sources (in priority order):
 When answering about programs:
 - ALWAYS check the DATABASE first for specific university/major/intake data
 - **CRITICAL: ONLY suggest MalishaEdu PARTNER universities (is_partner = True). NEVER suggest non-partner universities like Fudan, Shanghai Jiao Tong, Zhejiang University, Nanjing University, Sun Yat-sen, Peking, Tsinghua, etc.**
-- **CRITICAL: When user asks for "top ranked universities", "any university", "best universities", or similar, ONLY suggest from the 31 MalishaEdu partner universities. Do NOT use general knowledge to suggest non-partner universities.**
+- **CRITICAL: When user asks for "top ranked universities", "any university", "best universities", or similar, ONLY suggest from the MalishaEdu partner universities. Do NOT use general knowledge to suggest non-partner universities.**
 - CRITICAL: ONLY suggest universities, majors, and programs that are EXACTLY listed in the database information provided to you
 - DO NOT suggest or mention universities/programs that are NOT in the database information
 - CRITICAL: If user asks for a specific degree level (Master's, PhD, Bachelor's), ONLY suggest programs matching that degree level from the database
@@ -531,7 +532,8 @@ Style Guidelines:
 - age: age number or null
 - ielts_score: score number or null
 - budget_per_year: budget amount or null
-- preferred_universities: array of university names or empty array
+- preferred_universities: array of university names for studying in China (NOT their current/previous university) or empty array
+- university_certainty: "certain" if user is certain about which university they want, "uncertain" if they're not sure, or null if not mentioned
 
 AVAILABLE MAJORS IN DATABASE (for matching user's major):
 {major_list_str}
@@ -547,7 +549,18 @@ IMPORTANT FOR MAJOR MATCHING:
 CRITICAL RULES:
 1. Use ONLY information explicitly or strongly implied by the user. Do NOT guess new values. Do NOT invent majors that were never mentioned.
 2. **LATEST MESSAGE WINS**: If user changes their mind (e.g., says "Beijing" then later says "Shanghai"), use the LATEST statement. If user says "Chinese language" then later says "Artificial Intelligence", use "Artificial Intelligence" (the latest). If later messages conflict with earlier ones, always trust the latest user message. Do NOT merge two conflicting intentions. If the user clearly switched from one major to another, keep only the latest major.
-3. For nationality: Extract country name ONLY when user explicitly states it. Examples:
+3. **CRITICAL FOR preferred_universities**: 
+   - preferred_universities should ONLY contain universities in China where the user wants to STUDY
+   - If user says "I am from Dhaka University" or "I studied at Dhaka University" or "I'm a student of Dhaka University" → This is their CURRENT/PREVIOUS university, NOT their China university choice. Do NOT add "Dhaka University" to preferred_universities.
+   - If user says "I want to study at [University]" or "I'm interested in [University]" or "I want to apply to [University]" → This is their China university choice. Add it to preferred_universities.
+   - If user says "I'm not sure" or "any university" or "I don't know" or "you suggest" → university_certainty = "uncertain", preferred_universities = []
+   - If user mentions a specific China university they want → university_certainty = "certain", add that university to preferred_universities
+   - Examples:
+     * "I am from Dhaka University" → preferred_universities = [], university_certainty = null (not about China university)
+     * "I want to study at Beihang University" → preferred_universities = ["Beihang University"], university_certainty = "certain"
+     * "I'm not sure which university" → preferred_universities = [], university_certainty = "uncertain"
+     * "Any university is fine" → preferred_universities = [], university_certainty = "uncertain"
+4. For nationality: Extract country name ONLY when user explicitly states it. Examples:
    - "I am from Kazakhstan" → "Kazakhstan"
    - "I'm from Bangladesh" → "Bangladesh"
    - "My country is India" → "India"
@@ -701,6 +714,7 @@ Return the JSON object:"""
                 ielts_score=extracted.get('ielts_score'),
                 budget_per_year=extracted.get('budget_per_year'),
                 preferred_universities=extracted.get('preferred_universities', []),
+                university_certainty=extracted.get('university_certainty'),
                 phone=phone,
                 email=email,
                 whatsapp=whatsapp,
@@ -855,6 +869,8 @@ Return the JSON object:"""
             summary_lines.append(f"Province: {state.province}")
         if state.preferred_universities:
             summary_lines.append(f"Preferred Universities: {', '.join(state.preferred_universities)}")
+        if state.university_certainty:
+            summary_lines.append(f"University Certainty: {state.university_certainty}")
         if state.intake_term:
             intake_str = f"Intake: {state.intake_term}"
             if state.intake_year:
@@ -1430,14 +1446,20 @@ Return the JSON object:"""
         if not non_partner_university_mentioned:
             # Improved patterns to catch university names in various positions
             uni_patterns = [
-                r'([A-Z][a-zA-Z\s&]+(?:University|College|Institute|Tech|Technology))',  # Full name with suffix
-                r'([A-Z][a-zA-Z\s]+(?:University|College|Institute))',  # Full name variant
-                r'(?:at|in|from|to|for)\s+([A-Z][a-zA-Z\s&]+(?:University|College|Institute|Tech|Technology))',  # After preposition
+                r'(?:want to study|interested in|apply to|apply for|study at|study in|want to go to|looking for)\s+([A-Z][a-zA-Z\s&]+(?:University|College|Institute|Tech|Technology))',  # Explicit study intent
+                r'(?:at|in|to|for)\s+([A-Z][a-zA-Z\s&]+(?:University|College|Institute|Tech|Technology))',  # After preposition (but not "from")
                 r'([A-Z][a-zA-Z\s&]+(?:University|College|Institute|Tech|Technology)\s+(?:for|at|in))',  # Before preposition
             ]
             for pattern in uni_patterns:
                 matches = re.finditer(pattern, user_message, re.IGNORECASE)
                 for match in matches:
+                    # Check if this is "I am from [University]" - skip if so
+                    match_start = match.start()
+                    context_before = user_message[max(0, match_start-50):match_start].lower()
+                    # Skip if preceded by "I am from", "I'm from", "studied at", "studying at", "student of", "graduate of"
+                    if any(phrase in context_before for phrase in ['i am from', "i'm from", 'studied at', 'studying at', 'student of', 'graduate of', 'graduated from']):
+                        continue
+                    
                     potential_uni = match.group(1).strip() if match.groups() else match.group(0).strip()
                     # Clean up the extracted name (remove trailing prepositions)
                     potential_uni = re.sub(r'\s+(for|at|in|from|to)$', '', potential_uni, flags=re.IGNORECASE).strip()
@@ -2041,7 +2063,7 @@ REMEMBER: Base all concrete fees, deadlines, and program details ONLY on DATABAS
             if is_first_interaction:
                 context_instruction += "\n\nIMPORTANT: This appears to be a first interaction. Be BRIEF and CONCISE. Introduce MalishaEdu first. Check the dynamic profile instruction above - only ask about fields marked as 'missing', and at most 2 at a time. Do NOT ask for fields that are already in the profile. Do NOT provide all details upfront."
             else:
-                context_instruction += "\n\n**CRITICAL: NEVER use general knowledge to suggest university names. ONLY suggest universities from DATABASE MATCHES or RAG documents. If database/RAG information is insufficient, say 'I need to check our partner university database for that specific program. Let me search for MalishaEdu partner universities offering [major] for [degree_level].' DO NOT invent or suggest non-partner universities like Fudan, Shanghai Jiao Tong, Zhejiang University, etc. even if they are well-known. MalishaEdu only works with 31 partner universities.**"
+                context_instruction += "\n\n**CRITICAL: NEVER use general knowledge to suggest university names. ONLY suggest universities from DATABASE MATCHES or RAG documents. If database/RAG information is insufficient, say 'I need to check our partner university database for that specific program. Let me search for MalishaEdu partner universities offering [major] for [degree_level].' DO NOT invent or suggest non-partner universities like Fudan, Shanghai Jiao Tong, Zhejiang University, etc. even if they are well-known. MalishaEdu works exclusively with partner universities.**"
             
             # Check what lead information is missing and encourage providing it
             missing_lead_fields = []
@@ -2057,7 +2079,9 @@ REMEMBER: Base all concrete fees, deadlines, and program details ONLY on DATABAS
                 missing_lead_fields.append("intake year")
             if not student_state.major:
                 missing_lead_fields.append("major/subject")
-            if not student_state.preferred_universities:
+            # Only add university to missing fields if user is certain about wanting a specific university
+            # If user is uncertain, don't push for university name
+            if not student_state.preferred_universities and student_state.university_certainty != "uncertain":
                 missing_lead_fields.append("preferred university (optional)")
             
             if missing_lead_fields and not lead_collected:
@@ -2065,6 +2089,15 @@ REMEMBER: Base all concrete fees, deadlines, and program details ONLY on DATABAS
                 context_instruction += "Encourage user to provide this information naturally through conversation. "
                 context_instruction += "DO NOT encourage signup until user provides nationality + contact info + study interest (degree level or major). "
                 context_instruction += "After user provides degree_type, nationality, intake, intake_year, major - encourage providing rest of lead info (contact information)."
+            
+            # Handle university uncertainty
+            if student_state.university_certainty == "uncertain":
+                context_instruction += "\n\nUNIVERSITY UNCERTAINTY: User is uncertain about which university they want. DO NOT push for university name. Instead, focus on:"
+                context_instruction += "\n1. Finding the best matching major/subject for their interest"
+                context_instruction += "\n2. Providing information about programs and options"
+                context_instruction += "\n3. Encouraging lead collection (nationality, contact info, major, degree level, intake)"
+                context_instruction += "\n4. Once lead is collected, you can suggest partner universities that match their major/degree level"
+                context_instruction += "\n5. DO NOT repeatedly ask 'which university do you want?' - focus on other information gathering"
             
             # After providing degree_type, nationality, intake, intake_year - encourage providing contact info
             has_basic_info = (
@@ -2134,8 +2167,8 @@ REMEMBER: Base all concrete fees, deadlines, and program details ONLY on DATABAS
                 uni_name = non_partner_university_mentioned if non_partner_university_mentioned else "the mentioned university"
                 context_instruction += f"\n\n🚨 CRITICAL: User mentioned '{uni_name}' which is NOT a MalishaEdu partner university. MANDATORY ACTIONS:"
                 context_instruction += "\n1. DO NOT provide detailed information about this non-partner university (costs, deadlines, application process, duration, etc.)"
-                context_instruction += f"\n2. IMMEDIATELY mention: 'I understand you're interested in {uni_name}. However, MalishaEdu is one of the biggest education agent services in China and works exclusively with 31 partner universities where we can actually provide 100% admission support, scholarship guidance, and full post-arrival services.'"
-                context_instruction += "\n3. STRONGLY EMPHASIZE MalishaEdu's capabilities: 'At our 31 partner universities, MalishaEdu can guarantee admission support, help with scholarship applications, and provide complete post-arrival services including airport pickup, accommodation, bank account setup, SIM card, and dedicated counselor support. This is something we cannot guarantee for non-partner universities.'"
+                context_instruction += f"\n2. IMMEDIATELY mention: 'I understand you're interested in {uni_name}. However, MalishaEdu is one of the biggest education agent services in China and works exclusively with partner universities where we can actually provide 100% admission support, scholarship guidance, and full post-arrival services.'"
+                context_instruction += "\n3. STRONGLY EMPHASIZE MalishaEdu's capabilities: 'At our partner universities, MalishaEdu can guarantee admission support, help with scholarship applications, and provide complete post-arrival services including airport pickup, accommodation, bank account setup, SIM card, and dedicated counselor support. This is something we cannot guarantee for non-partner universities.'"
                 context_instruction += "\n4. DIVERT to partner universities offering the SAME major/degree level (use the partner university list from RAG/DB context above)"
                 context_instruction += "\n5. DO NOT waste prompts providing information about the non-partner university - immediately divert to partner alternatives"
                 context_instruction += "\n6. If partner universities are listed in RAG/DB context above, mention them by name and emphasize MalishaEdu's services at those universities"
@@ -2162,7 +2195,7 @@ REMEMBER: Base all concrete fees, deadlines, and program details ONLY on DATABAS
                     context_instruction += "\n\nLEAD COLLECTED - PARTIAL MATCH: User's lead has been automatically collected. Some of their preferences match MalishaEdu's supported options. Use the database where possible, and encourage them toward fully supported options for complete personalized information."
                 else:
                     # Neither matches - encourage toward supported options
-                    context_instruction += "\n\nLEAD COLLECTED - ENCOURAGE SUPPORTED OPTIONS: User's lead has been automatically collected, but their major/university preferences don't fully match MalishaEdu's supported options. Use RAG data to suggest related majors and partner universities. Keep encouraging them toward MalishaEdu's 150+ supported majors and 31 partner universities for personalized database information."
+                    context_instruction += "\n\nLEAD COLLECTED - ENCOURAGE SUPPORTED OPTIONS: User's lead has been automatically collected, but their major/university preferences don't fully match MalishaEdu's supported options. Use RAG data to suggest related majors and partner universities. Keep encouraging them toward MalishaEdu's supported majors and partner universities for personalized database information."
                 
                 # Always encourage signup after lead collection
                 context_instruction += "\n\nSIGNUP ENCOURAGEMENT: User's lead information has been collected (nationality + contact info + study interest). STRONGLY encourage them to sign up for a free MalishaEdu account to apply. Say: 'Thank you for providing your information! MalishaEdu provides the most comprehensive solution for studying in China. To apply with us, please sign up for a free account at /signup (or log in at /login if you already have one). Once you sign up, you can upload your required documents, track your application progress, and our admission agent will guide you through the entire process.'"
@@ -2899,7 +2932,7 @@ IMPORTANT:
                 context_parts.append("MANDATORY ACTION REQUIRED:")
                 context_parts.append("1. DO NOT provide detailed information about this non-partner university (costs, deadlines, application process)")
                 context_parts.append("2. IMMEDIATELY mention that MalishaEdu is one of the biggest education agent services in China")
-                context_parts.append("3. EMPHASIZE that MalishaEdu works exclusively with 31 partner universities where we can provide:")
+                context_parts.append("3. EMPHASIZE that MalishaEdu works exclusively with partner universities where we can provide:")
                 context_parts.append("   - 100% admission support and guarantee")
                 context_parts.append("   - Scholarship application guidance and support")
                 context_parts.append("   - Complete post-arrival services (airport pickup, accommodation, bank account, SIM card, etc.)")
