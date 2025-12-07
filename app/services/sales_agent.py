@@ -2024,13 +2024,19 @@ REMEMBER: Base all concrete fees, deadlines, and program details ONLY on DATABAS
             ])
             
             if asks_for_best_or_top:
-                context_instruction += "\n\n🚨 CRITICAL: User is asking for 'best', 'top ranked', 'any university', or similar. MANDATORY RULES:"
+                context_instruction += "\n\n🚨 CRITICAL: User is asking for 'best', 'top ranked', 'any university', 'suggest university', or similar. MANDATORY RULES:"
                 context_instruction += "\n1. DO NOT use general knowledge about Chinese universities"
                 context_instruction += "\n2. DO NOT suggest well-known universities like Fudan, Shanghai Jiao Tong, Zhejiang University, Nanjing University, Sun Yat-sen, Peking, Tsinghua, etc."
                 context_instruction += "\n3. ONLY suggest universities from DATABASE MATCHES (which are ALL MalishaEdu partner universities)"
-                context_instruction += "\n4. If DATABASE MATCHES is empty or insufficient, say: 'I need to check our partner university database for [major] programs. Let me search for MalishaEdu partner universities offering [major] for [degree_level].'"
-                context_instruction += "\n5. DO NOT invent or suggest any university names that are not in DATABASE MATCHES"
-                context_instruction += "\n6. If you have partner universities in DATABASE MATCHES, list them and explain why they are good options for the user's major/degree level"
+                context_instruction += "\n4. **CRITICAL: ONLY suggest universities that ACTUALLY have programs matching the user's degree_level and major/subject**"
+                context_instruction += "\n   - If user wants PhD in Finance, ONLY suggest universities that have PhD programs in Finance or related fields (Financial Management, Corporate Finance, Economics, etc.)"
+                context_instruction += "\n   - If user wants Master's in Computer Science, ONLY suggest universities that have Master's programs in Computer Science or related fields"
+                context_instruction += "\n   - DO NOT suggest a university just because it's in the same city or is a partner - it MUST have the matching program"
+                context_instruction += "\n   - Use fuzzy matching: Finance can match Financial Management, Corporate Finance, etc. - but the university MUST have that specific program at the requested degree level"
+                context_instruction += "\n5. If DATABASE MATCHES is empty or insufficient, say: 'I need to check our partner university database for [major] programs. Let me search for MalishaEdu partner universities offering [major] for [degree_level].'"
+                context_instruction += "\n6. DO NOT invent or suggest any university names that are not in DATABASE MATCHES"
+                context_instruction += "\n7. If you have partner universities in DATABASE MATCHES, list them and explain why they are good options for the user's major/degree level"
+                context_instruction += "\n8. If a university is listed in DATABASE MATCHES but doesn't have the matching program, DO NOT suggest it - only suggest universities with actual matching programs"
             
             if is_first_interaction:
                 context_instruction += "\n\nIMPORTANT: This appears to be a first interaction. Be BRIEF and CONCISE. Introduce MalishaEdu first. Check the dynamic profile instruction above - only ask about fields marked as 'missing', and at most 2 at a time. Do NOT ask for fields that are already in the profile. Do NOT provide all details upfront."
@@ -2580,8 +2586,41 @@ IMPORTANT:
                 limit=10
             )
         else:
-            # No specific university - will search by major/degree level
-            pass
+            # No specific university - search for majors first, then get universities from those majors
+            # This ensures we only suggest universities that actually have matching programs
+            if degree_level or major_name:
+                # First, search for majors matching the criteria
+                matching_majors = self.db_service.search_majors(
+                    name=major_name,
+                    degree_level=degree_level,
+                    limit=50  # Get more to find all matching universities
+                )
+                
+                # If no exact match, try fuzzy matching for major name
+                if not matching_majors and major_name:
+                    matched_major_name, similar_majors = self._fuzzy_match_major(major_name)
+                    if matched_major_name:
+                        matching_majors = self.db_service.search_majors(
+                            name=matched_major_name,
+                            degree_level=degree_level,
+                            limit=50
+                        )
+                
+                # Get unique partner universities from matching majors
+                if matching_majors:
+                    partner_uni_ids = set()
+                    for major in matching_majors:
+                        if major.university and major.university.is_partner:
+                            partner_uni_ids.add(major.university_id)
+                    
+                    if partner_uni_ids:
+                        # Get universities
+                        universities = self.db.query(University).filter(
+                            University.id.in_(list(partner_uni_ids))
+                        ).limit(10).all()
+                        
+                        # Update majors list to only include those from partner universities
+                        majors = [m for m in matching_majors if m.university_id in partner_uni_ids]
         
         # Step 4: Search for majors/programs
         majors = []
@@ -2649,70 +2688,60 @@ IMPORTANT:
                     for maj_name in similar_majors[:5]:
                         context_parts.append(f"  - {maj_name}")
                     context_parts.append("ACTION REQUIRED: Ask user to confirm which major/program they mean.")
-            
-            # If no exact match and we have a major name, try fuzzy matching across all universities
-            if not majors and major_name:
-                matched_major_name, similar_majors = self._fuzzy_match_major(major_name)
-                if matched_major_name:
-                    majors = self.db_service.search_majors(
-                        name=matched_major_name,
-                        degree_level=degree_level,
-                        teaching_language=teaching_language,
-                        limit=20
-                    )
-                elif similar_majors:
-                    context_parts.append(f"UNCERTAINTY: Major '{major_name}' could match multiple options:")
-                    for maj_name in similar_majors[:5]:
-                        context_parts.append(f"  - {maj_name}")
-                    context_parts.append("ACTION REQUIRED: Ask user to confirm which major/program they mean.")
         
         # Step 5: Format results
+        # CRITICAL: Only show universities that actually have matching programs
         if universities:
-            for uni in universities[:5]:  # Limit to 5 universities
-                context_parts.append(f"=== {uni.name.upper()} ({uni.city or 'China'}) ===")
-                context_parts.append(self.db_service.format_university_info(uni))
-                
+            # Filter universities to only those with matching majors
+            universities_with_programs = []
+            for uni in universities[:10]:  # Check more universities to find matches
                 # Get majors for this university
                 uni_majors = [m for m in majors if m.university_id == uni.id] if majors else []
                 
-                if uni_majors:
-                    context_parts.append(f"\nAVAILABLE PROGRAMS AT {uni.name.upper()}:")
-                    for major in uni_majors[:5]:  # Limit to 5 majors per university
-                        context_parts.append(self.db_service.format_major_info(major))
-                        
-                        # Get program intakes for this major
-                        from app.models import IntakeTerm
-                        intake_term_enum = None
-                        if intake_term:
-                            try:
-                                intake_term_enum = IntakeTerm[intake_term.upper()]
-                            except:
-                                pass
-                        
-                        intakes = self.db_service.search_program_intakes(
-                            university_id=uni.id,
-                            major_id=major.id,
-                            intake_term=intake_term_enum,
-                            intake_year=intake_year,
-                            upcoming_only=True,
-                            limit=3
-                        )
-                        
-                        if intakes:
-                            context_parts.append(f"\n=== INTAKE DETAILS FOR {major.name} AT {uni.name.upper()} ===")
-                            for intake in intakes:
-                                context_parts.append(self.db_service.format_program_intake_info(intake))
-                elif degree_level or major_name:
-                    # No majors found but user specified criteria - search all majors at this university
-                    all_uni_majors = self.db_service.search_majors(
+                # If no majors from the search, check if this university has any majors matching the criteria
+                if not uni_majors and (degree_level or major_name):
+                    uni_majors = self.db_service.search_majors(
                         university_id=uni.id,
+                        name=major_name,
                         degree_level=degree_level,
                         limit=5
                     )
-                    if all_uni_majors:
-                        context_parts.append(f"\nAVAILABLE {degree_level.upper() if degree_level else 'PROGRAMS'} AT {uni.name.upper()}:")
-                        for major in all_uni_majors:
-                            context_parts.append(self.db_service.format_major_info(major))
+                
+                # Only include university if it has matching programs
+                if uni_majors:
+                    universities_with_programs.append((uni, uni_majors))
+            
+            # Now format only universities with matching programs
+            for uni, uni_majors in universities_with_programs[:5]:  # Limit to 5 universities
+                context_parts.append(f"=== {uni.name.upper()} ({uni.city or 'China'}) ===")
+                context_parts.append(self.db_service.format_university_info(uni))
+                
+                context_parts.append(f"\nAVAILABLE PROGRAMS AT {uni.name.upper()}:")
+                for major in uni_majors[:5]:  # Limit to 5 majors per university
+                    context_parts.append(self.db_service.format_major_info(major))
+                    
+                    # Get program intakes for this major
+                    from app.models import IntakeTerm
+                    intake_term_enum = None
+                    if intake_term:
+                        try:
+                            intake_term_enum = IntakeTerm[intake_term.upper()]
+                        except:
+                            pass
+                    
+                    intakes = self.db_service.search_program_intakes(
+                        university_id=uni.id,
+                        major_id=major.id,
+                        intake_term=intake_term_enum,
+                        intake_year=intake_year,
+                        upcoming_only=True,
+                        limit=3
+                    )
+                    
+                    if intakes:
+                        context_parts.append(f"\n=== INTAKE DETAILS FOR {major.name} AT {uni.name.upper()} ===")
+                        for intake in intakes:
+                            context_parts.append(self.db_service.format_program_intake_info(intake))
         
         elif majors:
             # No specific university, but majors found - group by university
