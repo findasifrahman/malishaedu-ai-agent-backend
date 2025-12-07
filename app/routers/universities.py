@@ -16,6 +16,7 @@ class UniversityCreate(BaseModel):
     province: Optional[str] = None
     country: str = "China"
     is_partner: bool = True
+    university_ranking: Optional[int] = None
     logo_url: Optional[str] = None
     description: Optional[str] = None
     website: Optional[str] = None
@@ -42,6 +43,7 @@ class UniversityUpdate(BaseModel):
     province: Optional[str] = None
     country: Optional[str] = None
     is_partner: Optional[bool] = None
+    university_ranking: Optional[int] = None
     logo_url: Optional[str] = None
     description: Optional[str] = None
     website: Optional[str] = None
@@ -55,6 +57,7 @@ class UniversityResponse(BaseModel):
     province: Optional[str]
     country: str
     is_partner: bool
+    university_ranking: Optional[int]
     logo_url: Optional[str]
     description: Optional[str]
     website: Optional[str]
@@ -94,6 +97,7 @@ async def list_universities(
             'province': uni.province,
             'country': uni.country,
             'is_partner': uni.is_partner,
+            'university_ranking': uni.university_ranking,
             'logo_url': uni.logo_url,
             'description': uni.description,
             'website': uni.website,
@@ -118,6 +122,7 @@ async def get_university(university_id: int, db: Session = Depends(get_db)):
         'province': university.province,
         'country': university.country,
         'is_partner': university.is_partner,
+        'university_ranking': university.university_ranking,
         'logo_url': university.logo_url,
         'description': university.description,
         'website': university.website,
@@ -154,6 +159,7 @@ async def create_university(
         'province': university.province,
         'country': university.country,
         'is_partner': university.is_partner,
+        'university_ranking': university.university_ranking,
         'logo_url': university.logo_url,
         'description': university.description,
         'website': university.website,
@@ -191,6 +197,7 @@ async def update_university(
         'province': university.province,
         'country': university.country,
         'is_partner': university.is_partner,
+        'university_ranking': university.university_ranking,
         'logo_url': university.logo_url,
         'description': university.description,
         'website': university.website,

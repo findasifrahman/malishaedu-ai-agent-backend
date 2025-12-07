@@ -36,7 +36,10 @@ class StudentProfile(BaseModel):
         }
     
     # Scores
-    hsk_level: Optional[int] = None
+    hsk_score: Optional[float] = None
+    hsk_certificate_date: Optional[Union[str, datetime, date]] = None
+    hskk_level: Optional[str] = None
+    hskk_score: Optional[float] = None
     csca_status: Optional[str] = None
     csca_score_math: Optional[float] = None
     csca_score_specialized_chinese: Optional[float] = None
@@ -65,12 +68,19 @@ class StudentProfile(BaseModel):
     previous_travel_to_china: Optional[bool] = None
     previous_travel_details: Optional[str] = None
     
+    # Personal Information
+    marital_status: Optional[str] = None
+    religion: Optional[str] = None
+    occupation: Optional[str] = None
+    
     # Highest degree information
     highest_degree_name: Optional[str] = None
+    highest_degree_medium: Optional[str] = None
     highest_degree_institution: Optional[str] = None
     highest_degree_country: Optional[str] = None
     highest_degree_year: Optional[int] = None
     highest_degree_cgpa: Optional[float] = None
+    number_of_published_papers: Optional[int] = None
     
     # Guarantor information
     relation_with_guarantor: Optional[str] = None
@@ -81,7 +91,7 @@ class StudentProfile(BaseModel):
                      'phone', 'email', 'wechat_id', 'passport_number', 'home_address', 
                      'current_address', 'emergency_contact_name', 'emergency_contact_phone', 
                      'emergency_contact_relationship', 'intended_address_china', 
-                     'previous_visa_details', 'previous_travel_details', mode='before')
+                     'previous_visa_details', 'previous_travel_details', 'occupation', mode='before')
     @classmethod
     def empty_str_to_none(cls, v):
         """Convert empty strings to None for optional string fields"""
@@ -89,7 +99,7 @@ class StudentProfile(BaseModel):
             return None
         return v
     
-    @field_validator('date_of_birth', 'passport_expiry_date', 'planned_arrival_date', mode='before')
+    @field_validator('date_of_birth', 'passport_expiry_date', 'planned_arrival_date', 'hsk_certificate_date', mode='before')
     @classmethod
     def parse_date(cls, v):
         """Parse date string to datetime object"""
@@ -165,6 +175,20 @@ async def get_student_profile(
         "wechat_id": student.wechat_id,
         "passport_number": student.passport_number,
         "passport_expiry_date": student.passport_expiry_date.isoformat() if student.passport_expiry_date else None,
+        "hsk_score": student.hsk_score,
+        "hsk_certificate_date": student.hsk_certificate_date.isoformat() if student.hsk_certificate_date else None,
+        "hskk_level": student.hskk_level.value if student.hskk_level else None,
+        "hskk_score": student.hskk_score,
+        "csca_status": student.csca_status.value if student.csca_status else None,
+        "csca_score_math": student.csca_score_math,
+        "csca_score_specialized_chinese": student.csca_score_specialized_chinese,
+        "csca_score_physics": student.csca_score_physics,
+        "csca_score_chemistry": student.csca_score_chemistry,
+        "english_test_type": student.english_test_type.value if student.english_test_type else None,
+        "english_test_score": student.english_test_score,
+        "marital_status": student.marital_status.value if student.marital_status else None,
+        "religion": student.religion.value if student.religion else None,
+        "occupation": student.occupation,
         "target_university_id": student.target_university_id,
         "target_major_id": student.target_major_id,
         "target_intake_id": student.target_intake_id,
@@ -174,10 +198,12 @@ async def get_student_profile(
         "home_address": student.home_address,
         "current_address": student.current_address,
         "highest_degree_name": student.highest_degree_name,
+        "highest_degree_medium": student.highest_degree_medium.value if student.highest_degree_medium else None,
         "highest_degree_institution": student.highest_degree_institution,
         "highest_degree_country": student.highest_degree_country,
         "highest_degree_year": student.highest_degree_year,
         "highest_degree_cgpa": student.highest_degree_cgpa,
+        "number_of_published_papers": student.number_of_published_papers,
         "relation_with_guarantor": student.relation_with_guarantor,
         "is_the_bank_guarantee_in_students_name": student.is_the_bank_guarantee_in_students_name,
         "emergency_contact_name": student.emergency_contact_name,
@@ -247,8 +273,21 @@ async def update_student_profile(
             student.passport_expiry_date = profile.passport_expiry_date
     
     # Scores
-    if profile.hsk_level is not None:
-        student.hsk_level = profile.hsk_level
+    if profile.hsk_score is not None:
+        student.hsk_score = profile.hsk_score
+    if profile.hsk_certificate_date is not None:
+        if isinstance(profile.hsk_certificate_date, date) and not isinstance(profile.hsk_certificate_date, datetime):
+            student.hsk_certificate_date = datetime.combine(profile.hsk_certificate_date, datetime.min.time())
+        else:
+            student.hsk_certificate_date = profile.hsk_certificate_date
+    if profile.hskk_level is not None:
+        from app.models import HSKKLevel
+        try:
+            student.hskk_level = HSKKLevel(profile.hskk_level)
+        except ValueError:
+            pass
+    if profile.hskk_score is not None:
+        student.hskk_score = profile.hskk_score
     if profile.csca_status is not None:
         from app.models import CSCAStatus
         try:
@@ -320,9 +359,32 @@ async def update_student_profile(
     if profile.previous_travel_details is not None:
         student.previous_travel_details = profile.previous_travel_details
     
+    # Personal Information
+    if profile.marital_status is not None:
+        from app.models import MaritalStatus
+        try:
+            student.marital_status = MaritalStatus(profile.marital_status)
+        except ValueError:
+            pass
+    if profile.religion is not None:
+        from app.models import Religion
+        try:
+            student.religion = Religion(profile.religion)
+        except ValueError:
+            pass
+    if profile.occupation is not None:
+        student.occupation = profile.occupation
+    
     # Highest degree information
     if hasattr(profile, 'highest_degree_name') and profile.highest_degree_name is not None:
         student.highest_degree_name = profile.highest_degree_name
+    if profile.highest_degree_medium is not None and profile.highest_degree_medium != '':
+        from app.models import DegreeMedium
+        try:
+            student.highest_degree_medium = DegreeMedium(profile.highest_degree_medium)
+        except (ValueError, TypeError):
+            # If invalid value, leave it unchanged
+            pass
     if hasattr(profile, 'highest_degree_institution') and profile.highest_degree_institution is not None:
         student.highest_degree_institution = profile.highest_degree_institution
     if hasattr(profile, 'highest_degree_country') and profile.highest_degree_country is not None:
@@ -331,6 +393,8 @@ async def update_student_profile(
         student.highest_degree_year = profile.highest_degree_year
     if hasattr(profile, 'highest_degree_cgpa') and profile.highest_degree_cgpa is not None:
         student.highest_degree_cgpa = profile.highest_degree_cgpa
+    if profile.number_of_published_papers is not None:
+        student.number_of_published_papers = profile.number_of_published_papers
     
     # Guarantor information
     if hasattr(profile, 'relation_with_guarantor') and profile.relation_with_guarantor is not None:

@@ -79,8 +79,12 @@ Return a structured summary in JSON format."""
         )
         return response.choices[0].message.content
     
-    def reflect_and_improve(self, answer: str, rag_context: str, tavily_context: Optional[str] = None) -> str:
+    def reflect_and_improve(self, answer: str, rag_context: str, tavily_context: Optional[str] = None, is_scholarship_chance: bool = False) -> str:
         """Reflection method to improve answer accuracy"""
+        # NEVER use reflection for scholarship chance questions - they have strict format requirements
+        if is_scholarship_chance:
+            return answer
+        
         # Build tavily context string separately to avoid backslash in f-string
         tavily_section = ""
         if tavily_context:
@@ -95,6 +99,10 @@ Return a structured summary in JSON format."""
 3. Ensuring clarity and completeness
 4. Combining RAG and web search results when available
 5. Making the answer more helpful and encouraging
+
+CRITICAL: Do NOT add external links, URLs, or "Useful Links" sections.
+Do NOT add scholarship details, types, or coverage examples unless the question specifically asks for them.
+Do NOT add "How to Improve", "Summary", or similar sections unless the question asks for them.
 
 Return the improved answer."""
             },

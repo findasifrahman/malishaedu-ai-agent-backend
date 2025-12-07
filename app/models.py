@@ -140,6 +140,29 @@ class EnglishTestType(str, enum.Enum):
     DUOLINGO = "Duolingo"
     NONE = "None"
 
+class DegreeMedium(str, enum.Enum):
+    ENGLISH = "English"
+    CHINESE = "Chinese"
+    NATIVE = "Native"
+
+class MaritalStatus(str, enum.Enum):
+    SINGLE = "Single"
+    MARRIED = "Married"
+
+class Religion(str, enum.Enum):
+    ISLAM = "Islam"
+    CHRISTIANITY = "Christianity"
+    CATHOLICISM = "Catholicism"
+    BUDDHISM = "Buddhism"
+    OTHER = "Other"
+    NO_RELIGION = "No Religion"
+
+class HSKKLevel(str, enum.Enum):
+    BEGINNER = "Beginner"
+    ELEMENTARY = "Elementary"
+    INTERMEDIATE = "Intermediate"
+    ADVANCED = "Advanced"
+
 # Users table
 class User(Base):
     __tablename__ = "users"
@@ -235,6 +258,7 @@ class University(Base):
     province = Column(String)
     country = Column(String, default="China")
     is_partner = Column(Boolean, default=True)
+    university_ranking = Column(Integer, nullable=True)
     logo_url = Column(String, nullable=True)
     description = Column(Text)
     website = Column(String, nullable=True)
@@ -325,8 +349,11 @@ class Student(Base):
     passport_expiry_date = Column(DateTime)
     passport_scanned_url = Column(String, nullable=True)
     passport_photo_url = Column(String, nullable=True)
-    hsk_level = Column(Integer, nullable=True)  # 0-6
+    hsk_score = Column(Float, nullable=True)  # HSK score (replaces hsk_level)
+    hsk_certificate_date = Column(DateTime, nullable=True)  # HSK certificate date
     hsk_certificate_url = Column(String, nullable=True)
+    hskk_level = Column(SQLEnum(HSKKLevel), nullable=True)  # HSKK level (dropdown)
+    hskk_score = Column(Float, nullable=True)  # HSKK score
     csca_status = Column(SQLEnum(CSCAStatus), default=CSCAStatus.NOT_REGISTERED)
     csca_score_math = Column(Float, nullable=True)
     csca_score_specialized_chinese = Column(Float, nullable=True)
@@ -337,14 +364,21 @@ class Student(Base):
     english_test_score = Column(Float, nullable=True)
     english_certificate_url = Column(String, nullable=True)
     
+    # Personal Information
+    marital_status = Column(SQLEnum(MaritalStatus), nullable=True)
+    religion = Column(SQLEnum(Religion), nullable=True)
+    occupation = Column(String, nullable=True)  # e.g., student, business
+    
     # Academic Docs
     highest_degree_diploma_url = Column(String, nullable=True)
-    highest_degree_name = Column(String, nullable=True)
+    highest_degree_name = Column(String, nullable=True)  # Now editable text (e.g., H.S.C., A-level)
+    highest_degree_medium = Column(SQLEnum(DegreeMedium), nullable=True)  # English, Chinese, or Native
     highest_degree_institution = Column(String, nullable=True)
     highest_degree_country = Column(String, nullable=True)
     highest_degree_year = Column(Integer, nullable=True)  # Year of graduation
     highest_degree_cgpa = Column(Float, nullable=True)  # CGPA/GPA score
     academic_transcript_url = Column(String, nullable=True)
+    number_of_published_papers = Column(Integer, nullable=True)  # Number of published papers
     
     # Other Required Docs
     physical_examination_form_url = Column(String, nullable=True)

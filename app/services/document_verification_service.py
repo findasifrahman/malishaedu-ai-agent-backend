@@ -237,7 +237,19 @@ PASSPORT SPECIFIC REQUIREMENTS:
 - MRZ (Machine Readable Zone) should be visible if present
 - No glare or reflections on the photo page
 - Document should not be expired or expiring soon
-- Extract: passport_number, name, date_of_birth, nationality, expiry_date, issuing_country
+- Extract the following information in the "extracted" field as JSON:
+  {
+    "passport_number": "string (e.g., A12345678)",
+    "name": "string (full name as shown on passport)",
+    "given_name": "string (first name)",
+    "family_name": "string (last name/surname)",
+    "father_name": "string (if visible on passport)",
+    "date_of_birth": "YYYY-MM-DD format",
+    "nationality": "string (country name)",
+    "expiry_date": "YYYY-MM-DD format",
+    "issuing_country": "string (country that issued the passport)"
+  }
+- If any field is not visible or readable, use null for that field
 """,
             "diploma": """
 DIPLOMA SPECIFIC REQUIREMENTS:

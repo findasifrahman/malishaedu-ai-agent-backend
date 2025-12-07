@@ -149,37 +149,89 @@ async def get_all_complaints(
         for comp in complaints
     ]
 
+@router.get("/students")
+async def get_students(
+    page: int = 1,
+    page_size: int = 20,
+    search: Optional[str] = None,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Get students with pagination and search"""
+    from sqlalchemy import or_
+    
+    query = db.query(Student)
+    
+    # Apply search filter if provided
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            or_(
+                Student.full_name.ilike(search_term),
+                Student.email.ilike(search_term),
+                Student.phone.ilike(search_term),
+                Student.country_of_citizenship.ilike(search_term)
+            )
+        )
+    
+    # Get total count
+    total = query.count()
+    
+    # Apply pagination
+    offset = (page - 1) * page_size
+    students = query.order_by(Student.created_at.desc()).offset(offset).limit(page_size).all()
+    
+    # Get document counts for each student (lightweight query)
+    student_ids = [s.id for s in students]
+    document_counts = db.query(
+        Document.student_id,
+        func.count(Document.id).label('doc_count')
+    ).filter(
+        Document.student_id.in_(student_ids)
+    ).group_by(Document.student_id).all()
+    
+    doc_count_map = {sid: count for sid, count in document_counts}
+    
+    return {
+        "items": [
+            {
+                "id": student.id,
+                "user_id": student.user_id,
+                "full_name": student.full_name,
+                "email": student.email,
+                "phone": student.phone,
+                "country_of_citizenship": student.country_of_citizenship,
+                "created_at": student.created_at.isoformat() if student.created_at else None,
+                "document_count": doc_count_map.get(student.id, 0)
+            }
+            for student in students
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size
+    }
+
 @router.get("/students/progress")
 async def get_student_progress(
     current_user: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
-    """Get student document submission progress"""
-    students = db.query(Student).all()
+    """Get student document submission progress (lightweight - only counts)"""
+    # This endpoint is kept for backward compatibility but should be used sparingly
+    # Consider using /admin/students with pagination instead
+    students = db.query(Student).limit(100).all()  # Limit to prevent timeout
     
     progress_data = []
     for student in students:
-        documents = db.query(Document).filter(Document.student_id == student.id).all()
-        submitted_types = {doc.document_type for doc in documents}
-        
-        required_docs = [
-            DocumentType.PASSPORT,
-            DocumentType.PHOTO,
-            DocumentType.DIPLOMA,
-            DocumentType.TRANSCRIPT,
-            DocumentType.NON_CRIMINAL,
-            DocumentType.PHYSICAL_EXAM,
-            DocumentType.BANK_STATEMENT,
-            DocumentType.RECOMMENDATION_LETTER,
-            DocumentType.SELF_INTRO_VIDEO
-        ]
+        doc_count = db.query(Document).filter(Document.student_id == student.id).count()
         
         progress_data.append({
             "student_id": student.id,
             "user_id": student.user_id,
-            "submitted": len(submitted_types),
-            "total": len(required_docs),
-            "percentage": (len(submitted_types) / len(required_docs)) * 100 if required_docs else 0
+            "submitted": doc_count,
+            "total": 9,  # Standard required docs
+            "percentage": (doc_count / 9) * 100 if doc_count > 0 else 0
         })
     
     return progress_data

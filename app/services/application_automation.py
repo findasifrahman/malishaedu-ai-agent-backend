@@ -107,7 +107,9 @@ class StudentLoader:
             "highest_degree_cgpa": safe_get('highest_degree_cgpa'),
             
             # Test Scores
-            "hsk_level": safe_get('hsk_level'),
+            "hsk_score": safe_get('hsk_score'),
+            "hskk_level": safe_get('hskk_level'),
+            "hskk_score": safe_get('hskk_score'),
             "csca_status": safe_get('csca_status'),
             "csca_score_math": safe_get('csca_score_math'),
             "csca_score_specialized_chinese": safe_get('csca_score_specialized_chinese'),
@@ -486,7 +488,7 @@ class FormFillerEngine:
         
         # Test scores
         if any(term in combined for term in ["hsk", "汉语水平"]):
-            return self.student_data.get("hsk_level")
+            return self.student_data.get("hsk_score") or self.student_data.get("hskk_level") or self.student_data.get("hskk_score")
         if any(term in combined for term in ["ielts", "toefl", "english", "英语"]):
             return self.student_data.get("english_test_score")
         

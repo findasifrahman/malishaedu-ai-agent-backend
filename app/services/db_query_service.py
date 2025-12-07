@@ -143,6 +143,8 @@ class DBQueryService:
             info += f", {university.country}\n"
         if university.is_partner:
             info += "Partner University: Yes\n"
+        if university.university_ranking is not None:
+            info += f"University Ranking: {university.university_ranking}\n"
         if university.description:
             info += f"Description: {university.description}\n"
         if university.website:
@@ -168,6 +170,12 @@ class DBQueryService:
     def format_program_intake_info(self, intake: ProgramIntake) -> str:
         """Format program intake information as text for LLM with explicit EXACT value markers"""
         info = f"=== EXACT DATABASE VALUES - USE THESE EXACT NUMBERS ===\n"
+        
+        # Include university information with ranking
+        if intake.university:
+            info += self.format_university_info(intake.university)
+            info += "\n"
+        
         # Handle intake_term (still enum) and convert to string
         intake_term = intake.intake_term.value if hasattr(intake.intake_term, 'value') else str(intake.intake_term)
         info += f"Program Intake: {intake_term} {intake.intake_year}\n"
