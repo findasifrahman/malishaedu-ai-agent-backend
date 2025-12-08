@@ -82,8 +82,7 @@ class ProgramIntakeResponse(BaseModel):
     class Config:
         from_attributes = True
 
-@router.get("", response_model=List[ProgramIntakeResponse])
-async def list_program_intakes(
+async def _list_program_intakes(
     university_id: Optional[int] = None,
     major_id: Optional[int] = None,
     intake_term: Optional[IntakeTerm] = None,
@@ -139,6 +138,14 @@ async def list_program_intakes(
         })
     return result
 
+@router.get("", response_model=List[ProgramIntakeResponse])
+async def list_program_intakes(*args, **kwargs):
+    return await _list_program_intakes(*args, **kwargs)
+
+@router.get("/", response_model=List[ProgramIntakeResponse])
+async def list_program_intakes_with_slash(*args, **kwargs):
+    return await _list_program_intakes(*args, **kwargs)
+
 @router.get("/{intake_id}", response_model=ProgramIntakeResponse)
 async def get_program_intake(intake_id: int, db: Session = Depends(get_db)):
     """Get a specific program intake by ID"""
@@ -172,8 +179,7 @@ async def get_program_intake(intake_id: int, db: Session = Depends(get_db)):
         'updated_at': intake.updated_at.isoformat() if intake.updated_at else None,
     }
 
-@router.post("", response_model=ProgramIntakeResponse, status_code=status.HTTP_201_CREATED)
-async def create_program_intake(
+async def _create_program_intake(
     intake_data: ProgramIntakeCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -224,6 +230,14 @@ async def create_program_intake(
         'created_at': intake.created_at.isoformat() if intake.created_at else None,
         'updated_at': intake.updated_at.isoformat() if intake.updated_at else None,
     }
+
+@router.post("", response_model=ProgramIntakeResponse, status_code=status.HTTP_201_CREATED)
+async def create_program_intake(*args, **kwargs):
+    return await _create_program_intake(*args, **kwargs)
+
+@router.post("/", response_model=ProgramIntakeResponse, status_code=status.HTTP_201_CREATED)
+async def create_program_intake_with_slash(*args, **kwargs):
+    return await _create_program_intake(*args, **kwargs)
 
 @router.put("/{intake_id}", response_model=ProgramIntakeResponse)
 async def update_program_intake(

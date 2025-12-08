@@ -44,8 +44,7 @@ class MajorResponse(BaseModel):
     class Config:
         from_attributes = True
 
-@router.get("", response_model=List[MajorResponse])
-async def list_majors(
+async def _list_majors(
     university_id: Optional[int] = None,
     degree_level: Optional[str] = None,  # Changed from DegreeLevel enum to str
     teaching_language: Optional[str] = None,  # Changed from TeachingLanguage enum to str
@@ -82,6 +81,14 @@ async def list_majors(
         })
     return result
 
+@router.get("", response_model=List[MajorResponse])
+async def list_majors(*args, **kwargs):
+    return await _list_majors(*args, **kwargs)
+
+@router.get("/", response_model=List[MajorResponse])
+async def list_majors_with_slash(*args, **kwargs):
+    return await _list_majors(*args, **kwargs)
+
 @router.get("/{major_id}", response_model=MajorResponse)
 async def get_major(major_id: int, db: Session = Depends(get_db)):
     """Get a specific major by ID"""
@@ -102,8 +109,7 @@ async def get_major(major_id: int, db: Session = Depends(get_db)):
         'updated_at': major.updated_at.isoformat() if major.updated_at else None,
     }
 
-@router.post("", response_model=MajorResponse, status_code=status.HTTP_201_CREATED)
-async def create_major(
+async def _create_major(
     major_data: MajorCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -134,6 +140,14 @@ async def create_major(
         'created_at': major.created_at.isoformat() if major.created_at else None,
         'updated_at': major.updated_at.isoformat() if major.updated_at else None,
     }
+
+@router.post("", response_model=MajorResponse, status_code=status.HTTP_201_CREATED)
+async def create_major(*args, **kwargs):
+    return await _create_major(*args, **kwargs)
+
+@router.post("/", response_model=MajorResponse, status_code=status.HTTP_201_CREATED)
+async def create_major_with_slash(*args, **kwargs):
+    return await _create_major(*args, **kwargs)
 
 @router.put("/{major_id}", response_model=MajorResponse)
 async def update_major(

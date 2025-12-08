@@ -69,8 +69,7 @@ class UniversityResponse(BaseModel):
     class Config:
         from_attributes = True
 
-@router.get("", response_model=List[UniversityResponse])
-async def list_universities(
+async def _list_universities(
     is_partner: Optional[bool] = None,
     city: Optional[str] = None,
     province: Optional[str] = None,
@@ -109,6 +108,14 @@ async def list_universities(
         result.append(uni_dict)
     return result
 
+@router.get("", response_model=List[UniversityResponse])
+async def list_universities(*args, **kwargs):
+    return await _list_universities(*args, **kwargs)
+
+@router.get("/", response_model=List[UniversityResponse])
+async def list_universities_with_slash(*args, **kwargs):
+    return await _list_universities(*args, **kwargs)
+
 @router.get("/{university_id}", response_model=UniversityResponse)
 async def get_university(university_id: int, db: Session = Depends(get_db)):
     """Get a specific university by ID"""
@@ -132,8 +139,7 @@ async def get_university(university_id: int, db: Session = Depends(get_db)):
         'updated_at': university.updated_at.isoformat() if university.updated_at else None,
     }
 
-@router.post("", response_model=UniversityResponse, status_code=status.HTTP_201_CREATED)
-async def create_university(
+async def _create_university(
     university_data: UniversityCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -168,6 +174,14 @@ async def create_university(
         'created_at': university.created_at.isoformat() if university.created_at else None,
         'updated_at': university.updated_at.isoformat() if university.updated_at else None,
     }
+
+@router.post("", response_model=UniversityResponse, status_code=status.HTTP_201_CREATED)
+async def create_university(*args, **kwargs):
+    return await _create_university(*args, **kwargs)
+
+@router.post("/", response_model=UniversityResponse, status_code=status.HTTP_201_CREATED)
+async def create_university_with_slash(*args, **kwargs):
+    return await _create_university(*args, **kwargs)
 
 @router.put("/{university_id}", response_model=UniversityResponse)
 async def update_university(
