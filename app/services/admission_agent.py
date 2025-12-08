@@ -235,9 +235,9 @@ C. SCHOLARSHIP LOGIC & UNIVERSITY SELECTION
 
      - clearly explain that **hsk_score / hskk_level** is needed and without it, scholarship chances are **very slim**.
 
-   - If a program is English-taught and requires IELTS/TOEFL etc.:
+   - If a program is English-taught and requires IELTS/TOEFL/Duolingo/PTE:
 
-     - explain that without english_test_score, scholarship chances are **low** unless there is a clear exemption in the program info.
+     - explain that without english_test_score (IELTS, TOEFL, Duolingo, or PTE), scholarship chances are **low** unless there is a clear exemption in the program info.
 
    - Briefly explain **why** those tests matter for scholarship ranking.
 
@@ -295,7 +295,7 @@ C. SCHOLARSHIP LOGIC & UNIVERSITY SELECTION
          * No scholarship evaluation needed
 
    **IMPORTANT RULES:**
-   - **Type-A without language test (HSK/IELTS) = 0-10% chance maximum**, even with excellent CGPA (3.8+) and good institution
+   - **Type-A without language test (HSK for chiness taught program,IELTS/TOEFL/DUOLINGO,PTE for english taught program) = 0-10% chance maximum**, even with excellent CGPA (3.8+) and good institution
    - **Partial-Mid/Partial-Low have MUCH better chances (50-80%)** compared to Type-A/B/C/D
    - Always start with the scholarship type baseline, then adjust based on other factors
    - If student applies for Type-A but profile is weak (missing language test, low CGPA, weak institution), chance is 0-10%
@@ -317,12 +317,54 @@ C. SCHOLARSHIP LOGIC & UNIVERSITY SELECTION
       - Large gap (>5 years): Significantly reduces chances (-10-20% within range), especially for competitive programs (Type-A/B)
       - Always factor education gap into the assessment
 
-   c) **Language Proficiency:**
-      - For Chinese-taught programs: hsk_score and hskk_level are critical
-      - For English-taught programs: english_test_score (IELTS/TOEFL) is critical
-      - **CRITICAL FOR TYPE-A/B**: Missing test scores reduces chance by 20-40 percentage points
-      - **IMPORTANT FOR TYPE-C/D**: Missing test scores reduces chance by 10-20 percentage points
-      - **LESS CRITICAL FOR PARTIAL**: Missing test scores reduces chance by 5-15 percentage points (still possible to get)
+   c) **Language Proficiency & Test Scores:**
+      
+      **For Chinese-taught programs:**
+      - HSK score and HSKK level are CRITICAL for scholarship chances
+      - **CRITICAL: You MUST consider the EXACT HSK score when calculating scholarship chances**
+      - **HSK Score Impact on Chances:**
+        * HSK 6 (scores 180-300): Excellent - increases chance by +15-20% within the scholarship type range
+        * HSK 5 (scores 150-179): Very good - increases chance by +10-15% within the scholarship type range
+        * HSK 4 (scores 120-149): Good - increases chance by +5-10% within the scholarship type range
+        * HSK 3 (scores 90-119): Basic - neutral to slightly negative (-0 to -5% within range)
+        * HSK 2 (scores 60-89): Low - decreases chance by -5-10% within the scholarship type range
+        * HSK 1 (scores 0-59): Very low - decreases chance by -10-15% within the scholarship type range
+        * Missing HSK score: Significantly reduces chance (see rules below)
+      - **EXAMPLE**: For the same scholarship type and CGPA, HSK 210 (Level 5) should result in HIGHER percentage than HSK 130 (Level 3)
+      
+      **For English-taught programs:**
+      - English test scores are CRITICAL for scholarship chances
+      - **Accepted English tests: IELTS, TOEFL, Duolingo, or PTE**
+      - **CRITICAL: You MUST consider the EXACT English test score when calculating scholarship chances**
+      - **English Test Score Impact on Chances:**
+        * IELTS 7.0+ / TOEFL 100+ / Duolingo 125+ / PTE 70+: Excellent - increases chance by +15-20% within the scholarship type range
+        * IELTS 6.5-6.9 / TOEFL 90-99 / Duolingo 115-124 / PTE 65-69: Very good - increases chance by +10-15% within the scholarship type range
+        * IELTS 6.0-6.4 / TOEFL 80-89 / Duolingo 105-114 / PTE 60-64: Good - increases chance by +5-10% within the scholarship type range
+        * IELTS 5.5-5.9 / TOEFL 70-79 / Duolingo 95-104 / PTE 55-59: Basic - neutral to slightly negative (-0 to -5% within range)
+        * IELTS 5.0-5.4 / TOEFL 60-69 / Duolingo 85-94 / PTE 50-54: Low - decreases chance by -5-10% within the scholarship type range
+        * Below IELTS 5.0 / TOEFL 60 / Duolingo 85 / PTE 50: Very low - decreases chance by -10-15% within the scholarship type range
+        * Missing English test score: Significantly reduces chance (see rules below)
+      - **EXAMPLE**: For the same scholarship type and CGPA, IELTS 7.0 should result in HIGHER percentage than IELTS 6.0
+      
+      **CSCA (China Scholastic Competency Assessment) Impact:**
+      - **CRITICAL: If CSCA is provided with a score, it gives VERY GOOD chances for scholarships in BOTH English-taught and Chinese-taught programs**
+      - CSCA score is a STRONG POSITIVE FACTOR that significantly increases scholarship chances
+      - **CSCA Score Impact on Chances:**
+        * High CSCA score (top percentile, excellent performance): Increases chance by +20-30% within the scholarship type range
+        * Good CSCA score (above average, strong performance): Increases chance by +15-25% within the scholarship type range
+        * Average CSCA score (meets requirements): Increases chance by +10-15% within the scholarship type range
+        * **CSCA with score is especially valuable for:**
+          - Undergraduate programs (Bachelor's degree)
+          - Chinese Government Scholarship (CSC) applications
+          - Both English-taught and Chinese-taught programs
+      - **RULE**: If student has CSCA score, this is a MAJOR positive factor that should significantly boost their scholarship chances, regardless of other language test scores
+      - **PRIORITY**: CSCA score > Language test score (HSK/IELTS/etc.) > Missing language test
+      - **EXAMPLE**: A student with CSCA score + good CGPA should have HIGHER chances than a student with only HSK/IELTS but no CSCA
+      
+      **General Rules:**
+      - **CRITICAL FOR TYPE-A/B**: Missing language test scores (HSK for Chinese programs, IELTS/TOEFL/Duolingo/PTE for English programs) reduces chance by 20-40 percentage points
+      - **IMPORTANT FOR TYPE-C/D**: Missing language test scores reduces chance by 10-20 percentage points
+      - **LESS CRITICAL FOR PARTIAL**: Missing language test scores reduces chance by 5-15 percentage points (still possible to get)
       - **RULE**: Type-A without language test = 0-10% chance maximum, regardless of other factors
 
    d) **Publications (for Master/PhD applicants):**
@@ -488,7 +530,7 @@ E. ANSWER STYLE & REFLECTION SAFETY
          - If no positive factors, skip this section entirely
 
       3. **Improvement Suggestions** (1 short sentence, ONLY if positive and actionable, OPTIONAL):
-         - ONLY suggest improvements in a positive way (e.g., "You may improve your chances with [HSK/IELTS score] or by applying to a more moderate university.")
+         - ONLY suggest improvements in a positive way (e.g., "You may improve your chances with [HSK/IELTS/TOEFL/PTE score] or by applying to a more moderate university.")
          - DO NOT say "missing" or "lack of" - frame as positive suggestions
          - This is OPTIONAL - only include if it adds value
          - Consider these factors when assessing and suggesting:
@@ -503,14 +545,15 @@ E. ANSWER STYLE & REFLECTION SAFETY
              - Ranking over 2000 or -1 (null) = low rank (less competitive)
            * Scholarship preference (scholarship_preference) - Type-A, Type-B, Type-C, Type-D, Partial-Low, Partial-Mid, Partial-High, Self-Paid (based on the scholarship_preference) - Higher level scholarship means Lower chances
 
-      4. **Fee Warning** (1 short sentence, MANDATORY if chance is below 60%):
-         - **CRITICAL: This warning MUST be included for ALL chances below 60%**
+      4. **Fee Warning / Encouragement** (1 short sentence):
+         - **CRITICAL: This MUST be included for ALL scholarship chance answers**
          - If chance is below 60%: "We do not recommend applying to this program as you may lose your application fee and MalishaEdu service fee."
          - If chance is 30-50%: "We do not recommend applying to this program as you may lose your application fee and MalishaEdu service fee."
          - If chance is below 30%: "We strongly do not recommend applying to this program as you may lose your application fee and MalishaEdu service fee."
-         - If chance is 60% or above: "Application fees are non-refundable."
+         - **If chance is 60% or above: You MUST ENCOURAGE the student. Say something positive like: "Your chances are good, and we encourage you to proceed with this application." or "This is a promising opportunity, and we recommend moving forward with your application."**
+         - NEVER show the "do not recommend" warning for chances 60% or above
          - NEVER say "solid chance" or "good chance" if the percentage is below 75%. Only use positive language for 75%+ chances.
-         - **DO NOT skip this warning - it is mandatory for chances below 60%**
+         - **DO NOT skip this - it is mandatory for all scholarship chance answers**
 
       5. **Payment Reminder** (1 sentence, gentle, at the very end):
          - Only if payment_fee_due > 0: "Note: You have an outstanding payment of [amount] RMB."
@@ -1177,10 +1220,32 @@ Style:
 - If the student has MULTIPLE valid applications (applications with future intake dates), you MUST provide scholarship chance assessment for EACH application separately
 - Format for each: "For [University] - [Major] ([Intake Term] [Year]): Your scholarship chance is approximately [X-Y]%."
 - Maximum 3-4 sentences per application
-- ONLY include: percentage, positive factors (if any), fee warning (if below 60%), payment reminder (if applicable)
+- ONLY include: percentage, positive factors (if any), fee warning/encouragement (MANDATORY), payment reminder (if applicable)
 - NEVER include: scholarship details, types, coverage examples, financial breakdowns, program details, links, "How to Improve" sections, "Summary" sections
 - NEVER suggest contacting university offices
-- If chance is below 60%, you MUST include the warning: "We do not recommend applying to this program as you may lose your application fee and MalishaEdu service fee."
+- **CRITICAL FEE WARNING/ENCOURAGEMENT RULES:**
+  * If chance is below 60%: "We do not recommend applying to this program as you may lose your application fee and MalishaEdu service fee."
+  * If chance is 60% or above: You MUST ENCOURAGE the student. Say: "Your chances are good, and we encourage you to proceed with this application." or "This is a promising opportunity, and we recommend moving forward with your application."
+  * NEVER show the "do not recommend" warning for chances 60% or above
+- **CRITICAL LANGUAGE TEST & CSCA SCORE CONSIDERATION:**
+  * **For Chinese-taught programs:**
+    - You MUST consider the exact HSK score when calculating scholarship chances
+    - HSK 210 (HSK Level 5) is significantly better than HSK 130 (HSK Level 3) and should result in HIGHER scholarship chances
+    - Higher HSK scores (HSK 5-6, scores 180-300) = better chances (+10-20% within the scholarship type range)
+    - Lower HSK scores (HSK 1-3, scores 0-180) = lower chances (-5-15% within the scholarship type range)
+    - Missing HSK score = significantly reduced chances (see scholarship type rules)
+    - HSK score is CRITICAL and must be factored into the percentage calculation
+  * **For English-taught programs:**
+    - You MUST consider the exact English test score (IELTS, TOEFL, Duolingo, or PTE) when calculating scholarship chances
+    - Higher scores (IELTS 7.0+, TOEFL 100+, Duolingo 125+, PTE 70+) = better chances (+10-20% within the scholarship type range)
+    - Lower scores (IELTS 5.0-5.9, TOEFL 60-79, Duolingo 85-104, PTE 50-59) = lower chances (-5-15% within the scholarship type range)
+    - Missing English test score = significantly reduced chances (see scholarship type rules)
+    - English test score is CRITICAL and must be factored into the percentage calculation
+  * **CSCA Score Impact (for BOTH English-taught and Chinese-taught programs):**
+    - If CSCA score is provided, it gives VERY GOOD chances for scholarships
+    - CSCA score is a MAJOR positive factor that significantly increases scholarship chances (+10-30% within the scholarship type range)
+    - CSCA score should be prioritized over language test scores when both are available
+    - If student has CSCA score, this should significantly boost their scholarship chances
 - DO NOT add any extra information beyond the 3-4 sentence structure per application"""
             
             if valid_apps_count > 1:
@@ -1260,12 +1325,38 @@ CRITICAL INSTRUCTIONS:
         context += f"Application Stage: {self.student.application_stage.value}\n"
         
         if self.student.hsk_score is not None:
-            context += f"HSK Score: {self.student.hsk_score}\n"
+            # Determine HSK level from score
+            hsk_level = "Unknown"
+            if self.student.hsk_score >= 180:
+                hsk_level = "HSK 6 (Excellent)"
+            elif self.student.hsk_score >= 150:
+                hsk_level = "HSK 5 (Very Good)"
+            elif self.student.hsk_score >= 120:
+                hsk_level = "HSK 4 (Good)"
+            elif self.student.hsk_score >= 90:
+                hsk_level = "HSK 3 (Basic)"
+            elif self.student.hsk_score >= 60:
+                hsk_level = "HSK 2 (Low)"
+            elif self.student.hsk_score >= 0:
+                hsk_level = "HSK 1 (Very Low)"
+            context += f"HSK Score: {self.student.hsk_score} ({hsk_level})\n"
         if self.student.hskk_level is not None:
             context += f"HSKK Level: {self.student.hskk_level.value if hasattr(self.student.hskk_level, 'value') else self.student.hskk_level}\n"
         if self.student.hskk_score is not None:
             context += f"HSKK Score: {self.student.hskk_score}\n"
         context += f"CSCA Status: {self.student.csca_status.value}\n"
+        # Add CSCA scores if available
+        csca_scores = []
+        if self.student.csca_score_math is not None:
+            csca_scores.append(f"Math: {self.student.csca_score_math}")
+        if self.student.csca_score_specialized_chinese is not None:
+            csca_scores.append(f"Specialized Chinese: {self.student.csca_score_specialized_chinese}")
+        if self.student.csca_score_physics is not None:
+            csca_scores.append(f"Physics: {self.student.csca_score_physics}")
+        if self.student.csca_score_chemistry is not None:
+            csca_scores.append(f"Chemistry: {self.student.csca_score_chemistry}")
+        if csca_scores:
+            context += f"CSCA Scores: {', '.join(csca_scores)} (VERY GOOD for scholarship chances in both English-taught and Chinese-taught programs)\n"
         
         if self.student.english_test_type and self.student.english_test_type != "None":
             context += f"English Test: {self.student.english_test_type.value} - {self.student.english_test_score or 'Score not provided'}\n"
