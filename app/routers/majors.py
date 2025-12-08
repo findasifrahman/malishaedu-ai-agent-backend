@@ -102,7 +102,7 @@ async def get_major(major_id: int, db: Session = Depends(get_db)):
         'updated_at': major.updated_at.isoformat() if major.updated_at else None,
     }
 
-@router.post("/", response_model=MajorResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=MajorResponse, status_code=status.HTTP_201_CREATED)
 async def create_major(
     major_data: MajorCreate,
     current_user: User = Depends(get_current_user),

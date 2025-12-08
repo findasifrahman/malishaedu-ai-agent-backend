@@ -172,7 +172,7 @@ async def get_program_intake(intake_id: int, db: Session = Depends(get_db)):
         'updated_at': intake.updated_at.isoformat() if intake.updated_at else None,
     }
 
-@router.post("/", response_model=ProgramIntakeResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ProgramIntakeResponse, status_code=status.HTTP_201_CREATED)
 async def create_program_intake(
     intake_data: ProgramIntakeCreate,
     current_user: User = Depends(get_current_user),

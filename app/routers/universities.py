@@ -132,7 +132,7 @@ async def get_university(university_id: int, db: Session = Depends(get_db)):
         'updated_at': university.updated_at.isoformat() if university.updated_at else None,
     }
 
-@router.post("/", response_model=UniversityResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=UniversityResponse, status_code=status.HTTP_201_CREATED)
 async def create_university(
     university_data: UniversityCreate,
     current_user: User = Depends(get_current_user),
