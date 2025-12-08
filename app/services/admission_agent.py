@@ -515,6 +515,14 @@ E. ANSWER STYLE & REFLECTION SAFETY
       5. **Payment Reminder** (1 sentence, gentle, at the very end):
          - Only if payment_fee_due > 0: "Note: You have an outstanding payment of [amount] RMB."
 
+   **CRITICAL: When student asks "What are my scholarship chances?" WITHOUT specifying a specific program:**
+      - You MUST consider ALL valid applications (applications with future intake dates) that the student has added
+      - Provide scholarship chance assessment for EACH valid application separately
+      - Format: "For [University] - [Major] ([Intake Term] [Year]): Your scholarship chance is approximately [X-Y]%."
+      - If student has multiple applications, provide a brief assessment for each one
+      - Only if student specifically mentions a single program (e.g., "What are my scholarship chances for [University]?") should you focus on that one program
+      - The ALL APPLICATIONS context shows all valid applications - use ALL of them unless the question is specifically about one program
+
    b) **What NOT to include in scholarship chance answers (STRICTLY FORBIDDEN):**
 
       - Program details (university name, major name, intake term/year, teaching language, duration)
@@ -1153,18 +1161,49 @@ Style:
         
         # Add special instruction for scholarship chance questions
         if is_scholarship_chance_question:
-            messages.append({
-                "role": "system",
-                "content": """CRITICAL: This is a SCHOLARSHIP CHANCE question. You MUST follow these rules STRICTLY:
-- Maximum 3-4 sentences total
+            # Count valid applications
+            from datetime import timezone
+            current_date_check = datetime.now(timezone.utc)
+            valid_apps_count = 0
+            for app in applications:
+                if app.program_intake:
+                    intake = app.program_intake
+                    month = 3 if intake.intake_term.value.upper() == 'MARCH' else 9
+                    intake_date = datetime(intake.intake_year, month, 1, tzinfo=timezone.utc)
+                    if intake_date > current_date_check:
+                        valid_apps_count += 1
+            
+            scholarship_instruction = """CRITICAL: This is a SCHOLARSHIP CHANCE question. You MUST follow these rules STRICTLY:
+- If the student has MULTIPLE valid applications (applications with future intake dates), you MUST provide scholarship chance assessment for EACH application separately
+- Format for each: "For [University] - [Major] ([Intake Term] [Year]): Your scholarship chance is approximately [X-Y]%."
+- Maximum 3-4 sentences per application
 - ONLY include: percentage, positive factors (if any), fee warning (if below 60%), payment reminder (if applicable)
 - NEVER include: scholarship details, types, coverage examples, financial breakdowns, program details, links, "How to Improve" sections, "Summary" sections
 - NEVER suggest contacting university offices
 - If chance is below 60%, you MUST include the warning: "We do not recommend applying to this program as you may lose your application fee and MalishaEdu service fee."
-- DO NOT add any extra information beyond the 3-4 sentence structure"""
+- DO NOT add any extra information beyond the 3-4 sentence structure per application"""
+            
+            if valid_apps_count > 1:
+                scholarship_instruction += f"\n\nIMPORTANT: The student has {valid_apps_count} valid applications. You MUST provide scholarship chance assessment for ALL {valid_apps_count} applications, not just one."
+            
+            messages.append({
+                "role": "system",
+                "content": scholarship_instruction
             })
         
         if full_context:
+            # Count valid applications for context message
+            from datetime import timezone
+            current_date_check = datetime.now(timezone.utc)
+            valid_apps_list = []
+            for app in applications:
+                if app.program_intake:
+                    intake = app.program_intake
+                    month = 3 if intake.intake_term.value.upper() == 'MARCH' else 9
+                    intake_date = datetime(intake.intake_year, month, 1, tzinfo=timezone.utc)
+                    if intake_date > current_date_check:
+                        valid_apps_list.append(app)
+            
             context_message = f"""Use the following information about the student and their application:
 
 {full_context}
@@ -1173,6 +1212,7 @@ CRITICAL INSTRUCTIONS:
 - The STUDENT PROFILE section contains ALL available student information from the database
 - DO NOT ask for any information that is already shown in the STUDENT PROFILE (e.g., if it shows "Highest Degree CGPA: 3.8", do NOT ask for CGPA)
 - Only ask for information that is TRULY missing from both STUDENT PROFILE and conversation history
+- The ALL APPLICATIONS section shows ALL valid applications (applications with future intake dates). When answering questions about scholarship chances, costs, or application status, you MUST consider ALL {len(valid_apps_list)} valid application(s) unless the student specifically asks about a single program
 - Provide personalized guidance based on this information."""
             messages.append({"role": "system", "content": context_message})
         
@@ -1246,7 +1286,10 @@ CRITICAL INSTRUCTIONS:
         return context
     
     def _get_applications_context(self) -> str:
-        """Get all applications for the student"""
+        """Get all applications for the student, filtering out past intakes"""
+        from datetime import timezone
+        current_date = datetime.now(timezone.utc)
+        
         applications = self.db.query(Application).filter(
             Application.student_id == self.student.id
         ).all()
@@ -1254,8 +1297,25 @@ CRITICAL INSTRUCTIONS:
         if not applications:
             return "No applications yet. Student can apply to multiple program intakes."
         
-        context = f"Student has {len(applications)} application(s):\n"
+        # Filter out applications with past intake dates
+        valid_applications = []
         for app in applications:
+            if app.program_intake:
+                intake = app.program_intake
+                # Check if intake date is in the future
+                # IntakeTerm enum values: MARCH, SEPTEMBER
+                month = 3 if intake.intake_term.value.upper() == 'MARCH' else 9
+                intake_date = datetime(intake.intake_year, month, 1, tzinfo=timezone.utc)
+                
+                # Only include if intake date is in the future
+                if intake_date > current_date:
+                    valid_applications.append(app)
+        
+        if not valid_applications:
+            return f"Student has {len(applications)} application(s), but all have past intake dates. Student needs to apply to a new program with future intake dates."
+        
+        context = f"Student has {len(valid_applications)} valid application(s) (intake dates in the future):\n"
+        for app in valid_applications:
             if app.program_intake:
                 intake = app.program_intake
                 context += f"\n- Application #{app.id}:\n"
