@@ -44,7 +44,7 @@ class MajorResponse(BaseModel):
     class Config:
         from_attributes = True
 
-@router.get("/", response_model=List[MajorResponse])
+@router.get("", response_model=List[MajorResponse])
 async def list_majors(
     university_id: Optional[int] = None,
     degree_level: Optional[str] = None,  # Changed from DegreeLevel enum to str
