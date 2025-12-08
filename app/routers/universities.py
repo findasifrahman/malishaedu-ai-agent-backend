@@ -109,12 +109,22 @@ async def _list_universities(
     return result
 
 @router.get("", response_model=List[UniversityResponse])
-async def list_universities(*args, **kwargs):
-    return await _list_universities(*args, **kwargs)
+async def list_universities(
+    is_partner: Optional[bool] = None,
+    city: Optional[str] = None,
+    province: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    return await _list_universities(is_partner=is_partner, city=city, province=province, db=db)
 
 @router.get("/", response_model=List[UniversityResponse])
-async def list_universities_with_slash(*args, **kwargs):
-    return await _list_universities(*args, **kwargs)
+async def list_universities_with_slash(
+    is_partner: Optional[bool] = None,
+    city: Optional[str] = None,
+    province: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    return await _list_universities(is_partner=is_partner, city=city, province=province, db=db)
 
 @router.get("/{university_id}", response_model=UniversityResponse)
 async def get_university(university_id: int, db: Session = Depends(get_db)):
@@ -176,12 +186,20 @@ async def _create_university(
     }
 
 @router.post("", response_model=UniversityResponse, status_code=status.HTTP_201_CREATED)
-async def create_university(*args, **kwargs):
-    return await _create_university(*args, **kwargs)
+async def create_university(
+    university_data: UniversityCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return await _create_university(university_data=university_data, current_user=current_user, db=db)
 
 @router.post("/", response_model=UniversityResponse, status_code=status.HTTP_201_CREATED)
-async def create_university_with_slash(*args, **kwargs):
-    return await _create_university(*args, **kwargs)
+async def create_university_with_slash(
+    university_data: UniversityCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return await _create_university(university_data=university_data, current_user=current_user, db=db)
 
 @router.put("/{university_id}", response_model=UniversityResponse)
 async def update_university(

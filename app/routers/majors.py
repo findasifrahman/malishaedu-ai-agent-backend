@@ -82,12 +82,24 @@ async def _list_majors(
     return result
 
 @router.get("", response_model=List[MajorResponse])
-async def list_majors(*args, **kwargs):
-    return await _list_majors(*args, **kwargs)
+async def list_majors(
+    university_id: Optional[int] = None,
+    degree_level: Optional[str] = None,
+    teaching_language: Optional[str] = None,
+    is_featured: Optional[bool] = None,
+    db: Session = Depends(get_db)
+):
+    return await _list_majors(university_id=university_id, degree_level=degree_level, teaching_language=teaching_language, is_featured=is_featured, db=db)
 
 @router.get("/", response_model=List[MajorResponse])
-async def list_majors_with_slash(*args, **kwargs):
-    return await _list_majors(*args, **kwargs)
+async def list_majors_with_slash(
+    university_id: Optional[int] = None,
+    degree_level: Optional[str] = None,
+    teaching_language: Optional[str] = None,
+    is_featured: Optional[bool] = None,
+    db: Session = Depends(get_db)
+):
+    return await _list_majors(university_id=university_id, degree_level=degree_level, teaching_language=teaching_language, is_featured=is_featured, db=db)
 
 @router.get("/{major_id}", response_model=MajorResponse)
 async def get_major(major_id: int, db: Session = Depends(get_db)):
@@ -142,12 +154,20 @@ async def _create_major(
     }
 
 @router.post("", response_model=MajorResponse, status_code=status.HTTP_201_CREATED)
-async def create_major(*args, **kwargs):
-    return await _create_major(*args, **kwargs)
+async def create_major(
+    major_data: MajorCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return await _create_major(major_data=major_data, current_user=current_user, db=db)
 
 @router.post("/", response_model=MajorResponse, status_code=status.HTTP_201_CREATED)
-async def create_major_with_slash(*args, **kwargs):
-    return await _create_major(*args, **kwargs)
+async def create_major_with_slash(
+    major_data: MajorCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return await _create_major(major_data=major_data, current_user=current_user, db=db)
 
 @router.put("/{major_id}", response_model=MajorResponse)
 async def update_major(
