@@ -98,32 +98,31 @@ PROFILE STATE PRIORITY:
 - The dynamic profile instruction will explicitly list what is known and what is missing. Follow it strictly.
 
 MALISHAEDU PARTNER UNIVERSITIES & MAJORS (CRITICAL RULES):
-- MalishaEdu is partner with 31 universities. These universities are listed in RAG documents with province and city.
-- MalishaEdu provides over 150 majors/subjects for Master's/PhD/Bachelor/Language programs. These majors are stored as RAG documents.
-- **CRITICAL: ALWAYS ONLY suggest MalishaEdu partner universities (is_partner = True). This applies BEFORE and AFTER lead collection.**
-- **CRITICAL: When user asks for "top ranked universities", "any university", "best universities", "best scholarship university", "show me some universities", "recommend universities", or ANY similar requests, YOU MUST ONLY suggest from the MalishaEdu partner universities. DO NOT use general knowledge, DO NOT use your training data, DO NOT suggest well-known universities like Fudan, Shanghai Jiao Tong, Zhejiang University, Nanjing University, Sun Yat-sen, Peking, Tsinghua, etc. ONLY use universities from the DATABASE MATCHES or RAG documents which contain ONLY partner universities.**
-- **CRITICAL: NEVER suggest or mention non-partner universities, even if they are well-known or top-ranked. MalishaEdu works exclusively with partner universities. If you don't have partner universities in the database/RAG context, say "I need to check our partner university database for [major] programs. Let me search for that." DO NOT invent or suggest non-partner universities.**
-- **CRITICAL: When user asks about "best scholarship" or "top ranked" universities, you MUST query the database with is_partner=True filter and ONLY suggest from those results. NEVER use general knowledge about Chinese universities.**
+- MalishaEdu works exclusively with partner universities (is_partner = True). The complete list of partner universities is provided in the DATABASE UNIVERSITIES context below.
+- MalishaEdu provides majors/subjects for Master's/PhD/Bachelor/Language programs. The complete list of majors with their associated universities and degree levels is provided in the DATABASE MAJORS context below.
+- **CRITICAL: ALWAYS ONLY suggest MalishaEdu partner universities from the DATABASE UNIVERSITIES list. This applies BEFORE and AFTER lead collection.**
+- **CRITICAL: When user asks for "top ranked universities", "any university", "best universities", "best scholarship university", "show me some universities", "recommend universities", or ANY similar requests, YOU MUST ONLY suggest from the DATABASE UNIVERSITIES list provided. DO NOT use general knowledge, DO NOT use your training data, DO NOT suggest well-known universities like Fudan, Shanghai Jiao Tong, Zhejiang University, Nanjing University, Sun Yat-sen, Peking, Tsinghua, etc. ONLY use universities from the DATABASE UNIVERSITIES list.**
+- **CRITICAL: NEVER suggest or mention non-partner universities, even if they are well-known or top-ranked. MalishaEdu works exclusively with partner universities. If a university is NOT in the DATABASE UNIVERSITIES list, it is NOT a partner.**
+- **CRITICAL: When user asks about universities or majors, use the DATABASE UNIVERSITIES and DATABASE MAJORS lists provided in the context. DO NOT use RAG for university/major lists - use the database arrays instead.**
 - **CRITICAL: NON-PARTNER UNIVERSITY DIVERSION (MANDATORY):**
-  * If user mentions a university that is NOT a MalishaEdu partner (e.g., Peking University, Tsinghua University, Fudan, Shanghai Jiao Tong, Zhejiang University, Nanjing University, Sun Yat-sen, etc.):
+  * If user mentions a university that is NOT in the DATABASE UNIVERSITIES list (e.g., Peking University, Tsinghua University, Fudan, Shanghai Jiao Tong, Zhejiang University, Nanjing University, Sun Yat-sen, etc.):
     - DO NOT provide detailed information about that non-partner university (costs, deadlines, etc.)
     - IMMEDIATELY mention: "I understand you're interested in [University Name]. However, MalishaEdu is one of the biggest education agent services in China and works exclusively with partner universities where we can actually provide 100% admission support, scholarship guidance, and full post-arrival services."
     - STRONGLY EMPHASIZE: "While we can't directly assist with [Non-Partner University], MalishaEdu can guarantee admission support, scholarship applications, and complete post-arrival services at our partner universities."
-    - DIVERT user toward MalishaEdu partner universities that offer the SAME major/degree level
-    - Search RAG documents for partner universities offering the same major (e.g., "MalishaEdu partner universities Electrical Electronics PhD")
-    - Suggest 3-5 partner universities from RAG that match their major and degree level
-    - Example response: "I understand you're interested in [Non-Partner University] for [Major] PhD. MalishaEdu is one of the biggest education agents in China and works with partner universities where we can actually provide 100% admission support and scholarship guidance. For [Major] PhD programs, I can suggest these excellent MalishaEdu partner universities: [list from RAG with same major]. At these partner universities, MalishaEdu can guarantee full admission support, help with scholarship applications, and provide complete post-arrival services including airport pickup, accommodation, bank account setup, and more."
+    - DIVERT user toward MalishaEdu partner universities from the DATABASE UNIVERSITIES list that offer the SAME major/degree level (check DATABASE MAJORS list)
+    - Suggest 3-5 partner universities from DATABASE UNIVERSITIES that match their major and degree level (use DATABASE MAJORS to find which universities offer that major)
+    - Example response: "I understand you're interested in [Non-Partner University] for [Major] PhD. MalishaEdu is one of the biggest education agents in China and works with partner universities where we can actually provide 100% admission support and scholarship guidance. For [Major] PhD programs, I can suggest these excellent MalishaEdu partner universities: [list from DATABASE UNIVERSITIES that have matching majors in DATABASE MAJORS]. At these partner universities, MalishaEdu can guarantee full admission support, help with scholarship applications, and provide complete post-arrival services including airport pickup, accommodation, bank account setup, and more."
   * DO NOT waste prompts providing information about non-partner universities - immediately divert to partners
-  * **CRITICAL: When user asks for "top ranked universities", "any university", "best universities", "show me some universities", DO NOT use general knowledge to suggest non-partner universities. ONLY suggest from the MalishaEdu partner universities listed in the database or RAG.**
+  * **CRITICAL: When user asks for "top ranked universities", "any university", "best universities", "show me some universities", DO NOT use general knowledge to suggest non-partner universities. ONLY suggest from the DATABASE UNIVERSITIES list.**
 - If user shows interest in a province/city OUTSIDE of MalishaEdu service area:
   * MENTION that MalishaEdu provides services in specific provinces/cities
-  * DIVERT user toward MalishaEdu partner provinces/cities
-  * Suggest cities/provinces from RAG documents where MalishaEdu has partner universities
+  * DIVERT user toward MalishaEdu partner provinces/cities (check DATABASE UNIVERSITIES list for cities/provinces)
+  * Suggest cities/provinces from DATABASE UNIVERSITIES where MalishaEdu has partner universities
 - If user shows interest in a major OUTSIDE of MalishaEdu offerings (before lead collected):
   * FIRST: PURSUE user to choose a RELATED major from MalishaEdu offerings
-  * Search RAG documents for related majors (e.g., "MalishaEdu majors related to [user's major]")
-  * Suggest 3-5 similar majors from MalishaEdu's 150+ majors but degree_level should be the same as the user's choice
-  * Example: "I see you're interested in [major]. While we don't offer that exact program, we have related programs like [similar majors from MalishaEdu]. Would any of these interest you?"
+  * Use the DATABASE MAJORS list to find related majors (fuzzy match by name and filter by degree_level)
+  * Suggest 3-5 similar majors from DATABASE MAJORS but degree_level should be the same as the user's choice
+  * Example: "I see you're interested in [major]. While we don't offer that exact program, we have related programs like [similar majors from DATABASE MAJORS]. Would any of these interest you?"
   * Keep engaging naturally to collect their information (nationality, contact info) through conversation
   * Once lead is collected, continue encouraging toward supported majors/universities for personalized database information
 - If user shows interest in a major OUTSIDE of MalishaEdu offerings (after lead collected):
@@ -485,6 +484,53 @@ Style Guidelines:
         self.rag_service = RAGService()
         self.tavily_service = TavilyService()
         self.openai_service = OpenAIService()
+        
+        # Load all partner universities at startup
+        self.all_universities = self._load_all_universities()
+        
+        # Load all majors with university and degree level associations at startup
+        self.all_majors = self._load_all_majors()
+    
+    def _load_all_universities(self) -> List[Dict[str, Any]]:
+        """Load all partner universities from database at startup"""
+        try:
+            universities = self.db.query(University).filter(University.is_partner == True).all()
+            return [
+                {
+                    "id": uni.id,
+                    "name": uni.name,
+                    "city": uni.city,
+                    "province": uni.province,
+                    "ranking": uni.university_ranking,
+                    "country": uni.country or "China",
+                    "description": uni.description
+                }
+                for uni in universities
+            ]
+        except Exception as e:
+            print(f"Error loading universities: {e}")
+            return []
+    
+    def _load_all_majors(self) -> List[Dict[str, Any]]:
+        """Load all majors with university and degree level associations at startup"""
+        try:
+            majors = self.db.query(Major).join(University).filter(University.is_partner == True).all()
+            return [
+                {
+                    "id": major.id,
+                    "name": major.name,
+                    "university_id": major.university_id,
+                    "university_name": major.university.name,
+                    "degree_level": major.degree_level,
+                    "teaching_language": major.teaching_language,
+                    "discipline": major.discipline,
+                    "duration_years": major.duration_years
+                }
+                for major in majors
+            ]
+        except Exception as e:
+            print(f"Error loading majors: {e}")
+            return []
     
     def extract_student_profile_state(self, conversation_history: List[Dict[str, str]]) -> StudentProfileState:
         """
@@ -1085,15 +1131,14 @@ Return the JSON object:"""
         Fuzzy match university name from user input (handles typos and different languages)
         Returns: (matched_name, list_of_similar_matches)
         If confidence is high (>=0.8), returns the match. Otherwise returns None and list of similar for confirmation.
+        Uses pre-loaded all_universities array instead of querying database.
         """
         user_input_lower = user_input.lower().strip()
         
-        # Get all universities from database
-        all_universities = self.db_service.search_universities(limit=100)
-        
+        # Use pre-loaded universities array instead of querying database
         matches = []
-        for uni in all_universities:
-            uni_name_lower = uni.name.lower()
+        for uni in self.all_universities:
+            uni_name_lower = uni["name"].lower()
             
             # CRITICAL: Check if user input is contained in university name (handles "Beihang University" matching "Beihang University (Hangzhou International Campus)")
             # This should be checked FIRST and given high priority
@@ -1136,7 +1181,7 @@ Return the JSON object:"""
                     similarity = max(similarity, 0.95)
             
             if similarity >= threshold:
-                matches.append((uni.name, similarity, uni))
+                matches.append((uni["name"], similarity, uni))
         
         # Sort by similarity
         matches.sort(key=lambda x: x[1], reverse=True)
@@ -1152,7 +1197,7 @@ Return the JSON object:"""
         
         return None, []
     
-    def _fuzzy_match_major(self, user_input: str, university_id: Optional[int] = None, threshold: float = 0.4) -> Tuple[Optional[str], List[str]]:
+    def _fuzzy_match_major(self, user_input: str, university_id: Optional[int] = None, degree_level: Optional[str] = None, threshold: float = 0.4) -> Tuple[Optional[str], List[str]]:
         """
         Fuzzy match major name from user input (handles typos, different languages, abbreviations, and variations)
         Returns: (matched_name, list_of_similar_matches)
@@ -1165,26 +1210,29 @@ Return the JSON object:"""
         user_input_clean = re.sub(r'[^\w\s&]', '', user_input.lower().strip())
         user_input_words = set(user_input_clean.split())
         
-        # Get majors (optionally filtered by university) - increase limit to cover all majors
+        # Use pre-loaded majors array instead of querying database
+        # Filter by university_id and degree_level if provided
+        all_majors = self.all_majors
         if university_id:
-            all_majors = self.db_service.search_majors(university_id=university_id, limit=200)
-        else:
-            all_majors = self.db_service.search_majors(limit=200)
+            all_majors = [m for m in all_majors if m["university_id"] == university_id]
+        if degree_level:
+            # Filter by degree level if provided
+            all_majors = [m for m in all_majors if m.get("degree_level") and degree_level.lower() in m["degree_level"].lower()]
         
         # Calculate similarity scores with multiple strategies
         matches = []
         for major in all_majors:
-            major_name_clean = re.sub(r'[^\w\s&]', '', major.name.lower())
+            major_name_clean = re.sub(r'[^\w\s&]', '', major["name"].lower())
             major_name_words = set(major_name_clean.split())
             
             # Strategy 1: Exact match (highest priority)
             if user_input_clean == major_name_clean:
-                matches.append((major.name, 1.0))
+                matches.append((major["name"], 1.0))
                 continue
             
             # Strategy 2: Substring match (high priority)
             if user_input_clean in major_name_clean or major_name_clean in user_input_clean:
-                matches.append((major.name, 0.95))
+                matches.append((major["name"], 0.95))
                 continue
             
             # Strategy 3: Word overlap (for handling variations like "Computer Science & Technology" vs "Computer Science and Technology")
@@ -1193,7 +1241,7 @@ Return the JSON object:"""
             if common_words:
                 word_overlap_ratio = len(common_words) / max(len(user_input_words), len(major_name_words))
                 if word_overlap_ratio >= 0.3:  # Lowered threshold to 30% for better matching (e.g., "Industrial automation" matches "Automation")
-                    matches.append((major.name, 0.6 + word_overlap_ratio * 0.3))
+                    matches.append((major["name"], 0.6 + word_overlap_ratio * 0.3))
                     continue
             
             # Strategy 3.5: Semantic keyword matching (e.g., "Industrial automation" matches "Automation", "Control", "Engineering")
@@ -1202,7 +1250,7 @@ Return the JSON object:"""
             if any(kw in user_input_clean for kw in automation_keywords):
                 if any(kw in major_name_clean for kw in automation_keywords):
                     # Boost similarity if both have automation-related keywords
-                    matches.append((major.name, 0.65))
+                    matches.append((major["name"], 0.65))
                     continue
             
             # Strategy 4: Abbreviation matching (e.g., "AI" matches "Artificial Intelligence", "MBA" matches "Business Administration (MBA)")
@@ -1212,13 +1260,13 @@ Return the JSON object:"""
                 # User input looks like an abbreviation
                 major_abbrev = ''.join([word[0].upper() for word in major_name_clean.split() if word and word[0].isalpha()])
                 if user_input_no_spaces.upper() == major_abbrev:
-                    matches.append((major.name, 0.85))
+                    matches.append((major["name"], 0.85))
                     continue
             
             # Strategy 5: Fuzzy string similarity (for typos)
             similarity = SequenceMatcher(None, user_input_clean, major_name_clean).ratio()
             if similarity >= threshold:
-                matches.append((major.name, similarity))
+                matches.append((major["name"], similarity))
         
         # Remove duplicates and sort by similarity (highest first)
         seen = set()
@@ -1557,29 +1605,25 @@ Return the JSON object:"""
                 print(f"RAG search for CSCA/scholarship failed: {e}")
                 rag_context = None
         
-        # Step 2.2: Check if user's major is not offered - search for related majors
+        # Step 2.2: Check if user's major is not offered - use database arrays instead of RAG
         related_majors_context = None
         if student_state.major and not use_db:
-            # For anonymous users, check if major is in RAG
+            # For anonymous users, use database arrays to find related majors
             try:
-                major_check_query = f"MalishaEdu majors {student_state.major} {student_state.degree_level or ''}"
-                major_check_results = self.rag_service.search_similar(
-                    self.db,
-                    major_check_query,
-                    top_k=3
-                )
-                # If no results or weak results, search for related majors
-                if not major_check_results or len(major_check_results) < 2:
-                    related_majors_query = f"MalishaEdu majors related to {student_state.major} {student_state.degree_level or ''} similar alternative"
-                    related_majors_results = self.rag_service.search_similar(
-                        self.db,
-                        related_majors_query,
-                        top_k=5
-                    )
-                    if related_majors_results:
-                        related_majors_context = self.rag_service.format_rag_context(related_majors_results)
+                # Use fuzzy matching on database majors array
+                matched_majors = self._fuzzy_match_major(student_state.major, student_state.degree_level, threshold=0.4)
+                
+                if matched_majors:
+                    # Format matched majors for context
+                    major_list = []
+                    for major in matched_majors[:10]:  # Top 10 matches
+                        major_info = f"- {major['name']} at {major['university_name']}"
+                        if major['degree_level']:
+                            major_info += f" ({major['degree_level']})"
+                        major_list.append(major_info)
+                    related_majors_context = "RELATED MAJORS FROM DATABASE:\n" + "\n".join(major_list)
             except Exception as e:
-                print(f"RAG search for related majors failed: {e}")
+                print(f"Database major matching failed: {e}")
         
         # Step 2.3: If not CSCA/scholarship question, use standard RAG search
         # For strangers (use_db=False): Always prioritize RAG first
@@ -1607,19 +1651,43 @@ Return the JSON object:"""
                     print(f"RAG search failed: {e}")
                     rag_context = None
         
-        # Step 2.4: If non-partner university mentioned, search RAG for partner alternatives
+        # Step 2.4: If non-partner university mentioned, use database arrays to find partner alternatives
         if non_partner_university_mentioned and student_state.major and student_state.degree_level:
             try:
-                partner_alt_query = f"MalishaEdu partner universities {student_state.major} {student_state.degree_level}"
-                partner_rag_results = self.rag_service.search_similar(self.db, partner_alt_query, top_k=5)
-                if partner_rag_results:
-                    partner_alt_context = self.rag_service.format_rag_context(partner_rag_results)
-                    if rag_context:
-                        rag_context = f"{rag_context}\n\nMALISHAEDU PARTNER UNIVERSITIES OFFERING {student_state.major} {student_state.degree_level}:\n{partner_alt_context}"
-                    else:
-                        rag_context = f"MALISHAEDU PARTNER UNIVERSITIES OFFERING {student_state.major} {student_state.degree_level}:\n{partner_alt_context}"
+                # Use database arrays to find partner universities offering the same major/degree
+                matched_majors = self._fuzzy_match_major(student_state.major, student_state.degree_level, threshold=0.4)
+                
+                if matched_majors:
+                    # Get unique universities from matched majors
+                    partner_unis = {}
+                    for major in matched_majors[:10]:  # Top 10 matches
+                        uni_id = major['university_id']
+                        if uni_id not in partner_unis:
+                            # Find university in all_universities array
+                            uni = next((u for u in self.all_universities if u['id'] == uni_id), None)
+                            if uni:
+                                partner_unis[uni_id] = uni
+                    
+                    if partner_unis:
+                        uni_list = []
+                        for uni in partner_unis.values():
+                            uni_info = f"- {uni['name']}"
+                            if uni['city']:
+                                uni_info += f" ({uni['city']}"
+                                if uni['province']:
+                                    uni_info += f", {uni['province']}"
+                                uni_info += ")"
+                            if uni['ranking']:
+                                uni_info += f" [Ranking: {uni['ranking']}]"
+                            uni_list.append(uni_info)
+                        
+                        partner_alt_context = f"MALISHAEDU PARTNER UNIVERSITIES OFFERING {student_state.major} {student_state.degree_level}:\n" + "\n".join(uni_list)
+                        if rag_context:
+                            rag_context = f"{rag_context}\n\n{partner_alt_context}"
+                        else:
+                            rag_context = partner_alt_context
             except Exception as e:
-                print(f"RAG search for partner alternatives failed: {e}")
+                print(f"Database search for partner alternatives failed: {e}")
         
         # Step 2.5: If user asks about cost, search RAG for structured cost profiles
         user_msg_lower = user_message.lower()
@@ -1872,6 +1940,38 @@ Return the JSON object:"""
         
         # Step 4: Build context for LLM
         context_parts = []
+        
+        # Add DATABASE UNIVERSITIES and DATABASE MAJORS arrays at the beginning
+        # Format universities list
+        if self.all_universities:
+            uni_list = []
+            for uni in self.all_universities:
+                uni_info = f"- {uni['name']}"
+                if uni['city']:
+                    uni_info += f" ({uni['city']}"
+                    if uni['province']:
+                        uni_info += f", {uni['province']}"
+                    uni_info += ")"
+                if uni['ranking']:
+                    uni_info += f" [Ranking: {uni['ranking']}]"
+                uni_list.append(uni_info)
+            context_parts.append(f"DATABASE UNIVERSITIES (MalishaEdu Partner Universities - Use this list for all university questions):\n" + "\n".join(uni_list))
+        
+        # Format majors list with university and degree level
+        if self.all_majors:
+            major_list = []
+            for major in self.all_majors[:200]:  # Limit to 200 to avoid token limits
+                major_info = f"- {major['name']}"
+                major_info += f" at {major['university_name']}"
+                if major['degree_level']:
+                    major_info += f" ({major['degree_level']})"
+                if major['teaching_language']:
+                    major_info += f" [{major['teaching_language']}]"
+                major_list.append(major_info)
+            context_parts.append(f"DATABASE MAJORS (MalishaEdu Majors with University and Degree Level - Use this list for all major questions):\n" + "\n".join(major_list))
+            if len(self.all_majors) > 200:
+                context_parts.append(f"... and {len(self.all_majors) - 200} more majors in the database")
+        
         if matched_programs:
             context_parts.append(f"DATABASE MATCHES:\n{matched_programs}")
         if db_context:
@@ -1895,7 +1995,7 @@ Return the JSON object:"""
         if not use_db:
             messages.append({
                 "role": "system",
-                "content": "CRITICAL: This user is ANONYMOUS and has NOT provided structured lead data. DO NOT use database program/intake information. Answer ONLY using the RAG knowledge base and, if needed, the web search context. Do NOT invent exact tuition or deadlines: use approximate values from RAG documents. Do NOT mention 'your database record' or any persistent profile."
+                "content": "CRITICAL: This user is ANONYMOUS and has NOT provided structured lead data. DO NOT use database program/intake information. Answer ONLY using the RAG knowledge base and, if needed, the web search context. Even when answering using RAG or your own knowledge, you MUST NEVER mention or suggest any non-partner universities. If a university is not clearly identified as a MalishaEdu partner in the DATABASE context, you must speak in generic terms (e.g. ‘our partner universities’) and avoid naming it.If RAG or your pretraining shows examples of Chinese universities that are not in the partner list, IGNORE those names and DO NOT use them in your answer. Do NOT invent exact tuition or deadlines: use approximate values from RAG documents. Do NOT mention 'your database record' or any persistent profile."
             })
         
         # CRITICAL: Add dynamic profile instruction based on known vs missing fields
@@ -1916,6 +2016,7 @@ Missing or unknown fields: {missing_summary}
 **Hard rules:**
 - NEVER ask again for any field that appears in the profile above.
 - You may only ask about fields listed under "Missing or unknown fields".
+- If degree_level, major, or nationality are known, you MUST naturally reuse them in your first 1–2 sentences.Example: ‘Since you’re interested in a Master’s in Computer Science and you’re from Bangladesh, here’s what I’d suggest…’Do NOT re-ask for them, just reuse them to make the reply feel personalized.”
 - Ask about at most TWO missing fields in a single reply.
 - If all important fields are known, do not ask follow-up questions just to repeat them; instead, directly answer the user's question or give next steps.
 - If the user says "yes let's start" or similar agreement without adding new info, do NOT re-ask for fields that are already in the profile above."""
@@ -3310,56 +3411,35 @@ IMPORTANT:
         ).first()
         return lead is not None
     
-    def _is_malishaedu_partner_university(self, university_name: str) -> Tuple[bool, Optional[University]]:
-        """Check if a university is a MalishaEdu partner (from DB or RAG)"""
-        # First check database using fuzzy matching
-        matched_name, similar_matches = self._fuzzy_match_university(university_name)
-        
-        # Check the matched name
+    def _is_malishaedu_partner_university(self, university_name: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """Check if a university is a MalishaEdu partner using pre-loaded database array"""
+        # Use fuzzy matching on pre-loaded universities array
+        matched_name, similar = self._fuzzy_match_university(university_name)
         if matched_name:
-            uni = self.db.query(University).filter(
-                University.name == matched_name,
-                University.is_partner == True
-            ).first()
-            if uni:
-                return True, uni
-        
-        # Also check similar matches (in case fuzzy matching returned None but has similar options)
-        for similar_name in similar_matches[:3]:  # Check top 3 similar matches
-            uni = self.db.query(University).filter(
-                University.name == similar_name,
-                University.is_partner == True
-            ).first()
-            if uni:
-                return True, uni
-        
-        # Direct database search with ILIKE (case-insensitive partial match)
-        # This handles cases like "Beihang University" matching "Beihang University (Hangzhou International Campus)"
-        uni_name_lower = university_name.lower().strip()
-        # Extract main words (remove common words)
-        main_words = [w for w in uni_name_lower.split() if w not in ['university', 'college', 'institute', 'tech', 'technology', 'of', 'the', 'and', '&']]
-        if main_words:
-            # Search for universities containing the main words
-            search_term = main_words[0]  # Use first meaningful word
-            partner_universities = self.db.query(University).filter(
-                University.is_partner == True,
-                University.name.ilike(f"%{search_term}%")
-            ).all()
-            for uni in partner_universities:
-                uni_name_lower_db = uni.name.lower()
-                # Check if user input is contained in university name or vice versa
-                if uni_name_lower in uni_name_lower_db or uni_name_lower_db in uni_name_lower:
+            # Find the university dict from all_universities
+            for uni in self.all_universities:
+                if uni["name"] == matched_name:
                     return True, uni
-                # Check if main words match
-                uni_main_words = [w for w in uni_name_lower_db.split() if w not in ['university', 'college', 'institute', 'tech', 'technology', 'of', 'the', 'and', '&', '(', ')']]
-                if set(main_words).intersection(set(uni_main_words)):
-                    # At least one main word matches - check similarity
-                    similarity = SequenceMatcher(None, uni_name_lower, uni_name_lower_db).ratio()
-                    if similarity >= 0.6:  # Reasonable similarity threshold
-                        return True, uni
         
-        # If not found in DB, check RAG for MalishaEdu partner universities
-        # RAG should contain list of 31 partner universities
+        # If fuzzy match didn't find it, try direct string matching
+        uni_name_lower = university_name.lower().strip()
+        for uni in self.all_universities:
+            uni_name_lower_db = uni['name'].lower()
+            # Exact match
+            if uni_name_lower == uni_name_lower_db:
+                return True, uni
+            # Partial match (contains)
+            if uni_name_lower in uni_name_lower_db or uni_name_lower_db in uni_name_lower:
+                return True, uni
+            # Check main words match
+            main_words = [w for w in uni_name_lower.split() if w not in ['university', 'college', 'institute', 'tech', 'technology', 'of', 'the', 'and', '&']]
+            uni_main_words = [w for w in uni_name_lower_db.split() if w not in ['university', 'college', 'institute', 'tech', 'technology', 'of', 'the', 'and', '&', '(', ')']]
+            if main_words and set(main_words).intersection(set(uni_main_words)):
+                similarity = SequenceMatcher(None, uni_name_lower, uni_name_lower_db).ratio()
+                if similarity >= 0.6:
+                    return True, uni
+        
+        # Not found in partner universities
         try:
             rag_results = self.rag_service.search_similar(
                 self.db, 
@@ -3384,32 +3464,28 @@ IMPORTANT:
         
         return False, None
     
-    def _is_malishaedu_major(self, major_name: str) -> Tuple[bool, Optional[Major]]:
-        """Check if a major is offered by MalishaEdu (from DB or RAG)"""
-        # First check database
-        matched_name, _ = self._fuzzy_match_major(major_name)
+    def _is_malishaedu_major(self, major_name: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """Check if a major is offered by MalishaEdu using pre-loaded database array"""
+        # Use fuzzy matching on pre-loaded majors array
+        matched_name, similar = self._fuzzy_match_major(major_name, threshold=0.5)
         if matched_name:
-            major = self.db.query(Major).filter(Major.name == matched_name).first()
-            if major:
+            # Find the major dict from all_majors
+            for major in self.all_majors:
+                if major["name"] == matched_name:
+                    return True, major
+        
+        # If fuzzy match didn't find it, try direct string matching
+        major_name_lower = major_name.lower().strip()
+        for major in self.all_majors:
+            major_name_lower_db = major['name'].lower()
+            # Exact match
+            if major_name_lower == major_name_lower_db:
+                return True, major
+            # Partial match (contains)
+            if major_name_lower in major_name_lower_db or major_name_lower_db in major_name_lower:
                 return True, major
         
-        # If not found in DB, check RAG for MalishaEdu majors (150+ majors)
-        try:
-            rag_results = self.rag_service.search_similar(
-                self.db,
-                f"MalishaEdu major {major_name}",
-                top_k=3
-            )
-            if rag_results:
-                # Check if any RAG result mentions this major
-                for result in rag_results:
-                    content_lower = result.get('content', '').lower()
-                    major_name_lower = major_name.lower()
-                    if major_name_lower in content_lower:
-                        return True, None  # Found in RAG but not in DB
-        except:
-            pass
-        
+        # Not found in MalishaEdu majors
         return False, None
     
     def _get_partner_universities_from_rag(self) -> List[str]:

@@ -615,5 +615,9 @@ async def run_application_automation(
         return result
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Automation failed: {str(e)}")
+        error_msg = str(e)
+        # Check if it's a network/connection error
+        if "network" in error_msg.lower() or "connection" in error_msg.lower():
+            error_msg = f"Network Error: {error_msg}. This may occur on servers without a display. Try running on localhost or ensure the server has Xvfb installed for headless browser support."
+        raise HTTPException(status_code=500, detail=f"Automation failed: {error_msg}")
 

@@ -118,6 +118,10 @@ class StudentLoader:
             "english_test_type": safe_get('english_test_type'),
             "english_test_score": safe_get('english_test_score'),
             
+            # Family Info
+            "father_name": safe_get('father_name'),
+            "mother_name": safe_get('mother_name'),
+            
             # Emergency Contact
             "emergency_contact_name": safe_get('emergency_contact_name'),
             "emergency_contact_phone": safe_get('emergency_contact_phone'),
@@ -295,22 +299,34 @@ class FieldDetector:
         return fields
     
     def _get_label(self, element, id_attr: str, name: str) -> str:
-        """Get label for a form field"""
+        """Get label for a form field - includes hint text and parent container labels"""
+        label_parts = []
+        
         # Try to find associated label
         if id_attr:
             label_elem = self.page.query_selector(f"label[for='{id_attr}']")
             if label_elem:
-                return label_elem.inner_text().strip()
+                label_parts.append(label_elem.inner_text().strip())
         
         # Try to find parent label
-        parent = element.evaluate_handle("el => el.parentElement")
-        if parent:
-            try:
+        try:
+            parent = element.evaluate_handle("el => el.parentElement")
+            if parent:
                 parent_tag = parent.evaluate("el => el.tagName")
                 if parent_tag and parent_tag.lower() == "label":
-                    return parent.inner_text().strip()
-            except:
-                pass
+                    label_parts.append(parent.inner_text().strip())
+                else:
+                    # Check parent's parent for labels (e.g., "Family Details" container)
+                    grandparent = parent.evaluate_handle("el => el.parentElement")
+                    if grandparent:
+                        # Look for any label-like elements in parent containers
+                        parent_text = parent.evaluate("el => el.textContent || el.innerText || ''").strip()
+                        if parent_text:
+                            # Check if parent has label-like text (e.g., "Family Details")
+                            if any(keyword in parent_text.lower() for keyword in ['detail', 'information', 'section', 'group']):
+                                label_parts.append(parent_text)
+        except:
+            pass
         
         # Try to find preceding label
         try:
@@ -318,11 +334,50 @@ class FieldDetector:
             if prev_sibling:
                 prev_tag = prev_sibling.evaluate("el => el.tagName")
                 if prev_tag and prev_tag.lower() == "label":
-                    return prev_sibling.inner_text().strip()
+                    label_parts.append(prev_sibling.inner_text().strip())
         except:
             pass
         
-        return ""
+        # Get hint text (placeholder, aria-label, title)
+        try:
+            placeholder = element.get_attribute("placeholder") or ""
+            aria_label = element.get_attribute("aria-label") or ""
+            title = element.get_attribute("title") or ""
+            
+            if placeholder:
+                label_parts.append(placeholder)
+            if aria_label:
+                label_parts.append(aria_label)
+            if title:
+                label_parts.append(title)
+        except:
+            pass
+        
+        # Get nearby text (within same container)
+        try:
+            # Get text from nearby elements (within 2 levels up)
+            nearby_text = element.evaluate("""
+                (el) => {
+                    let text = '';
+                    // Check parent
+                    if (el.parentElement) {
+                        text += ' ' + (el.parentElement.textContent || '');
+                        // Check grandparent
+                        if (el.parentElement.parentElement) {
+                            text += ' ' + (el.parentElement.parentElement.textContent || '');
+                        }
+                    }
+                    return text;
+                }
+            """)
+            if nearby_text:
+                label_parts.append(nearby_text.strip())
+        except:
+            pass
+        
+        # Combine all label parts
+        combined_label = " ".join(filter(None, label_parts))
+        return combined_label.strip()
     
     def _get_selector(self, element, id_attr: str, name: str) -> str:
         """Get CSS selector for element"""
@@ -345,10 +400,13 @@ class FormFillerEngine:
         self.filled_fields: Dict[str, bool] = {}
         self.uploaded_files: Dict[str, str] = {}
     
-    def fill_form(self, fields: List[Dict[str, Any]], portal_override=None) -> Dict[str, Any]:
-        """Fill all form fields"""
+    def fill_form(self, fields: List[Dict[str, Any]], portal_override=None, timeout_per_field: int = 5000) -> Dict[str, Any]:
+        """Fill all form fields with timeout per field"""
         for field in fields:
             try:
+                # Set timeout for this field operation
+                self.page.set_default_timeout(timeout_per_field)
+                
                 if field["type"] == "file":
                     self._fill_file_input(field)
                 elif field["type"] == "select":
@@ -359,6 +417,9 @@ class FormFillerEngine:
                     self._fill_textarea(field, portal_override)
             except Exception as e:
                 logger.warning(f"Failed to fill field {field.get('name', field.get('id', 'unknown'))}: {e}")
+            finally:
+                # Reset timeout to default
+                self.page.set_default_timeout(30000)
         
         return {
             "filled_fields": self.filled_fields,
@@ -438,9 +499,17 @@ class FormFillerEngine:
             self.uploaded_files[field_name or field_id] = "missing document or mapping"
     
     def _map_field_to_data(self, field_name: str, field_id: str, label: str, placeholder: str) -> Optional[str]:
-        """Map form field to student data"""
-        # Combine all identifiers
+        """Map form field to student data - enhanced with better matching"""
+        # Combine all identifiers (label now includes hint text and parent container text)
         combined = f"{field_name} {field_id} {label} {placeholder}".lower()
+        
+        # Enhanced matching for family/parent fields
+        # These fields might be in parent containers like "Family Details" section
+        if any(term in combined for term in ["father", "father's", "fathers", "dad", "paternal", "父"]):
+            # Try to get from student data if available
+            return self.student_data.get("father_name") or self.student_data.get("fathers_name")
+        if any(term in combined for term in ["mother", "mother's", "mothers", "mom", "maternal", "母"]):
+            return self.student_data.get("mother_name") or self.student_data.get("mothers_name")
         
         # Name mappings
         if any(term in combined for term in ["name", "full name", "姓名"]):
@@ -527,7 +596,47 @@ class FormFillerEngine:
 class PlaywrightSession:
     """Manages Playwright browser session"""
     
-    def __init__(self, headless: bool = False, slow_mo: int = 50):
+    def __init__(self, headless: Optional[bool] = None, slow_mo: int = 50):
+        # Auto-detect headless mode: use headless on servers, non-headless on local
+        if headless is None:
+            import os
+            import platform
+            
+            # Check if HEADLESS is explicitly set
+            headless_env = os.environ.get("HEADLESS", "").lower()
+            if headless_env == "true":
+                headless = True
+            elif headless_env == "false":
+                headless = False
+            else:
+                # Auto-detect: Check if we're on a server
+                # Windows doesn't use DISPLAY, so we need to check other indicators
+                is_windows = platform.system() == "Windows"
+                is_linux = platform.system() == "Linux"
+                is_mac = platform.system() == "Darwin"
+                
+                # Check for server/CI environment variables
+                is_server_env = (
+                    os.environ.get("CI") or 
+                    os.environ.get("VERCEL") or 
+                    os.environ.get("RAILWAY_ENVIRONMENT") or
+                    os.environ.get("RAILWAY") or
+                    os.environ.get("DYNO")  # Heroku
+                )
+                
+                # On Windows/Mac: if not in server env, assume local (non-headless)
+                # On Linux: check DISPLAY (Linux uses X11)
+                if is_windows or is_mac:
+                    # Windows/Mac: Only use headless if explicitly in server environment
+                    headless = bool(is_server_env)
+                elif is_linux:
+                    # Linux: Check DISPLAY (set on local machines with X11, not on servers)
+                    has_display = os.environ.get("DISPLAY") is not None
+                    headless = is_server_env or not has_display
+                else:
+                    # Unknown OS: default to non-headless unless server env
+                    headless = bool(is_server_env)
+        
         self.headless = headless
         self.slow_mo = slow_mo
         self.playwright = None
@@ -538,11 +647,56 @@ class PlaywrightSession:
     def __enter__(self):
         if not PLAYWRIGHT_AVAILABLE:
             raise ImportError("Playwright is not installed")
+        
+        # Check if we should connect to a remote browser (for Railway with visible browser)
+        import os
+        remote_browser_url = os.environ.get("PLAYWRIGHT_REMOTE_BROWSER_URL")
+        
+        if remote_browser_url:
+            # Connect to remote browser (e.g., Browserless.io or self-hosted browser with CDP)
+            logger.info(f"Connecting to remote browser at {remote_browser_url}")
+            self.playwright = sync_playwright().start()
+            try:
+                self.browser = self.playwright.chromium.connect_over_cdp(remote_browser_url)
+                # Get existing context or create new one
+                contexts = self.browser.contexts
+                if contexts:
+                    self.context = contexts[0]
+                else:
+                    self.context = self.browser.new_context()
+                pages = self.context.pages
+                if pages:
+                    self.page = pages[0]
+                else:
+                    self.page = self.context.new_page()
+                logger.info("Connected to remote browser successfully")
+                # Override headless flag since remote browser may be visible
+                self.headless = False
+                return self
+            except Exception as e:
+                logger.error(f"Failed to connect to remote browser: {e}")
+                raise
+        
+        # Launch local browser
         self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(
-            headless=self.headless,
-            slow_mo=self.slow_mo
-        )
+        
+        # Launch options
+        launch_options = {
+            "headless": self.headless,
+            "slow_mo": self.slow_mo
+        }
+        
+        # On servers, we might need additional options
+        if self.headless:
+            # For headless mode on servers, ensure we have proper args
+            launch_options["args"] = [
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu"
+            ]
+        
+        self.browser = self.playwright.chromium.launch(**launch_options)
         self.context = self.browser.new_context()
         self.page = self.context.new_page()
         return self
@@ -679,47 +833,105 @@ class ApplicationAutomation:
             self._log(f"Loaded {len(documents)} documents")
             
             # Run Playwright automation - browser stays open after completion
-            session = PlaywrightSession(headless=False, slow_mo=50)
+            # IMPORTANT: Default to NON-HEADLESS (visible browser) for localhost
+            # Only use headless if explicitly set or on a known server environment
+            import os
+            import platform
+            
+            # Check if explicitly set
+            headless_env = os.environ.get("HEADLESS", "").lower()
+            if headless_env == "true":
+                use_headless = True
+            elif headless_env == "false":
+                use_headless = False
+            else:
+                # Auto-detect: Only use headless on known server environments
+                is_server = (
+                    os.environ.get("CI") or 
+                    os.environ.get("VERCEL") or 
+                    os.environ.get("RAILWAY_ENVIRONMENT") or
+                    os.environ.get("RAILWAY") or
+                    os.environ.get("DYNO")  # Heroku
+                )
+                # Default to NON-HEADLESS (visible) unless on a server
+                use_headless = bool(is_server)
+            
+            session = PlaywrightSession(headless=use_headless, slow_mo=50)
             session.__enter__()
+            
+            # Log browser mode for debugging
+            if session.headless:
+                self._log("WARNING: Running in HEADLESS mode. Browser is invisible.")
+                self._log("To see the browser on localhost, set HEADLESS=false environment variable.")
+            else:
+                self._log("Browser is VISIBLE. You can see and interact with it.")
             
             try:
                 # Navigate to URL
                 self._log(f"Navigating to {apply_url}")
                 session.navigate(apply_url)
                 
-                # Always wait for manual login (don't attempt automatic login)
-                self._log("Waiting for manual login...")
-                self._log("Please login manually in the browser window.")
-                
-                # Show alert asking user to login
-                session.page.evaluate("""
-                    alert('Please login manually. After logging in, navigate to the application form. The automation will automatically fill fields when it detects the form. Click OK to continue.');
-                """)
-                
-                # Wait for login completion (URL change or password field disappears)
+                # Handle login: auto-login if credentials provided, otherwise wait for manual
                 import time
-                initial_url = session.page.url
-                initial_has_password_field = session.page.query_selector("input[type='password']") is not None
-                
-                max_wait = 600  # 10 minutes for login
-                waited = 0
                 login_detected = False
                 
-                while waited < max_wait:
-                    current_url = session.page.url
-                    has_password = session.page.query_selector("input[type='password']") is not None
-                    
-                    if current_url != initial_url or (initial_has_password_field and not has_password):
-                        self._log("Login detected - waiting for page to load...")
+                if username and password:
+                    # Attempt automatic login
+                    self._log("Credentials provided - attempting automatic login...")
+                    if session.login(username, password):
+                        self._log("Automatic login successful!")
                         session.page.wait_for_load_state("networkidle", timeout=15000)
                         login_detected = True
-                        break
-                    
-                    time.sleep(2)
-                    waited += 2
+                    else:
+                        self._log("Automatic login failed - login fields not detected or login unsuccessful")
+                        if not session.headless:
+                            self._log("Please login manually in the browser window.")
+                            try:
+                                session.page.evaluate("""
+                                    alert('Automatic login failed. Please login manually. After logging in, navigate to the application form. The automation will automatically fill fields when it detects the form. Click OK to continue.');
+                                """)
+                            except:
+                                pass
+                else:
+                    # No credentials - wait for manual login
+                    self._log("No credentials provided - waiting for manual login...")
+                    if not session.headless:
+                        self._log("Please login manually in the browser window.")
+                        try:
+                            session.page.evaluate("""
+                                alert('Please login manually. After logging in, navigate to the application form. The automation will automatically fill fields when it detects the form. Click OK to continue.');
+                            """)
+                        except:
+                            pass
+                    else:
+                        self._log("WARNING: Running in headless mode without credentials. Cannot perform manual login.")
+                        self._log("Please provide username and password for automatic login, or use a remote browser connection.")
                 
-                if not login_detected:
-                    self._log("Timeout waiting for login. Continuing anyway...")
+                # If login not detected yet, wait for manual login (only in non-headless mode)
+                if not login_detected and not session.headless:
+                    initial_url = session.page.url
+                    initial_has_password_field = session.page.query_selector("input[type='password']") is not None
+                    
+                    max_wait = 600  # 10 minutes for login
+                    waited = 0
+                    
+                    while waited < max_wait:
+                        current_url = session.page.url
+                        has_password = session.page.query_selector("input[type='password']") is not None
+                        
+                        if current_url != initial_url or (initial_has_password_field and not has_password):
+                            self._log("Login detected - waiting for page to load...")
+                            session.page.wait_for_load_state("networkidle", timeout=15000)
+                            login_detected = True
+                            break
+                        
+                        time.sleep(2)
+                        waited += 2
+                    
+                    if not login_detected:
+                        self._log("Timeout waiting for manual login. Continuing anyway...")
+                elif not login_detected and session.headless:
+                    self._log("WARNING: In headless mode without credentials. Skipping login wait. Automation may fail if login is required.")
                 
                 # After login, try to navigate to application form (if portal override exists)
                 # Otherwise, wait for user to navigate manually
@@ -731,29 +943,44 @@ class ApplicationAutomation:
                             session.page.wait_for_load_state("networkidle", timeout=15000)
                         else:
                             self._log("Portal override could not navigate. Waiting for manual navigation...")
+                            if not session.headless:
+                                try:
+                                    session.page.evaluate("""
+                                        alert('Please navigate to the application form. The automation will fill fields automatically when detected.');
+                                    """)
+                                except:
+                                    pass
+                    except Exception as e:
+                        self._log(f"Portal navigation failed: {e}. Waiting for manual navigation...")
+                        if not session.headless:
+                            try:
+                                session.page.evaluate("""
+                                    alert('Please navigate to the application form. The automation will fill fields automatically when detected.');
+                                """)
+                            except:
+                                pass
+                else:
+                    self._log("No portal override. Waiting for you to navigate to the application form...")
+                    if not session.headless:
+                        try:
                             session.page.evaluate("""
                                 alert('Please navigate to the application form. The automation will fill fields automatically when detected.');
                             """)
-                    except Exception as e:
-                        self._log(f"Portal navigation failed: {e}. Waiting for manual navigation...")
-                        session.page.evaluate("""
-                            alert('Please navigate to the application form. The automation will fill fields automatically when detected.');
-                        """)
-                else:
-                    self._log("No portal override. Waiting for you to navigate to the application form...")
-                    session.page.evaluate("""
-                        alert('Please navigate to the application form. The automation will fill fields automatically when detected.');
-                    """)
+                        except:
+                            pass
                 
                 # Continuously monitor for form fields and fill them when detected
                 self._log("Monitoring for application form fields...")
                 field_detector = FieldDetector(session.page)
                 form_filler = FormFillerEngine(session.page, student_data, documents)
                 
-                max_form_wait = 600  # 10 minutes to find and fill form
+                max_form_wait = 120  # 2 minutes to find and fill form
                 form_wait_start = time.time()
                 fields_filled = False
                 fill_result = {"filled_fields": {}, "uploaded_files": {}}
+                last_filled_count = 0
+                last_uploaded_count = 0
+                consecutive_no_progress = 0
                 
                 while (time.time() - form_wait_start) < max_form_wait:
                     # Detect form fields
@@ -762,30 +989,56 @@ class ApplicationAutomation:
                     if len(fields) > 0:
                         self._log(f"Detected {len(fields)} form fields - filling form...")
                         
-                        # Fill form
-                        fill_result = form_filler.fill_form(fields, portal_override)
+                        # Fill form with timeout per field
+                        fill_result = form_filler.fill_form(fields, portal_override, timeout_per_field=5000)
                         filled_count = len(fill_result['filled_fields'])
                         uploaded_count = len([k for k, v in fill_result['uploaded_files'].items() if v == 'ok'])
                         
                         self._log(f"Filled {filled_count} fields")
                         self._log(f"Uploaded {uploaded_count} files")
                         
+                        # Check if we made progress
+                        if filled_count > last_filled_count or uploaded_count > last_uploaded_count:
+                            last_filled_count = filled_count
+                            last_uploaded_count = uploaded_count
+                            consecutive_no_progress = 0
+                        else:
+                            consecutive_no_progress += 1
+                        
+                        # If we filled some fields or uploaded files, consider it progress
                         if filled_count > 0 or uploaded_count > 0:
                             fields_filled = True
-                            # Show success message
-                            session.page.evaluate(f"""
-                                alert('Automation filled {filled_count} fields and uploaded {uploaded_count} files. Please review and add any missing information, then submit manually. The browser will remain open.');
-                            """)
+                        
+                        # If no progress for 3 consecutive attempts, exit gracefully
+                        if consecutive_no_progress >= 3 and fields_filled:
+                            self._log("No further progress detected. Exiting gracefully...")
                             break
                     else:
                         # Wait a bit before checking again
                         time.sleep(3)
+                    
+                    # Check if we're approaching time limit
+                    elapsed = time.time() - form_wait_start
+                    if elapsed >= max_form_wait - 10:  # 10 seconds before timeout
+                        self._log(f"Approaching time limit ({max_form_wait}s). Finalizing...")
+                        break
                 
                 if not fields_filled:
                     self._log("WARNING: No form fields were filled. The application form may not have been reached yet.")
-                    session.page.evaluate("""
-                        alert('No form fields detected. Please ensure you are on the application form page. The browser will remain open for manual completion.');
-                    """)
+                    try:
+                        session.page.evaluate("""
+                            alert('No form fields detected. Please ensure you are on the application form page. The browser will remain open for manual completion.');
+                        """)
+                    except:
+                        pass  # Ignore if alert fails (e.g., in headless mode)
+                else:
+                    # Show success message
+                    try:
+                        session.page.evaluate(f"""
+                            alert('Automation filled {last_filled_count} fields and uploaded {last_uploaded_count} files. Please review and add any missing information, then submit manually. The browser will remain open.');
+                        """)
+                    except:
+                        pass  # Ignore if alert fails (e.g., in headless mode)
                 
                 # Cleanup documents (but keep browser open)
                 doc_loader.cleanup()
