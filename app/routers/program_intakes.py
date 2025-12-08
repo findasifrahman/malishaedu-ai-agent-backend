@@ -82,7 +82,7 @@ class ProgramIntakeResponse(BaseModel):
     class Config:
         from_attributes = True
 
-@router.get("/", response_model=List[ProgramIntakeResponse])
+@router.get("", response_model=List[ProgramIntakeResponse])
 async def list_program_intakes(
     university_id: Optional[int] = None,
     major_id: Optional[int] = None,
