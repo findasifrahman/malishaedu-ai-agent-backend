@@ -69,7 +69,7 @@ class UniversityResponse(BaseModel):
     class Config:
         from_attributes = True
 
-@router.get("/", response_model=List[UniversityResponse])
+@router.get("", response_model=List[UniversityResponse])
 async def list_universities(
     is_partner: Optional[bool] = None,
     city: Optional[str] = None,

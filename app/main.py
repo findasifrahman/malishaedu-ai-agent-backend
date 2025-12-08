@@ -31,7 +31,8 @@ app = FastAPI(
     title="MalishaEdu AI Enrollment Agent",
     description="AI-powered enrollment assistant for Chinese universities",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    redirect_slashes=False  # Disable automatic trailing slash redirects to prevent 307 errors
 )
 
 # CORS middleware
