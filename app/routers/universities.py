@@ -12,11 +12,18 @@ router = APIRouter()
 
 class UniversityCreate(BaseModel):
     name: str
+    name_cn: Optional[str] = None
     city: Optional[str] = None
     province: Optional[str] = None
     country: str = "China"
     is_partner: bool = True
+    is_active: bool = True
     university_ranking: Optional[int] = None
+    world_ranking_band: Optional[str] = None
+    national_ranking: Optional[int] = None
+    aliases: Optional[List[str]] = None
+    project_tags: Optional[List[str]] = None
+    default_currency: str = "CNY"
     logo_url: Optional[str] = None
     description: Optional[str] = None
     website: Optional[str] = None
@@ -39,11 +46,18 @@ class UniversityCreate(BaseModel):
 
 class UniversityUpdate(BaseModel):
     name: Optional[str] = None
+    name_cn: Optional[str] = None
     city: Optional[str] = None
     province: Optional[str] = None
     country: Optional[str] = None
     is_partner: Optional[bool] = None
+    is_active: Optional[bool] = None
     university_ranking: Optional[int] = None
+    world_ranking_band: Optional[str] = None
+    national_ranking: Optional[int] = None
+    aliases: Optional[List[str]] = None
+    project_tags: Optional[List[str]] = None
+    default_currency: Optional[str] = None
     logo_url: Optional[str] = None
     description: Optional[str] = None
     website: Optional[str] = None
@@ -53,11 +67,18 @@ class UniversityUpdate(BaseModel):
 class UniversityResponse(BaseModel):
     id: int
     name: str
+    name_cn: Optional[str]
     city: Optional[str]
     province: Optional[str]
     country: str
     is_partner: bool
+    is_active: bool
     university_ranking: Optional[int]
+    world_ranking_band: Optional[str]
+    national_ranking: Optional[int]
+    aliases: Optional[List[str]]
+    project_tags: Optional[List[str]]
+    default_currency: str
     logo_url: Optional[str]
     description: Optional[str]
     website: Optional[str]
@@ -71,6 +92,7 @@ class UniversityResponse(BaseModel):
 
 async def _list_universities(
     is_partner: Optional[bool] = None,
+    is_active: Optional[bool] = None,
     city: Optional[str] = None,
     province: Optional[str] = None,
     db: Session = Depends(get_db)
@@ -80,6 +102,8 @@ async def _list_universities(
     
     if is_partner is not None:
         query = query.filter(University.is_partner == is_partner)
+    if is_active is not None:
+        query = query.filter(University.is_active == is_active)
     if city:
         query = query.filter(University.city.ilike(f"%{city}%"))
     if province:
@@ -92,11 +116,18 @@ async def _list_universities(
         uni_dict = {
             'id': uni.id,
             'name': uni.name,
+            'name_cn': uni.name_cn,
             'city': uni.city,
             'province': uni.province,
             'country': uni.country,
             'is_partner': uni.is_partner,
+            'is_active': uni.is_active,
             'university_ranking': uni.university_ranking,
+            'world_ranking_band': uni.world_ranking_band,
+            'national_ranking': uni.national_ranking,
+            'aliases': uni.aliases,
+            'project_tags': uni.project_tags,
+            'default_currency': uni.default_currency,
             'logo_url': uni.logo_url,
             'description': uni.description,
             'website': uni.website,
@@ -111,20 +142,22 @@ async def _list_universities(
 @router.get("", response_model=List[UniversityResponse])
 async def list_universities(
     is_partner: Optional[bool] = None,
+    is_active: Optional[bool] = None,
     city: Optional[str] = None,
     province: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    return await _list_universities(is_partner=is_partner, city=city, province=province, db=db)
+    return await _list_universities(is_partner=is_partner, is_active=is_active, city=city, province=province, db=db)
 
 @router.get("/", response_model=List[UniversityResponse])
 async def list_universities_with_slash(
     is_partner: Optional[bool] = None,
+    is_active: Optional[bool] = None,
     city: Optional[str] = None,
     province: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    return await _list_universities(is_partner=is_partner, city=city, province=province, db=db)
+    return await _list_universities(is_partner=is_partner, is_active=is_active, city=city, province=province, db=db)
 
 @router.get("/{university_id}", response_model=UniversityResponse)
 async def get_university(university_id: int, db: Session = Depends(get_db)):
@@ -135,11 +168,18 @@ async def get_university(university_id: int, db: Session = Depends(get_db)):
     return {
         'id': university.id,
         'name': university.name,
+        'name_cn': university.name_cn,
         'city': university.city,
         'province': university.province,
         'country': university.country,
         'is_partner': university.is_partner,
+        'is_active': university.is_active,
         'university_ranking': university.university_ranking,
+        'world_ranking_band': university.world_ranking_band,
+        'national_ranking': university.national_ranking,
+        'aliases': university.aliases,
+        'project_tags': university.project_tags,
+        'default_currency': university.default_currency,
         'logo_url': university.logo_url,
         'description': university.description,
         'website': university.website,
@@ -160,7 +200,7 @@ async def _create_university(
     
     # Convert empty strings to None for optional fields
     data = university_data.model_dump()
-    for key in ['logo_url', 'website', 'description', 'contact_email', 'contact_wechat', 'city', 'province']:
+    for key in ['logo_url', 'website', 'description', 'contact_email', 'contact_wechat', 'city', 'province', 'name_cn', 'world_ranking_band']:
         if key in data and (data[key] == '' or data[key] is None):
             data[key] = None
     
@@ -171,11 +211,18 @@ async def _create_university(
     return {
         'id': university.id,
         'name': university.name,
+        'name_cn': university.name_cn,
         'city': university.city,
         'province': university.province,
         'country': university.country,
         'is_partner': university.is_partner,
+        'is_active': university.is_active,
         'university_ranking': university.university_ranking,
+        'world_ranking_band': university.world_ranking_band,
+        'national_ranking': university.national_ranking,
+        'aliases': university.aliases,
+        'project_tags': university.project_tags,
+        'default_currency': university.default_currency,
         'logo_url': university.logo_url,
         'description': university.description,
         'website': university.website,
@@ -225,11 +272,18 @@ async def update_university(
     return {
         'id': university.id,
         'name': university.name,
+        'name_cn': university.name_cn,
         'city': university.city,
         'province': university.province,
         'country': university.country,
         'is_partner': university.is_partner,
+        'is_active': university.is_active,
         'university_ranking': university.university_ranking,
+        'world_ranking_band': university.world_ranking_band,
+        'national_ranking': university.national_ranking,
+        'aliases': university.aliases,
+        'project_tags': university.project_tags,
+        'default_currency': university.default_currency,
         'logo_url': university.logo_url,
         'description': university.description,
         'website': university.website,

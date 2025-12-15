@@ -3,16 +3,22 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
+from fastapi import Body
 from datetime import datetime, timedelta, timezone
 from app.database import get_db
 from app.models import (
     User, UserRole, Lead, Complaint, Student, Document, 
-    Application, AdminSettings, DocumentType, ApplicationStatus, ProgramIntake
+    Application, AdminSettings, DocumentType, ApplicationStatus, ProgramIntake, StudentDocument
 )
 from app.routers.auth import get_current_user
 from app.services.application_automation import ApplicationAutomation
 from app.services.r2_service import R2Service
 from app.services.portals import HITPortal, BeihangPortal, BNUZPortal
+from app.services.document_verification_service import DocumentVerificationService
+from fastapi import UploadFile, File, Form
+from typing import Tuple
+import io
+from PIL import Image
 
 router = APIRouter()
 
@@ -167,10 +173,12 @@ async def get_students(
         search_term = f"%{search}%"
         query = query.filter(
             or_(
-                Student.full_name.ilike(search_term),
+                Student.given_name.ilike(search_term),
+                Student.family_name.ilike(search_term),
                 Student.email.ilike(search_term),
                 Student.phone.ilike(search_term),
-                Student.country_of_citizenship.ilike(search_term)
+                Student.country_of_citizenship.ilike(search_term),
+                Student.passport_number.ilike(search_term)
             )
         )
     
@@ -192,17 +200,31 @@ async def get_students(
     
     doc_count_map = {sid: count for sid, count in document_counts}
     
+    # Get application counts for each student
+    application_counts = db.query(
+        Application.student_id,
+        func.count(Application.id).label('app_count')
+    ).filter(
+        Application.student_id.in_(student_ids)
+    ).group_by(Application.student_id).all()
+    
+    app_count_map = {sid: count for sid, count in application_counts}
+    
     return {
         "items": [
             {
                 "id": student.id,
                 "user_id": student.user_id,
-                "full_name": student.full_name,
+                "full_name": f"{student.given_name or ''} {student.family_name or ''}".strip() or None,
+                "given_name": student.given_name,
+                "family_name": student.family_name,
                 "email": student.email,
                 "phone": student.phone,
+                "passport_number": student.passport_number,
                 "country_of_citizenship": student.country_of_citizenship,
                 "created_at": student.created_at.isoformat() if student.created_at else None,
-                "document_count": doc_count_map.get(student.id, 0)
+                "document_count": doc_count_map.get(student.id, 0),
+                "application_count": app_count_map.get(student.id, 0)
             }
             for student in students
         ],
@@ -381,7 +403,7 @@ async def get_all_applications(
             result.append({
                 "id": app.id,
                 "student_id": app.student_id,
-                "student_name": app.student.full_name if app.student else None,
+                "student_name": f"{app.student.given_name or ''} {app.student.family_name or ''}".strip() if app.student else None,
                 "student_email": app.student.user.email if app.student and app.student.user else None,
                 "program_intake_id": app.program_intake_id,
                 "university_name": intake.university.name,
@@ -421,7 +443,7 @@ async def get_application_details(
             "student_id": app.student_id,
             "student": {
                 "id": app.student.id if app.student else None,
-                "full_name": app.student.full_name if app.student else None,
+                "full_name": f"{app.student.given_name or ''} {app.student.family_name or ''}".strip() if app.student else None,
                 "email": app.student.user.email if app.student and app.student.user else None,
                 "phone": app.student.phone if app.student else None,
                 "country": app.student.country_of_citizenship if app.student else None
@@ -620,4 +642,777 @@ async def run_application_automation(
         if "network" in error_msg.lower() or "connection" in error_msg.lower():
             error_msg = f"Network Error: {error_msg}. This may occur on servers without a display. Try running on localhost or ensure the server has Xvfb installed for headless browser support."
         raise HTTPException(status_code=500, detail=f"Automation failed: {error_msg}")
+
+@router.get("/students/{student_id}/applications")
+async def get_student_applications(
+    student_id: int,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Get all applications for a specific student (admin only)"""
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    applications = db.query(Application).filter(Application.student_id == student_id).all()
+    
+    return [
+        {
+            "id": app.id,
+            "program_intake_id": app.program_intake_id,
+            "university_name": app.program_intake.university.name if app.program_intake and app.program_intake.university else None,
+            "major_name": app.program_intake.major.name if app.program_intake and app.program_intake.major else None,
+            "intake_term": app.program_intake.intake_term.value if app.program_intake and hasattr(app.program_intake.intake_term, 'value') else str(app.program_intake.intake_term) if app.program_intake else None,
+            "intake_year": app.program_intake.intake_year if app.program_intake else None,
+            "status": app.status.value if hasattr(app.status, 'value') else str(app.status),
+            "scholarship_preference": app.scholarship_preference,
+            "degree_level": app.degree_level,
+            "application_fee": app.program_intake.application_fee if app.program_intake else None,
+            "application_fee_paid": app.application_fee_paid,
+            "created_at": app.created_at.isoformat() if app.created_at else None
+        }
+        for app in applications
+    ]
+
+@router.get("/students/{student_id}/profile")
+async def get_student_profile_admin(
+    student_id: int,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Get student profile (admin can view any student)"""
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    # Convert student to dict
+    student_dict = {}
+    for column in Student.__table__.columns:
+        value = getattr(student, column.name)
+        if isinstance(value, datetime):
+            student_dict[column.name] = value.isoformat()
+        elif hasattr(value, 'value'):  # Enum
+            student_dict[column.name] = value.value
+        else:
+            student_dict[column.name] = value
+    
+    return student_dict
+
+@router.get("/students/{student_id}/password")
+async def get_student_password(
+    student_id: int,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Get student's password hash (admin only - for password recovery)"""
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    user = db.query(User).filter(User.id == student.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found for this student")
+    
+    return {
+        "student_id": student.id,
+        "email": user.email,
+        "has_password": bool(user.hashed_password),
+        "note": "Password is hashed and cannot be retrieved. Use set_password endpoint to set a new password."
+    }
+
+class SetPasswordRequest(BaseModel):
+    password: str
+
+@router.post("/students/{student_id}/set-password")
+async def set_student_password(
+    student_id: int,
+    request: SetPasswordRequest,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Set student password (admin only)"""
+    from app.routers.auth import get_password_hash
+    
+    if len(request.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long")
+    
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    user = db.query(User).filter(User.id == student.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found for this student")
+    
+    user.hashed_password = get_password_hash(request.password)
+    db.commit()
+    
+    return {
+        "message": "Password updated successfully",
+        "student_id": student.id,
+        "email": user.email
+    }
+
+class StudentCreate(BaseModel):
+    email: str
+    password: Optional[str] = None
+    given_name: Optional[str] = None
+    family_name: Optional[str] = None
+    phone: Optional[str] = None
+    country_of_citizenship: Optional[str] = None
+    passport_number: Optional[str] = None
+
+class StudentUpdate(BaseModel):
+    email: Optional[str] = None
+    given_name: Optional[str] = None
+    family_name: Optional[str] = None
+    phone: Optional[str] = None
+    country_of_citizenship: Optional[str] = None
+    passport_number: Optional[str] = None
+    # Add other fields as needed
+
+@router.post("/students")
+async def create_student(
+    student_data: StudentCreate,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Create a new student (admin only)"""
+    from app.routers.auth import get_password_hash
+    
+    # Check if user with email already exists
+    existing_user = db.query(User).filter(User.email == student_data.email).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User with this email already exists")
+    
+    # Generate a random password if not provided
+    import secrets
+    password = student_data.password or secrets.token_urlsafe(12)
+    
+    # Create user
+    full_name = f"{student_data.given_name or ''} {student_data.family_name or ''}".strip() if (student_data.given_name or student_data.family_name) else None
+    user = User(
+        email=student_data.email,
+        name=full_name or student_data.email.split('@')[0],
+        phone=student_data.phone,
+        country=student_data.country_of_citizenship,
+        hashed_password=get_password_hash(password),
+        role=UserRole.STUDENT
+    )
+    db.add(user)
+    db.flush()  # Get user.id without committing
+    
+    # Get default partner
+    from app.models import Partner
+    default_partner = db.query(Partner).filter(Partner.email == 'malishaedu@gmail.com').first()
+    
+    # Create student
+    student = Student(
+        user_id=user.id,
+        partner_id=default_partner.id if default_partner else None,
+        email=student_data.email,
+        given_name=student_data.given_name,
+        family_name=student_data.family_name,
+        phone=student_data.phone,
+        country_of_citizenship=student_data.country_of_citizenship,
+        passport_number=student_data.passport_number
+    )
+    db.add(student)
+    db.commit()
+    db.refresh(student)
+    
+    return {
+        "id": student.id,
+        "user_id": user.id,
+        "email": user.email,
+        "full_name": f"{student.given_name or ''} {student.family_name or ''}".strip() or None,
+        "given_name": student.given_name,
+        "family_name": student.family_name,
+        "phone": student.phone,
+        "password": password,  # Return password so admin can share it
+        "message": "Student created successfully"
+    }
+
+@router.put("/students/{student_id}")
+async def update_student(
+    student_id: int,
+    student_data: StudentUpdate,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Update student basic information (admin only)"""
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    user = db.query(User).filter(User.id == student.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found for this student")
+    
+    # Update student fields
+    if student_data.given_name is not None:
+        student.given_name = student_data.given_name
+    if student_data.family_name is not None:
+        student.family_name = student_data.family_name
+    # Update user name if either given_name or family_name changed
+    if student_data.given_name is not None or student_data.family_name is not None:
+        full_name = f"{student.given_name or ''} {student.family_name or ''}".strip()
+        user.name = full_name if full_name else user.name
+    if student_data.phone is not None:
+        student.phone = student_data.phone
+        user.phone = student_data.phone
+    if student_data.country_of_citizenship is not None:
+        student.country_of_citizenship = student_data.country_of_citizenship
+        user.country = student_data.country_of_citizenship
+    if student_data.passport_number is not None:
+        student.passport_number = student_data.passport_number
+    if student_data.email is not None and student_data.email != user.email:
+        # Check if new email is already taken
+        existing_user = db.query(User).filter(User.email == student_data.email, User.id != user.id).first()
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Email already in use")
+        student.email = student_data.email
+        user.email = student_data.email
+    
+    db.commit()
+    db.refresh(student)
+    
+    return {
+        "id": student.id,
+        "email": student.email,
+        "full_name": f"{student.given_name or ''} {student.family_name or ''}".strip() or None,
+        "given_name": student.given_name,
+        "family_name": student.family_name,
+        "phone": student.phone,
+        "country_of_citizenship": student.country_of_citizenship,
+        "passport_number": student.passport_number,
+        "message": "Student updated successfully"
+    }
+
+@router.put("/students/{student_id}/profile")
+async def update_student_profile_admin(
+    student_id: int,
+    profile: Any = Body(...),  # Accept full profile dict from request body
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Update full student profile (admin only - allows updating any field)"""
+    from app.routers.students import StudentProfile
+    from datetime import datetime, date
+    
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    # Convert dict to StudentProfile for validation
+    try:
+        if isinstance(profile, dict):
+            profile_data = StudentProfile(**profile)
+        else:
+            profile_data = profile
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid profile data: {str(e)}")
+    
+    # Update all fields (same logic as /students/me endpoint)
+    if profile_data.given_name is not None:
+        student.given_name = profile_data.given_name
+    if profile_data.family_name is not None:
+        student.family_name = profile_data.family_name
+    if profile_data.father_name is not None:
+        student.father_name = profile_data.father_name
+    if profile_data.mother_name is not None:
+        student.mother_name = profile_data.mother_name
+    if profile_data.gender is not None:
+        student.gender = profile_data.gender
+    if profile_data.date_of_birth is not None:
+        student.date_of_birth = profile_data.date_of_birth
+    if profile_data.country_of_citizenship is not None:
+        student.country_of_citizenship = profile_data.country_of_citizenship
+    if profile_data.current_country_of_residence is not None:
+        student.current_country_of_residence = profile_data.current_country_of_residence
+    if profile_data.phone is not None:
+        student.phone = profile_data.phone
+    if profile_data.email is not None:
+        student.email = profile_data.email
+    if profile_data.wechat_id is not None:
+        student.wechat_id = profile_data.wechat_id
+    
+    # Passport
+    if profile_data.passport_number is not None:
+        student.passport_number = profile_data.passport_number
+    if profile_data.passport_expiry_date is not None:
+        if isinstance(profile_data.passport_expiry_date, date) and not isinstance(profile_data.passport_expiry_date, datetime):
+            student.passport_expiry_date = datetime.combine(profile_data.passport_expiry_date, datetime.min.time())
+        else:
+            student.passport_expiry_date = profile_data.passport_expiry_date
+    
+    # Scores - update all score fields
+    if profile_data.hsk_score is not None:
+        student.hsk_score = profile_data.hsk_score
+    if profile_data.hsk_certificate_date is not None:
+        if isinstance(profile_data.hsk_certificate_date, date) and not isinstance(profile_data.hsk_certificate_date, datetime):
+            student.hsk_certificate_date = datetime.combine(profile_data.hsk_certificate_date, datetime.min.time())
+        else:
+            student.hsk_certificate_date = profile_data.hsk_certificate_date
+    if profile_data.hskk_level is not None:
+        from app.models import HSKKLevel
+        try:
+            student.hskk_level = HSKKLevel(profile_data.hskk_level)
+        except ValueError:
+            pass
+    if profile_data.hskk_score is not None:
+        student.hskk_score = profile_data.hskk_score
+    if profile_data.csca_status is not None:
+        from app.models import CSCAStatus
+        try:
+            student.csca_status = CSCAStatus(profile_data.csca_status)
+        except ValueError:
+            pass
+    if profile_data.csca_score_math is not None:
+        student.csca_score_math = profile_data.csca_score_math
+    if profile_data.csca_score_specialized_chinese is not None:
+        student.csca_score_specialized_chinese = profile_data.csca_score_specialized_chinese
+    if profile_data.csca_score_physics is not None:
+        student.csca_score_physics = profile_data.csca_score_physics
+    if profile_data.csca_score_chemistry is not None:
+        student.csca_score_chemistry = profile_data.csca_score_chemistry
+    if profile_data.english_test_type is not None:
+        student.english_test_type = profile_data.english_test_type
+    if profile_data.english_test_score is not None:
+        student.english_test_score = profile_data.english_test_score
+    
+    # Application intent
+    if profile_data.target_university_id is not None:
+        student.target_university_id = profile_data.target_university_id
+    if profile_data.target_major_id is not None:
+        student.target_major_id = profile_data.target_major_id
+    if profile_data.target_intake_id is not None:
+        student.target_intake_id = profile_data.target_intake_id
+    if profile_data.study_level is not None:
+        from app.models import DegreeLevel
+        try:
+            student.study_level = DegreeLevel(profile_data.study_level)
+        except ValueError:
+            pass
+    if profile_data.scholarship_preference is not None:
+        from app.models import ScholarshipPreference
+        try:
+            student.scholarship_preference = ScholarshipPreference(profile_data.scholarship_preference)
+        except ValueError:
+            pass
+    
+    # COVA information
+    if profile_data.home_address is not None:
+        student.home_address = profile_data.home_address
+    if profile_data.current_address is not None:
+        student.current_address = profile_data.current_address
+    if profile_data.emergency_contact_name is not None:
+        student.emergency_contact_name = profile_data.emergency_contact_name
+    if profile_data.emergency_contact_phone is not None:
+        student.emergency_contact_phone = profile_data.emergency_contact_phone
+    if profile_data.emergency_contact_relationship is not None:
+        student.emergency_contact_relationship = profile_data.emergency_contact_relationship
+    if profile_data.planned_arrival_date is not None:
+        if isinstance(profile_data.planned_arrival_date, date) and not isinstance(profile_data.planned_arrival_date, datetime):
+            student.planned_arrival_date = datetime.combine(profile_data.planned_arrival_date, datetime.min.time())
+        else:
+            student.planned_arrival_date = profile_data.planned_arrival_date
+    if profile_data.intended_address_china is not None:
+        student.intended_address_china = profile_data.intended_address_china
+    if profile_data.previous_visa_china is not None:
+        student.previous_visa_china = profile_data.previous_visa_china
+    if profile_data.previous_visa_details is not None:
+        student.previous_visa_details = profile_data.previous_visa_details
+    if profile_data.previous_travel_to_china is not None:
+        student.previous_travel_to_china = profile_data.previous_travel_to_china
+    if profile_data.previous_travel_details is not None:
+        student.previous_travel_details = profile_data.previous_travel_details
+    
+    # Personal Information
+    if profile_data.marital_status is not None:
+        from app.models import MaritalStatus
+        try:
+            student.marital_status = MaritalStatus(profile_data.marital_status)
+        except ValueError:
+            pass
+    if profile_data.religion is not None:
+        from app.models import Religion
+        try:
+            student.religion = Religion(profile_data.religion)
+        except ValueError:
+            pass
+    if profile_data.occupation is not None:
+        student.occupation = profile_data.occupation
+    
+    # Highest degree information
+    if hasattr(profile_data, 'highest_degree_name') and profile_data.highest_degree_name is not None:
+        student.highest_degree_name = profile_data.highest_degree_name
+    if profile_data.highest_degree_medium is not None and profile_data.highest_degree_medium != '':
+        from app.models import DegreeMedium
+        try:
+            student.highest_degree_medium = DegreeMedium(profile_data.highest_degree_medium)
+        except (ValueError, TypeError):
+            pass
+    if hasattr(profile_data, 'highest_degree_institution') and profile_data.highest_degree_institution is not None:
+        student.highest_degree_institution = profile_data.highest_degree_institution
+    if hasattr(profile_data, 'highest_degree_country') and profile_data.highest_degree_country is not None:
+        student.highest_degree_country = profile_data.highest_degree_country
+    if hasattr(profile_data, 'highest_degree_year') and profile_data.highest_degree_year is not None:
+        student.highest_degree_year = profile_data.highest_degree_year
+    if hasattr(profile_data, 'highest_degree_cgpa') and profile_data.highest_degree_cgpa is not None:
+        student.highest_degree_cgpa = profile_data.highest_degree_cgpa
+    if profile_data.number_of_published_papers is not None:
+        student.number_of_published_papers = profile_data.number_of_published_papers
+    
+    # Guarantor information
+    if hasattr(profile_data, 'relation_with_guarantor') and profile_data.relation_with_guarantor is not None:
+        student.relation_with_guarantor = profile_data.relation_with_guarantor
+    if hasattr(profile_data, 'is_the_bank_guarantee_in_students_name') and profile_data.is_the_bank_guarantee_in_students_name is not None:
+        student.is_the_bank_guarantee_in_students_name = profile_data.is_the_bank_guarantee_in_students_name
+    
+    # English test type
+    if profile_data.english_test_type is not None:
+        from app.models import EnglishTestType
+        try:
+            student.english_test_type = EnglishTestType(profile_data.english_test_type)
+        except ValueError:
+            pass
+    
+    db.commit()
+    db.refresh(student)
+    
+    return {
+        "id": student.id,
+        "message": "Student profile updated successfully"
+    }
+
+# Initialize services for document management
+verification_service = DocumentVerificationService()
+r2_service = R2Service()
+
+def validate_passport_photo(file_content: bytes, filename: str) -> Tuple[bool, str]:
+    """
+    Validate passport photo requirements before AI processing.
+    Validates: format (JPG/JPEG), size (100-500KB), dimensions (min 295x413), ratio (4:3), orientation (width < height).
+    
+    Returns:
+        (is_valid, error_message)
+    """
+    try:
+        # Check file format
+        filename_lower = filename.lower()
+        if not (filename_lower.endswith('.jpg') or filename_lower.endswith('.jpeg')):
+            return False, "Passport photo must be in JPG or JPEG format. Current format is not supported."
+        
+        # Check file size (100KB - 500KB)
+        file_size_kb = len(file_content) / 1024
+        if file_size_kb < 100:
+            return False, f"File size ({file_size_kb:.1f} KB) is too small. Minimum size is 100 KB."
+        if file_size_kb > 500:
+            return False, f"File size ({file_size_kb:.1f} KB) exceeds maximum allowed size of 500 KB."
+        
+        # Check image dimensions and ratio
+        try:
+            image = Image.open(io.BytesIO(file_content))
+            width, height = image.size
+            
+            # Check minimum dimensions (no less than 295*413 pixels)
+            if width < 295 or height < 413:
+                return False, f"Image dimensions ({width}x{height} pixels) are too small. Minimum required: 295x413 pixels."
+            
+            # Check orientation (width must be less than height - portrait orientation)
+            if width >= height:
+                return False, f"Image orientation is incorrect. Width ({width}px) must be less than height ({height}px) for portrait orientation."
+            
+            # Check aspect ratio (4:3 ratio, with some tolerance)
+            ratio = height / width
+            if ratio < 1.25 or ratio > 1.5:
+                return False, f"Image aspect ratio ({ratio:.2f}) is incorrect. Required ratio is approximately 4:3 (height:width between 1.25 and 1.5)."
+            
+            # Check if image is colored (not grayscale)
+            if image.mode in ('L', 'LA', 'P'):
+                if image.mode == 'P':
+                    image = image.convert('RGB')
+                else:
+                    return False, "Image must be colored (not grayscale)."
+            
+            return True, ""
+            
+        except Exception as e:
+            return False, f"Failed to read image: {str(e)}"
+            
+    except Exception as e:
+        return False, f"Validation error: {str(e)}"
+
+@router.get("/students/{student_id}/documents")
+async def get_student_documents_admin(
+    student_id: int,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Get all verified documents for a student (admin only)"""
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    documents = db.query(StudentDocument).filter(
+        StudentDocument.student_id == student.id
+    ).all()
+    
+    return [
+        {
+            "id": doc.id,
+            "document_type": doc.document_type,
+            "r2_url": doc.r2_url,
+            "filename": doc.filename,
+            "file_size": doc.file_size,
+            "verification_status": doc.verification_status,
+            "verification_reason": doc.verification_reason,
+            "extracted_data": doc.extracted_data,
+            "verified": doc.verified,
+            "created_at": doc.created_at.isoformat() if doc.created_at else None
+        }
+        for doc in documents
+    ]
+
+@router.post("/students/{student_id}/documents/verify-and-upload")
+async def verify_and_upload_document_admin(
+    student_id: int,
+    file: UploadFile = File(...),
+    doc_type: str = Form(...),
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Upload and verify a document for a student (admin only)"""
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    # Read file content
+    file_content = await file.read()
+    file_size = len(file_content)
+    
+    # Special validation for passport photos
+    if doc_type.lower() in ('photo', 'passport_photo', 'passport_size_photo'):
+        is_valid, error_msg = validate_passport_photo(file_content, file.filename)
+        if not is_valid:
+            raise HTTPException(
+                status_code=400,
+                detail=error_msg
+            )
+    
+    # Check file size limit (1MB = 1048576 bytes)
+    MAX_FILE_SIZE = 1048576  # 1MB
+    if file_size > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"File size ({file_size / 1024:.2f} KB) exceeds maximum allowed size of 1MB. Please compress or resize the file."
+        )
+    
+    # Upload temporarily to get URL for verification
+    try:
+        temp_url = r2_service.upload_file(
+            file=file_content,
+            filename=file.filename,
+            folder="temp"
+        )
+    except Exception as e:
+        error_msg = str(e)
+        if "AccessDenied" in error_msg or "Access Denied" in error_msg:
+            raise HTTPException(
+                status_code=500,
+                detail=f"R2 Storage Access Denied. Please check your R2 credentials and bucket permissions. Error: {error_msg}"
+            )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload file to R2 storage: {error_msg}"
+        )
+    
+    # Verify document using Vision API
+    verification_result = verification_service.verify_document(
+        file_url=temp_url,
+        doc_type=doc_type,
+        file_content=file_content
+    )
+    
+    # Check verification status
+    if verification_result["status"] != "ok":
+        # Delete temp file - verification failed, don't keep it
+        try:
+            r2_service.delete_file(temp_url)
+        except Exception as e:
+            print(f"⚠️  Warning: Could not delete temp file {temp_url}: {e}")
+        
+        # Return detailed error message
+        error_message = f"Document verification failed: {verification_result.get('reason', 'Unknown reason')}"
+        raise HTTPException(
+            status_code=400,
+            detail=error_message
+        )
+    
+    # If verified, upload to "verified" folder
+    try:
+        verified_url = r2_service.upload_file(
+            file=file_content,
+            filename=file.filename,
+            folder="verified"
+        )
+    except Exception as e:
+        error_msg = str(e)
+        # Try to delete temp file even if verified upload fails
+        try:
+            r2_service.delete_file(temp_url)
+        except:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload verified file to R2 storage: {error_msg}"
+        )
+    
+    # Delete temp file
+    try:
+        r2_service.delete_file(temp_url)
+    except:
+        pass
+    
+    # Save to student_documents table
+    student_doc = StudentDocument(
+        student_id=student.id,
+        document_type=doc_type,
+        file_url=temp_url,  # Keep original URL for reference
+        r2_url=verified_url,  # Public URL from Cloudflare R2
+        filename=file.filename,
+        file_size=file_size,
+        verification_status=verification_result["status"],
+        verification_reason=verification_result["reason"],
+        extracted_data=verification_result.get("extracted", {}),
+        verified=True
+    )
+    db.add(student_doc)
+    
+    # Also update Student table URL fields based on document type
+    try:
+        doc_type_enum = DocumentType(doc_type)
+        if doc_type_enum == DocumentType.PASSPORT:
+            student.passport_scanned_url = verified_url
+        elif doc_type_enum == DocumentType.PASSPORT_PAGE:
+            student.passport_page_url = verified_url
+        elif doc_type_enum == DocumentType.PHOTO:
+            student.passport_photo_url = verified_url
+        elif doc_type_enum == DocumentType.DIPLOMA:
+            student.highest_degree_diploma_url = verified_url
+        elif doc_type_enum == DocumentType.TRANSCRIPT:
+            student.academic_transcript_url = verified_url
+        elif doc_type_enum == DocumentType.NON_CRIMINAL:
+            student.police_clearance_url = verified_url
+        elif doc_type_enum == DocumentType.PHYSICAL_EXAM:
+            student.physical_examination_form_url = verified_url
+        elif doc_type_enum == DocumentType.BANK_STATEMENT:
+            student.bank_statement_url = verified_url
+        elif doc_type_enum == DocumentType.RECOMMENDATION_LETTER:
+            if not student.recommendation_letter_1_url:
+                student.recommendation_letter_1_url = verified_url
+            elif not student.recommendation_letter_2_url:
+                student.recommendation_letter_2_url = verified_url
+        elif doc_type_enum == DocumentType.STUDY_PLAN:
+            student.study_plan_url = verified_url
+        elif doc_type_enum == DocumentType.ENGLISH_PROFICIENCY:
+            student.english_certificate_url = verified_url
+        elif doc_type_enum == DocumentType.CV_RESUME:
+            student.cv_resume_url = verified_url
+        elif doc_type_enum == DocumentType.JW202_JW201:
+            student.jw202_jw201_url = verified_url
+        elif doc_type_enum == DocumentType.GUARANTEE_LETTER:
+            student.guarantee_letter_url = verified_url
+        elif doc_type_enum == DocumentType.BANK_GUARANTOR_LETTER:
+            student.bank_guarantor_letter_url = verified_url
+    except ValueError:
+        pass  # Invalid document type, skip Student table update
+    
+    db.commit()
+    db.refresh(student_doc)
+    
+    return {
+        "id": student_doc.id,
+        "document_type": student_doc.document_type,
+        "r2_url": student_doc.r2_url,
+        "filename": student_doc.filename,
+        "verification_status": student_doc.verification_status,
+        "verification_reason": student_doc.verification_reason,
+        "extracted_data": verification_result.get("extracted", {}),
+        "verified": student_doc.verified
+    }
+
+@router.delete("/students/{student_id}/documents/{document_id}")
+async def delete_student_document_admin(
+    student_id: int,
+    document_id: int,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Delete a verified document for a student (admin only)"""
+    student = db.query(Student).filter(Student.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    document = db.query(StudentDocument).filter(
+        StudentDocument.id == document_id,
+        StudentDocument.student_id == student.id
+    ).first()
+    
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    # Delete from Cloudflare R2
+    if document.r2_url:
+        try:
+            r2_service.delete_file(document.r2_url)
+        except Exception as e:
+            print(f"Error deleting file from R2: {e}")
+            # Continue with DB deletion even if R2 deletion fails
+    
+    # Also clear the corresponding Student table URL field
+    try:
+        doc_type_enum = DocumentType(document.document_type)
+        if doc_type_enum == DocumentType.PASSPORT:
+            student.passport_scanned_url = None
+        elif doc_type_enum == DocumentType.PASSPORT_PAGE:
+            student.passport_page_url = None
+        elif doc_type_enum == DocumentType.PHOTO:
+            student.passport_photo_url = None
+        elif doc_type_enum == DocumentType.DIPLOMA:
+            student.highest_degree_diploma_url = None
+        elif doc_type_enum == DocumentType.TRANSCRIPT:
+            student.academic_transcript_url = None
+        elif doc_type_enum == DocumentType.NON_CRIMINAL:
+            student.police_clearance_url = None
+        elif doc_type_enum == DocumentType.PHYSICAL_EXAM:
+            student.physical_examination_form_url = None
+        elif doc_type_enum == DocumentType.BANK_STATEMENT:
+            student.bank_statement_url = None
+        elif doc_type_enum == DocumentType.RECOMMENDATION_LETTER:
+            if student.recommendation_letter_1_url == document.r2_url:
+                student.recommendation_letter_1_url = None
+            elif student.recommendation_letter_2_url == document.r2_url:
+                student.recommendation_letter_2_url = None
+        elif doc_type_enum == DocumentType.STUDY_PLAN:
+            student.study_plan_url = None
+        elif doc_type_enum == DocumentType.ENGLISH_PROFICIENCY:
+            student.english_certificate_url = None
+        elif doc_type_enum == DocumentType.CV_RESUME:
+            student.cv_resume_url = None
+        elif doc_type_enum == DocumentType.JW202_JW201:
+            student.jw202_jw201_url = None
+        elif doc_type_enum == DocumentType.GUARANTEE_LETTER:
+            student.guarantee_letter_url = None
+        elif doc_type_enum == DocumentType.BANK_GUARANTOR_LETTER:
+            student.bank_guarantor_letter_url = None
+    except ValueError:
+        pass  # Invalid document type, skip Student table update
+    
+    # Delete from database
+    db.delete(document)
+    db.commit()
+    
+    return {"message": "Document deleted successfully"}
 

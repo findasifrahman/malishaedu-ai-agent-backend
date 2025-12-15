@@ -11,8 +11,10 @@ from app.services.groq_service import GroqService
 from app.services.tavily_service import TavilyService
 from app.services.sales_agent import SalesAgent
 from app.services.admission_agent import AdmissionAgent
+from app.services.partner_agent import PartnerAgent
 from app.services.db_query_service import DBQueryService
 from app.routers.auth import get_current_user, oauth2_scheme
+from app.models import Partner
 from fastapi import Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.config import settings
@@ -64,7 +66,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
-    agent_type: str  # "sales" | "admission" | "admin"
+    agent_type: str  # "sales" | "admission" | "admin" | "partner"
     sources: Optional[List[dict]] = None
     used_db: bool = False
     used_rag: bool = False
@@ -222,6 +224,13 @@ async def get_optional_current_user(
         if user_id_str is None:
             print(f"DEBUG: get_optional_current_user - No 'sub' claim in token. Payload: {payload}")
             return None
+        
+        # Check if it's a partner token (format: "partner_{id}")
+        if isinstance(user_id_str, str) and user_id_str.startswith("partner_"):
+            # This is a partner token, not a user token - return None
+            print(f"DEBUG: get_optional_current_user - Partner token detected, returning None")
+            return None
+        
         try:
             user_id: int = int(user_id_str)
         except (ValueError, TypeError):
@@ -244,28 +253,65 @@ async def get_optional_current_user(
     print(f"DEBUG: get_optional_current_user - User authenticated: {user.id} ({user.role.value})")
     return user
 
+async def get_optional_current_partner(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(HTTPBearer(auto_error=False)),
+    db: Session = Depends(get_db)
+) -> Optional[Partner]:
+    """Optional partner authentication - returns None if no token provided or not a partner"""
+    from jose import JWTError, jwt
+    from app.config import settings
+    from fastapi import HTTPException, status
+    
+    if not credentials:
+        return None
+    
+    token = credentials.credentials
+    
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        sub = payload.get("sub")
+        if sub is None:
+            return None
+        
+        # Check if it's a partner token (format: "partner_{id}")
+        if isinstance(sub, str) and sub.startswith("partner_"):
+            partner_id = int(sub.replace("partner_", ""))
+            partner = db.query(Partner).filter(Partner.id == partner_id).first()
+            if partner is None:
+                return None
+            print(f"DEBUG: get_optional_current_partner - Partner authenticated: {partner.id}")
+            return partner
+        else:
+            return None
+    except (JWTError, ValueError, TypeError) as e:
+        print(f"DEBUG: get_optional_current_partner - Error: {str(e)}")
+        return None
+
 @router.post("/", response_model=ChatResponse)
 async def chat(
     request: ChatRequest, 
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_optional_current_user)
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    current_partner: Optional[Partner] = Depends(get_optional_current_partner)
 ):
     """
     Router Agent for MalishaEdu AI Enrollment System
     
     Routing Logic:
     1. If NO authenticated user_id → Use SalesAgent.generate_response()
-    2. If authenticated user_id AND Student row exists → Use AdmissionAgent.generate_response()
-    3. If user is admin (role = ADMIN) → Return admin tools message (not LLM chat)
+    2. If authenticated partner → Use PartnerAgent.generate_response()
+    3. If authenticated user_id AND Student row exists → Use AdmissionAgent.generate_response()
+    4. If user is admin (role = ADMIN) → Return admin tools message (not LLM chat)
     
     The router:
-    - Always passes the last 12 conversation messages to the agent (for context)
+    - Always passes the last 8 conversation messages to the agent (for context)
     - Never bypasses the agents' DB-first logic (never calls RAG or Tavily directly)
     - Returns the agent's structured output to the frontend
     """
     try:
         # Router Logic: Determine which agent to use
         is_authenticated = current_user is not None
+        is_partner = current_partner is not None
         user_id = current_user.id if current_user else None
         user_role = current_user.role.value if current_user else "guest"
         
@@ -340,7 +386,37 @@ async def chat(
         # Route to appropriate agent
         show_lead_form = False  # Initialize to False, will be set by SalesAgent
         
-        if not is_authenticated:
+        if is_partner:
+            # Partner authenticated → Use PartnerAgent
+            print("\n" + "="*80)
+            print("DEBUG: Chat Router - Routing to PartnerAgent")
+            print(f"DEBUG: Partner ID: {current_partner.id}")
+            print(f"DEBUG: Partner Name: {current_partner.name}")
+            print(f"DEBUG: User message: {request.message}")
+            print(f"DEBUG: Conversation history length: {len(messages_history)}")
+            print("="*80 + "\n")
+            
+            agent = PartnerAgent(db)
+            result = agent.generate_response(
+                user_message=request.message,
+                conversation_history=messages_history
+            )
+            
+            print("\n" + "="*80)
+            print("DEBUG: PartnerAgent response received")
+            print(f"DEBUG: Response length: {len(result.get('response', ''))} characters")
+            print(f"DEBUG: Used DB: {result.get('used_db', False)}")
+            print(f"DEBUG: Used Tavily: {result.get('used_tavily', False)}")
+            print("="*80 + "\n")
+            
+            agent_type = "partner"
+            used_db = result.get('used_db', False)
+            used_rag = False  # Partner agent doesn't use RAG
+            used_tavily = result.get('used_tavily', False)
+            missing_documents = None
+            days_to_deadline = None
+            
+        elif not is_authenticated:
             # NO authenticated user_id → Use SalesAgent
             agent = SalesAgent(db)
             result = agent.generate_response(
@@ -462,7 +538,8 @@ async def chat(
 async def chat_stream(
     request: ChatRequest, 
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_optional_current_user)
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    current_partner: Optional[Partner] = Depends(get_optional_current_partner)
 ):
     """
     Streaming chat endpoint with Router Agent logic
@@ -534,7 +611,20 @@ async def chat_stream(
         
         # Route to appropriate agent (same logic as regular endpoint)
         show_lead_form = False
-        if not is_authenticated:
+        is_partner = current_partner is not None
+        
+        if is_partner:
+            # Partner authenticated → Use PartnerAgent
+            agent = PartnerAgent(db)
+            result = agent.generate_response(
+                user_message=request.message,
+                conversation_history=messages_history
+            )
+            full_response = result['response']
+            used_rag = False
+            used_tavily = result.get('used_tavily', False)
+            
+        elif not is_authenticated:
             # SalesAgent for non-authenticated users
             agent = SalesAgent(db)
             result = agent.generate_response(

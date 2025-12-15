@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from app.database import engine, Base
 from app.routers import (
     chat, auth, students, documents, complaints, 
-    admin, rag, embedding, leads, universities, majors, program_intakes
+    admin, rag, embedding, leads, universities, majors, program_intakes, program_documents, scholarships, program_exam_requirements, partners
 )
 from app.routers import document_verification
 from app.config import settings
@@ -64,6 +64,10 @@ app.include_router(leads.router, prefix="/api/leads", tags=["leads"])
 app.include_router(universities.router, prefix="/api/universities", tags=["universities"])
 app.include_router(majors.router, prefix="/api/majors", tags=["majors"])
 app.include_router(program_intakes.router, prefix="/api/program-intakes", tags=["program-intakes"])
+app.include_router(program_documents.router, prefix="/api/program-documents", tags=["program-documents"])
+app.include_router(scholarships.router, prefix="/api/scholarships", tags=["scholarships"])
+app.include_router(program_exam_requirements.router, prefix="/api/program-exam-requirements", tags=["program-exam-requirements"])
+app.include_router(partners.router, prefix="/api/partners", tags=["partners"])
 
 @app.get("/")
 async def root():

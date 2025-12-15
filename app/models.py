@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, JSON, Float, Enum as SQLEnum, TypeDecorator
+from sqlalchemy import Column, Integer, String, Text, DateTime, Date, Boolean, ForeignKey, JSON, Float, Enum as SQLEnum, TypeDecorator
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from pgvector.sqlalchemy import Vector
@@ -26,6 +26,7 @@ class DocumentType(str, enum.Enum):
     JW202_JW201 = "jw202_jw201"
     GUARANTEE_LETTER = "guarantee_letter"
     BANK_GUARANTOR_LETTER = "bank_guarantor_letter"
+    ACCEPTANCE_LETTER = "acceptance_letter"
 
 class ApplicationStatus(str, enum.Enum):
     NOT_APPLIED = "not_applied"
@@ -43,15 +44,14 @@ class ComplaintStatus(str, enum.Enum):
     RESOLVED = "resolved"
 
 class DegreeLevel(str, enum.Enum):
-    NON_DEGREE = "Non-degree"
+    JUNIOR_HIGH = "Junior high"
+    SENIOR_HIGH = "Senior high"
+    NON_DEGREE = "Non Degree"
     ASSOCIATE = "Associate"
+    VOCATIONAL_COLLEGE = "Vocational College"
     BACHELOR = "Bachelor"
     MASTER = "Master"
-    DOCTORAL = "Doctoral (PhD)"
-    LANGUAGE = "Language"
-    SHORT_PROGRAM = "Short Program"
-    STUDY_TOUR = "Study Tour Program"
-    UPGRADE_JUNIOR_COLLEGE = "Upgrade from Junior College Student to University Student"
+    PHD = "Phd"
 
 class TeachingLanguage(str, enum.Enum):
     CHINESE = "Chinese"
@@ -135,10 +135,16 @@ class CSCAStatus(str, enum.Enum):
     SCORE_AVAILABLE = "score_available"
 
 class EnglishTestType(str, enum.Enum):
+    NONE = "None"
     IELTS = "IELTS"
     TOEFL = "TOEFL"
+    GRE = "GRE"
+    GMAT = "GMAT"
     DUOLINGO = "Duolingo"
-    NONE = "None"
+    TOEIC = "TOEIC"
+    PTE = "PTE"
+    NATIVE_LANGUAGE = "Native Language"
+    OTHER = "Other"
 
 class DegreeMedium(str, enum.Enum):
     ENGLISH = "English"
@@ -150,18 +156,142 @@ class MaritalStatus(str, enum.Enum):
     MARRIED = "Married"
 
 class Religion(str, enum.Enum):
-    ISLAM = "Islam"
+    ANGLICAN = "Anglican"
+    ATHEISM = "Atheism"
+    MORMON = "Mormon"
     CHRISTIANITY = "Christianity"
+    JUDAISM = "Judaism"
     CATHOLICISM = "Catholicism"
+    EASTERN_ORTHODOXY = "Eastern Orthodoxy"
+    HINDUISM = "Hinduism"
+    ISLAM = "Islam"
     BUDDHISM = "Buddhism"
+    TAOISM = "Taoism"
+    NONE = "None"
+    LUTHERANISM = "Lutheranism"
     OTHER = "Other"
-    NO_RELIGION = "No Religion"
 
 class HSKKLevel(str, enum.Enum):
     BEGINNER = "Beginner"
     ELEMENTARY = "Elementary"
     INTERMEDIATE = "Intermediate"
     ADVANCED = "Advanced"
+
+class NativeLanguage(str, enum.Enum):
+    CHINESE = "Chinese"
+    ENGLISH = "English"
+    CROATIAN = "Croatian"
+    BULGARIAN = "Bulgarian"
+    GERMAN = "German"
+    LATVIAN = "latvian"
+    CZECH = "Czech"
+    FRENCH = "French"
+    SLOVAK = "Slovak"
+    ITALIAN = "Italian"
+    DUTCH = "Dutch"
+    MACEDONIAN = "Macedonian"
+    MALTESE = "Maltese"
+    LATIN = "Latin"
+    FINNISH = "Finnish"
+    ALBANIAN = "Albanian"
+    IRISH_LANGUAGE = "Irish language"
+    CATALAN = "Catalan"
+    BELARUSSIAN = "Belarussian"
+    ICELANDIC = "Icelandic"
+    SERBIA_CROATIAN = "Serbia - Croatian"
+    ROMANIAN = "Romanian"
+    PORTUGUESE = "Portuguese"
+    SWEDISH = "Swedish"
+    SLOVENIAN = "Slovenian"
+    UKRAINIAN = "Ukrainian"
+    SPANISH = "Spanish"
+    GREEK = "Greek"
+    CREOLE = "Creole"
+    DANISH = "Danish"
+    GREENLANDIC = "Greenlandic"
+    UZBEK = "Uzbek"
+    ARABIC = "Arabic"
+    PERSIAN = "Persian"
+    KYRGYZ = "Kyrgyz"
+    BURMESE = "Burmese"
+    LAO = "Lao"
+    AZERBAIJANI = "Azerbaijani"
+    PASHTO = "Pashto"
+    FILIPINO = "Filipino"
+    ARMENIAN = "Armenian"
+    KAZAK = "Kazak"
+    RUSSIAN = "Russian"
+    KHMER = "Khmer"
+    BHUTANESE = "Bhutanese"
+    MALAY = "Malay"
+    NEPALI = "Nepali"
+    TURKISH = "Turkish"
+    DAI_LANGUAGE = "Dai language"
+    HEBREW = "Hebrew"
+    JAPANESE = "Japanese"
+    VIETNAMESE = "Vietnamese"
+    SWAHILI = "swahili"
+    BURUNDI = "Burundi"
+    KOREAN = "korean"
+    RWANDA = "Rwanda"
+    AFRIKAANS = "Afrikaans"
+    SANGO = "Sango"
+    URDU = "Urdu"
+    HINDI = "Hindi"
+    MONGOLIAN = "Mongolian"
+    INDONESIAN = "Indonesian"
+    BENGALI = "Bengali"
+    SINHALA = "Sinhala"
+    TURKMAN = "Turkman"
+    TMIL = "Tmil"
+    OTHER = "Other"
+
+class HighestEducationLevel(str, enum.Enum):
+    JUNIOR_HIGH = "Junior high"
+    SENIOR_HIGH = "Senior high"
+    TECHNICAL_SECONDARY = "Technical secondary"
+    VOCATIONAL_COLLEGE = "Vocational College"
+    BACHELOR = "Bachelor"
+    MASTER = "Master"
+    DR_PHD = "Dr./Phd"
+
+class Occupation(str, enum.Enum):
+    EMPLOYEE = "Employee"
+    STUDENT = "Student"
+    TEACHER = "Teacher"
+    DOCTOR = "Doctor"
+    LABOURER = "Labourer"
+    ARMY_SERVICE = "Army service"
+    ENGINEERS = "Engineers"
+    SCHOLARS = "Scholars"
+    HOUSEWIFE = "Housewife"
+    RETIRED = "Retired"
+    MANAGER = "Manager"
+    OFFICER = "Officer"
+    FARMER = "Farmer"
+    REPORTER = "Reporter"
+    MONKS_AND_PRIESTS = "Monks and priests"
+    RELIGIOUS = "Religious"
+    OTHERS = "Others"
+
+class LanguageProficiency(str, enum.Enum):
+    NONE = "None"
+    POOR = "Poor"
+    FAIR = "Fair"
+    GOOD = "Good"
+    EXCELLENT = "Excellent"
+
+class HSKLevel(str, enum.Enum):
+    NONE = "none"
+    HSK_LEVEL_1 = "HSK LEVEL 1"
+    HSK_LEVEL_2 = "HSK LEVEL 2"
+    HSK_LEVEL_3 = "HSK LEVEL 3"
+    HSK_LEVEL_4 = "HSK LEVEL 4"
+    HSK_LEVEL_5 = "HSK LEVEL 5"
+    HSK_LEVEL_6 = "HSK LEVEL 6"
+    HSK_LEVEL_7 = "HSK LEVEL 7"
+    HSK_LEVEL_8 = "HSK LEVEL 8"
+    HSK_LEVEL_9 = "HSK LEVEL 9"
 
 # Users table
 class User(Base):
@@ -254,11 +384,18 @@ class University(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
+    name_cn = Column(String, nullable=True)  # Chinese name
     city = Column(String)
     province = Column(String)
     country = Column(String, default="China")
     is_partner = Column(Boolean, default=True)
+    is_active = Column(Boolean, default=True)  # Whether university is active
     university_ranking = Column(Integer, nullable=True)
+    world_ranking_band = Column(String, nullable=True)  # e.g., "301-400"
+    national_ranking = Column(Integer, nullable=True)  # National ranking in China
+    aliases = Column(JSON, nullable=True)  # Array of aliases for matching (e.g., ["Beihang", "BUAA"])
+    project_tags = Column(JSON, nullable=True)  # Array of project tags (e.g., ["211", "985", "C9"])
+    default_currency = Column(String, default="CNY")  # Default currency for fees
     logo_url = Column(String, nullable=True)
     description = Column(Text)
     website = Column(String, nullable=True)
@@ -277,12 +414,16 @@ class Major(Base):
     id = Column(Integer, primary_key=True, index=True)
     university_id = Column(Integer, ForeignKey("universities.id"), nullable=False)
     name = Column(String, nullable=False)
+    name_cn = Column(String, nullable=True)  # Chinese name
     degree_level = Column(String)  # Changed from SQLEnum to String for flexibility
     teaching_language = Column(String)  # Changed from SQLEnum to String for flexibility
     duration_years = Column(Float)
     description = Column(Text)
     discipline = Column(String)  # Engineering, Business, Medicine, etc.
+    category = Column(String, nullable=True)  # "Non-degree/Language Program" vs "Degree Program"
+    keywords = Column(JSON, nullable=True)  # Array of keywords for matching (e.g., ["physics", "applied physics"])
     is_featured = Column(Boolean, default=False)
+    is_active = Column(Boolean, default=True)  # Whether major is active
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
@@ -315,6 +456,49 @@ class ProgramIntake(Base):
     visa_extension_fee = Column(Float, nullable=True, default=0)  # Visa extension fee required each year (LLM should know this is annual)
     notes = Column(Text)  # Extra info like age requirements, interview needs, etc.
     scholarship_info = Column(Text)  # Scholarship amount and conditions - LLM must parse and calculate actual costs
+    
+    # ========== NEW FIELDS - Program Start & Deadline ==========
+    program_start_date = Column(Date, nullable=True)  # Program start date
+    deadline_type = Column(String, nullable=True)  # University deadline vs CSC deadline, etc.
+    
+    # ========== NEW FIELDS - Scholarship ==========
+    scholarship_available = Column(Boolean, nullable=True)  # NULL=unknown, True/False confirmed
+    
+    # ========== NEW FIELDS - Age Requirements ==========
+    age_min = Column(Integer, nullable=True)  # Minimum age requirement
+    age_max = Column(Integer, nullable=True)  # Maximum age requirement
+    
+    # ========== NEW FIELDS - Academic Requirements ==========
+    min_average_score = Column(Float, nullable=True)  # Minimum average score requirement
+    
+    # ========== NEW FIELDS - Test/Interview Requirements ==========
+    interview_required = Column(Boolean, nullable=True)  # Interview required
+    written_test_required = Column(Boolean, nullable=True)  # Written test required
+    acceptance_letter_required = Column(Boolean, nullable=True)  # Acceptance letter required
+    
+    # ========== NEW FIELDS - Inside China Applicants ==========
+    inside_china_applicants_allowed = Column(Boolean, nullable=True)  # Inside China applicants allowed
+    inside_china_extra_requirements = Column(Text, nullable=True)  # Extra requirements for inside China applicants
+    
+    # ========== NEW FIELDS - Bank Statement Requirements ==========
+    bank_statement_required = Column(Boolean, nullable=True)  # Bank statement required
+    bank_statement_amount = Column(Float, nullable=True)  # Required bank statement amount
+    bank_statement_currency = Column(String, nullable=True)  # USD/CNY
+    bank_statement_note = Column(Text, nullable=True)  # e.g., "≥ $5000"
+    
+    # ========== NEW FIELDS - Language Requirements ==========
+    hsk_required = Column(Boolean, nullable=True)  # HSK required
+    hsk_level = Column(Integer, nullable=True)  # HSK level required (e.g., 5)
+    hsk_min_score = Column(Integer, nullable=True)  # HSK minimum score (e.g., 180)
+    english_test_required = Column(Boolean, nullable=True)  # English test required
+    english_test_note = Column(Text, nullable=True)  # IELTS/TOEFL/PTE etc when you have it
+    
+    # ========== NEW FIELDS - Currency & Fee Periods ==========
+    currency = Column(String, default="CNY")  # Currency for fees
+    accommodation_fee_period = Column(String, nullable=True)  # month/year/semester; docs vary
+    medical_insurance_fee_period = Column(String, nullable=True)  # often per year
+    arrival_medical_checkup_is_one_time = Column(Boolean, default=True)  # One-time medical checkup
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
@@ -322,6 +506,99 @@ class ProgramIntake(Base):
     major = relationship("Major", back_populates="program_intakes")
     students = relationship("Student", back_populates="target_intake")
     applications = relationship("Application", back_populates="program_intake")
+    program_documents = relationship("ProgramDocument", back_populates="program_intake", cascade="all, delete-orphan")
+    program_intake_scholarships = relationship("ProgramIntakeScholarship", back_populates="program_intake", cascade="all, delete-orphan")
+    program_exam_requirements = relationship("ProgramExamRequirement", back_populates="program_intake", cascade="all, delete-orphan")
+
+# Program Documents table (normalized documents_required)
+class ProgramDocument(Base):
+    __tablename__ = "program_documents"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    program_intake_id = Column(Integer, ForeignKey("program_intakes.id"), nullable=False)
+    name = Column(String, nullable=False)  # e.g., Passport, Photo, Transcript, Police Clearance
+    is_required = Column(Boolean, default=True)  # Whether this document is required
+    rules = Column(Text, nullable=True)  # e.g., "Study plan 800+ words", "video 3–5 minutes"
+    applies_to = Column(String, nullable=True)  # e.g., "inside_china_only"
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    program_intake = relationship("ProgramIntake", back_populates="program_documents")
+
+# Scholarships table
+class Scholarship(Base):
+    __tablename__ = "scholarships"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)  # e.g., CSC, HuaShan, Freshman Scholarship
+    provider = Column(String, nullable=True)  # University/CSC/etc
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    program_intake_scholarships = relationship("ProgramIntakeScholarship", back_populates="scholarship")
+
+# Program Intake Scholarships table (many-to-many relationship)
+class ProgramIntakeScholarship(Base):
+    __tablename__ = "program_intake_scholarships"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    program_intake_id = Column(Integer, ForeignKey("program_intakes.id"), nullable=False)
+    scholarship_id = Column(Integer, ForeignKey("scholarships.id"), nullable=False)
+    covers_tuition = Column(Boolean, nullable=True)
+    covers_accommodation = Column(Boolean, nullable=True)
+    covers_insurance = Column(Boolean, nullable=True)
+    tuition_waiver_percent = Column(Integer, nullable=True)  # e.g., 50% waived
+    living_allowance_monthly = Column(Float, nullable=True)  # e.g., 3500/month
+    living_allowance_yearly = Column(Float, nullable=True)  # e.g., 36000/year
+    first_year_only = Column(Boolean, nullable=True)  # Huashan says first year only
+    renewal_required = Column(Boolean, nullable=True)  # Huashan reapply every year
+    deadline = Column(Date, nullable=True)  # Scholarship deadline can differ from program deadline
+    eligibility_note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    program_intake = relationship("ProgramIntake", back_populates="program_intake_scholarships")
+    scholarship = relationship("Scholarship", back_populates="program_intake_scholarships")
+
+# Program Exam Requirements table
+class ProgramExamRequirement(Base):
+    __tablename__ = "program_exam_requirements"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    program_intake_id = Column(Integer, ForeignKey("program_intakes.id"), nullable=False)
+    exam_name = Column(Text, nullable=False)  # e.g., HSK, CSCA, IELTS, TOEFL
+    required = Column(Boolean, default=True)  # Whether this exam is required
+    subjects = Column(Text, nullable=True)  # For CSCA: Math/Physics/Chemistry etc.
+    min_level = Column(Integer, nullable=True)  # For HSK level
+    min_score = Column(Integer, nullable=True)  # For HSK score, IELTS band, TOEFL score
+    exam_language = Column(Text, nullable=True)  # e.g., "English version CSCA required"
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    program_intake = relationship("ProgramIntake", back_populates="program_exam_requirements")
+
+# Partner table
+class Partner(Base):
+    __tablename__ = "partners"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(Text, nullable=False)  # Contact person name
+    company_name = Column(Text, nullable=True)
+    phone1 = Column(Text, nullable=True)
+    phone2 = Column(Text, nullable=True)
+    email = Column(String, unique=True, nullable=False, index=True)
+    city = Column(Text, nullable=True)
+    country = Column(Text, nullable=True)
+    full_address = Column(Text, nullable=True)
+    website = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    password = Column(String, nullable=False)  # Hashed password
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    students = relationship("Student", back_populates="partner")
 
 # Students table (enhanced)
 class Student(Base):
@@ -329,6 +606,7 @@ class Student(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), unique=True)
+    partner_id = Column(Integer, ForeignKey("partners.id"), nullable=True)  # Link to partner
     
     # Identification & Contact
     full_name = Column(String)
@@ -342,14 +620,16 @@ class Student(Base):
     date_of_birth = Column(DateTime)
     phone = Column(String)
     email = Column(String)
-    wechat_id = Column(String, nullable=True)
+    video_url = Column(String, nullable=True)  # 3-5 Minutes Video Url
     
     # Passport & Scores
     passport_number = Column(String)
     passport_expiry_date = Column(DateTime)
     passport_scanned_url = Column(String, nullable=True)
     passport_photo_url = Column(String, nullable=True)
-    hsk_score = Column(Float, nullable=True)  # HSK score (replaces hsk_level)
+    hsk_score = Column(Float, nullable=True)  # HSK score
+    level_of_hsk = Column(SQLEnum(HSKLevel), nullable=True)  # HSK level dropdown
+    hsk_test_score_report_no = Column(String, nullable=True)  # HSK Test Score Report No.
     hsk_certificate_date = Column(DateTime, nullable=True)  # HSK certificate date
     hsk_certificate_url = Column(String, nullable=True)
     hskk_level = Column(SQLEnum(HSKKLevel), nullable=True)  # HSKK level (dropdown)
@@ -363,15 +643,24 @@ class Student(Base):
     english_test_type = Column(SQLEnum(EnglishTestType), default=EnglishTestType.NONE)
     english_test_score = Column(Float, nullable=True)
     english_certificate_url = Column(String, nullable=True)
+    other_certificate_english_name = Column(String, nullable=True)  # Other Certificate for english name
     
     # Personal Information
     marital_status = Column(SQLEnum(MaritalStatus), nullable=True)
     religion = Column(SQLEnum(Religion), nullable=True)
-    occupation = Column(String, nullable=True)  # e.g., student, business
+    occupation = Column(SQLEnum(Occupation), nullable=True)
+    native_language = Column(SQLEnum(NativeLanguage), nullable=True)
+    employer_or_institution_affiliated = Column(String, nullable=True)
+    health_status = Column(Text, nullable=True)
+    hobby = Column(Text, nullable=True)  # e.g., sports, etc.
+    is_ethnic_chinese = Column(Boolean, nullable=True, default=False)
+    chinese_language_proficiency = Column(SQLEnum(LanguageProficiency), nullable=True)
+    english_language_proficiency = Column(SQLEnum(LanguageProficiency), nullable=True)
+    other_language_proficiency = Column(Text, nullable=True)
     
     # Academic Docs
     highest_degree_diploma_url = Column(String, nullable=True)
-    highest_degree_name = Column(String, nullable=True)  # Now editable text (e.g., H.S.C., A-level)
+    highest_degree_name = Column(SQLEnum(HighestEducationLevel), nullable=True)  # Highest Level of Education Completed/to be Completed
     highest_degree_medium = Column(SQLEnum(DegreeMedium), nullable=True)  # English, Chinese, or Native
     highest_degree_institution = Column(String, nullable=True)
     highest_degree_country = Column(String, nullable=True)
@@ -391,6 +680,7 @@ class Student(Base):
     study_certificate_china_url = Column(String, nullable=True)
     application_form_url = Column(String, nullable=True)
     study_plan_url = Column(String, nullable=True)  # Study plan / motivation letter
+    acceptance_letter_url = Column(String, nullable=True)  # Acceptance letter from university
     passport_page_url = Column(String, nullable=True)  # Additional passport pages
     cv_resume_url = Column(String, nullable=True)  # CV/Resume
     jw202_jw201_url = Column(String, nullable=True)  # JW202/JW201 form
@@ -425,6 +715,19 @@ class Student(Base):
     previous_travel_to_china = Column(Boolean, default=False)  # Has student traveled to China before?
     previous_travel_details = Column(Text, nullable=True)  # Details about previous travel
     
+    # Additional fields from COVA form
+    criminal_record = Column(Boolean, nullable=True, default=False)  # Have you ever had a criminal record?
+    criminal_record_details = Column(Text, nullable=True)  # Details if yes
+    financial_supporter = Column(JSON, nullable=True)  # Financial supporter information (name, tel, organization, address, relationship, email)
+    guarantor_in_china = Column(JSON, nullable=True)  # Guarantor in China (name, phone_number, mobile, email, address, organization)
+    social_media_accounts = Column(JSON, nullable=True)  # Social media accounts (Facebook, LinkedIn, QQ, Skype, WeChat, Twitter, DingTalk, Instagram)
+    studied_in_china = Column(Boolean, nullable=True, default=False)  # Have you ever studied online or offline at any institution in China?
+    studied_in_china_details = Column(Text, nullable=True)  # Details if yes
+    work_experience = Column(Boolean, nullable=True, default=False)  # Do you have work experience?
+    work_experience_details = Column(JSON, nullable=True)  # Work experience details
+    worked_in_china = Column(Boolean, nullable=True, default=False)  # Have you ever worked in China?
+    worked_in_china_details = Column(Text, nullable=True)  # Details if yes
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
@@ -434,6 +737,7 @@ class Student(Base):
     target_university = relationship("University", foreign_keys=[target_university_id])
     target_major = relationship("Major", foreign_keys=[target_major_id])
     target_intake = relationship("ProgramIntake", foreign_keys=[target_intake_id])
+    partner = relationship("Partner", back_populates="students")
 
 # Applications table - tracks multiple applications per student
 class Application(Base):

@@ -5,7 +5,7 @@ Handles document verification using OpenAI Vision API
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Tuple
 from app.database import get_db
 from app.models import Student, User, StudentDocument, DocumentType
 from app.routers.auth import get_current_user
@@ -13,11 +13,70 @@ from app.services.document_verification_service import DocumentVerificationServi
 from app.services.r2_service import R2Service
 import base64
 import io
+from PIL import Image
 
 router = APIRouter()
 
 verification_service = DocumentVerificationService()
 r2_service = R2Service()
+
+def validate_passport_photo(file_content: bytes, filename: str) -> Tuple[bool, str]:
+    """
+    Validate passport photo requirements before AI processing.
+    Validates: format (JPG/JPEG), size (100-500KB), dimensions (min 295x413), ratio (4:3), orientation (width < height).
+    
+    Returns:
+        (is_valid, error_message)
+    """
+    try:
+        # Check file format
+        filename_lower = filename.lower()
+        if not (filename_lower.endswith('.jpg') or filename_lower.endswith('.jpeg')):
+            return False, "Passport photo must be in JPG or JPEG format. Current format is not supported."
+        
+        # Check file size (100KB - 500KB)
+        file_size_kb = len(file_content) / 1024
+        if file_size_kb < 100:
+            return False, f"File size ({file_size_kb:.1f} KB) is too small. Minimum size is 100 KB."
+        if file_size_kb > 500:
+            return False, f"File size ({file_size_kb:.1f} KB) exceeds maximum allowed size of 500 KB."
+        
+        # Check image dimensions and ratio
+        try:
+            image = Image.open(io.BytesIO(file_content))
+            width, height = image.size
+            
+            # Check minimum dimensions (no less than 295*413 pixels)
+            if width < 295 or height < 413:
+                return False, f"Image dimensions ({width}x{height} pixels) are too small. Minimum required: 295x413 pixels."
+            
+            # Check orientation (width must be less than height - portrait orientation)
+            if width >= height:
+                return False, f"Image orientation is incorrect. Width ({width}px) must be less than height ({height}px) for portrait orientation."
+            
+            # Check aspect ratio (4:3 ratio, with some tolerance)
+            # For 4:3 ratio, height/width should be approximately 1.333
+            # For passport photos, common sizes are 295x413 (ratio ~1.4), 354x472 (ratio ~1.33), etc.
+            # We'll allow ratio between 1.25 and 1.5 to accommodate various passport photo standards
+            ratio = height / width
+            if ratio < 1.25 or ratio > 1.5:
+                return False, f"Image aspect ratio ({ratio:.2f}) is incorrect. Required ratio is approximately 4:3 (height:width between 1.25 and 1.5)."
+            
+            # Check if image is colored (not grayscale)
+            if image.mode in ('L', 'LA', 'P'):
+                # Convert palette mode to RGB to check
+                if image.mode == 'P':
+                    image = image.convert('RGB')
+                else:
+                    return False, "Image must be colored (not grayscale)."
+            
+            return True, ""
+            
+        except Exception as e:
+            return False, f"Failed to read image: {str(e)}"
+            
+    except Exception as e:
+        return False, f"Validation error: {str(e)}"
 
 class VerifyDocumentRequest(BaseModel):
     file_url: str
@@ -88,6 +147,15 @@ async def verify_and_upload_document(
     
     if file_size == 0:
         raise HTTPException(status_code=400, detail="File is empty")
+    
+    # Special validation for passport photos
+    if doc_type.lower() in ('photo', 'passport_photo', 'passport_size_photo'):
+        is_valid, error_msg = validate_passport_photo(file_content, file.filename)
+        if not is_valid:
+            raise HTTPException(
+                status_code=400,
+                detail=error_msg
+            )
     
     # Check file size limit (1MB = 1048576 bytes)
     MAX_FILE_SIZE = 1048576  # 1MB

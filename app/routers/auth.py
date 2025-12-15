@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 import bcrypt
 from app.database import get_db
-from app.models import User, UserRole, Lead, Student
+from app.models import User, UserRole, Lead, Student, Partner
 from app.config import settings
 from datetime import datetime
 
@@ -72,6 +72,13 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         if user_id_str is None:
             print(f"JWT Error: No 'sub' claim in token. Payload: {payload}")
             raise credentials_exception
+        
+        # Check if it's a partner token (format: "partner_{id}")
+        if isinstance(user_id_str, str) and user_id_str.startswith("partner_"):
+            # This is a partner token, not a user token
+            print(f"JWT Error: Partner token detected in get_current_user: {user_id_str}")
+            raise credentials_exception
+        
         # Convert string user_id to int
         try:
             user_id: int = int(user_id_str)
@@ -127,10 +134,30 @@ async def signup(user_data: UserSignup, db: Session = Depends(get_db)):
         lead.converted_at = datetime.utcnow()
         db.commit()
     
+    # Get default MalishaEdu partner
+    default_partner = db.query(Partner).filter(Partner.email == 'malishaedu@gmail.com').first()
+    if not default_partner:
+        # If default partner doesn't exist, create it
+        default_partner = Partner(
+            name='MalishaEdu',
+            company_name='MalishaEdu',
+            email='malishaedu@gmail.com',
+            password=get_password_hash('12345678')
+        )
+        db.add(default_partner)
+        db.flush()
+    
     # Create Student record automatically for new signups
+    # Split name into given_name and family_name (simple split on first space)
+    name_parts = user_data.name.strip().split(' ', 1)
+    given_name = name_parts[0] if name_parts else ''
+    family_name = name_parts[1] if len(name_parts) > 1 else ''
+    
     student = Student(
         user_id=user.id,
-        full_name=user_data.name,
+        partner_id=default_partner.id,  # Assign to default MalishaEdu partner
+        given_name=given_name,
+        family_name=family_name,
         email=user_data.email,
         phone=user_data.phone,
         country_of_citizenship=user_data.country
@@ -154,30 +181,61 @@ async def signup(user_data: UserSignup, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    """User login"""
+    """User login - supports student, admin, and partner"""
     try:
+        # First try to find user (student/admin)
         user = db.query(User).filter(User.email == form_data.username).first()
-        if not user or not verify_password(form_data.password, user.hashed_password):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect email or password",
-                headers={"WWW-Authenticate": "Bearer"},
+        if user:
+            if not verify_password(form_data.password, user.hashed_password):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Incorrect email or password",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            
+            access_token = create_access_token(data={"sub": user.id})
+            role_value = user.role.value if user.role else "student"
+            
+            return Token(
+                access_token=access_token,
+                token_type="bearer",
+                user={
+                    "id": user.id,
+                    "email": user.email,
+                    "name": user.name,
+                    "role": role_value
+                }
             )
         
-        access_token = create_access_token(data={"sub": user.id})
+        # If not found in users, try partners
+        partner = db.query(Partner).filter(Partner.email == form_data.username).first()
+        if partner:
+            if not verify_password(form_data.password, partner.password):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Incorrect email or password",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            
+            # Create token with partner identifier (use negative ID to distinguish from users)
+            access_token = create_access_token(data={"sub": f"partner_{partner.id}"})
+            
+            return Token(
+                access_token=access_token,
+                token_type="bearer",
+                user={
+                    "id": partner.id,
+                    "email": partner.email,
+                    "name": partner.name,
+                    "role": "partner"
+                }
+            )
         
-        # Ensure role has a value
-        role_value = user.role.value if user.role else "student"
-        
-        return Token(
-            access_token=access_token,
-            token_type="bearer",
-            user={
-                "id": user.id,
-                "email": user.email,
-                "name": user.name,
-                "role": role_value
-            }
+        # If neither found
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
         )
     except HTTPException:
         raise

@@ -1,5 +1,9 @@
--- Migration script to add new fields to program_intakes table
--- Run this SQL script directly on your database if the Python migration script fails
+-- ===================================================================
+-- Migration Script: Add New Fields to program_intakes Table
+-- ===================================================================
+-- This script adds all the new fields requested for the program_intakes table
+-- Run this SQL script directly on your PostgreSQL database
+-- ===================================================================
 
 -- ========== Program Start & Deadline ==========
 ALTER TABLE program_intakes ADD COLUMN IF NOT EXISTS program_start_date DATE;
@@ -44,3 +48,13 @@ ALTER TABLE program_intakes ADD COLUMN IF NOT EXISTS accommodation_fee_period VA
 ALTER TABLE program_intakes ADD COLUMN IF NOT EXISTS medical_insurance_fee_period VARCHAR;
 ALTER TABLE program_intakes ADD COLUMN IF NOT EXISTS arrival_medical_checkup_is_one_time BOOLEAN DEFAULT TRUE;
 UPDATE program_intakes SET arrival_medical_checkup_is_one_time = TRUE WHERE arrival_medical_checkup_is_one_time IS NULL;
+
+-- ===================================================================
+-- Migration Complete!
+-- ===================================================================
+-- All new fields have been added to the program_intakes table.
+-- Default values have been set where applicable:
+--   - currency: 'CNY'
+--   - arrival_medical_checkup_is_one_time: TRUE
+-- ===================================================================
+

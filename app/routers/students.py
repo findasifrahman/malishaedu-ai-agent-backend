@@ -11,7 +11,6 @@ router = APIRouter()
 
 class StudentProfile(BaseModel):
     # Basic identification
-    full_name: Optional[str] = None
     given_name: Optional[str] = None
     family_name: Optional[str] = None
     father_name: Optional[str] = None
@@ -22,7 +21,7 @@ class StudentProfile(BaseModel):
     current_country_of_residence: Optional[str] = None
     phone: Optional[str] = None
     email: Optional[str] = None
-    wechat_id: Optional[str] = None
+    video_url: Optional[str] = None
     
     # Passport information
     passport_number: Optional[str] = None
@@ -47,6 +46,7 @@ class StudentProfile(BaseModel):
     csca_score_chemistry: Optional[float] = None
     english_test_type: Optional[str] = None
     english_test_score: Optional[float] = None
+    other_certificate_english_name: Optional[str] = None
     
     # Application intent
     target_university_id: Optional[int] = None
@@ -68,10 +68,35 @@ class StudentProfile(BaseModel):
     previous_travel_to_china: Optional[bool] = None
     previous_travel_details: Optional[str] = None
     
+    # Additional COVA fields
+    criminal_record: Optional[bool] = None
+    criminal_record_details: Optional[str] = None
+    financial_supporter: Optional[dict] = None
+    guarantor_in_china: Optional[dict] = None
+    social_media_accounts: Optional[dict] = None
+    studied_in_china: Optional[bool] = None
+    studied_in_china_details: Optional[str] = None
+    work_experience: Optional[bool] = None
+    work_experience_details: Optional[dict] = None
+    worked_in_china: Optional[bool] = None
+    worked_in_china_details: Optional[str] = None
+    
     # Personal Information
     marital_status: Optional[str] = None
     religion: Optional[str] = None
     occupation: Optional[str] = None
+    native_language: Optional[str] = None
+    employer_or_institution_affiliated: Optional[str] = None
+    health_status: Optional[str] = None
+    hobby: Optional[str] = None
+    is_ethnic_chinese: Optional[bool] = None
+    chinese_language_proficiency: Optional[str] = None
+    english_language_proficiency: Optional[str] = None
+    other_language_proficiency: Optional[str] = None
+    
+    # HSK Information
+    level_of_hsk: Optional[str] = None
+    hsk_test_score_report_no: Optional[str] = None
     
     # Highest degree information
     highest_degree_name: Optional[str] = None
@@ -86,9 +111,9 @@ class StudentProfile(BaseModel):
     relation_with_guarantor: Optional[str] = None
     is_the_bank_guarantee_in_students_name: Optional[bool] = None
     
-    @field_validator('full_name', 'given_name', 'family_name', 'father_name', 'mother_name', 
+    @field_validator('given_name', 'family_name', 'father_name', 'mother_name', 
                      'gender', 'country_of_citizenship', 'current_country_of_residence', 
-                     'phone', 'email', 'wechat_id', 'passport_number', 'home_address', 
+                     'phone', 'email', 'video_url', 'passport_number', 'home_address', 
                      'current_address', 'emergency_contact_name', 'emergency_contact_phone', 
                      'emergency_contact_relationship', 'intended_address_china', 
                      'previous_visa_details', 'previous_travel_details', 'occupation', mode='before')
@@ -161,7 +186,7 @@ async def get_student_profile(
     student_dict = {
         "id": student.id,
         "user_id": student.user_id,
-        "full_name": student.full_name,
+        "full_name": f"{student.given_name or ''} {student.family_name or ''}".strip() or None,
         "given_name": student.given_name,
         "family_name": student.family_name,
         "father_name": student.father_name,
@@ -172,7 +197,7 @@ async def get_student_profile(
         "current_country_of_residence": student.current_country_of_residence,
         "phone": student.phone,
         "email": student.email,
-        "wechat_id": student.wechat_id,
+        "video_url": student.video_url,
         "passport_number": student.passport_number,
         "passport_expiry_date": student.passport_expiry_date.isoformat() if student.passport_expiry_date else None,
         "hsk_score": student.hsk_score,
@@ -188,7 +213,18 @@ async def get_student_profile(
         "english_test_score": student.english_test_score,
         "marital_status": student.marital_status.value if student.marital_status else None,
         "religion": student.religion.value if student.religion else None,
-        "occupation": student.occupation,
+        "occupation": student.occupation.value if student.occupation else None,
+        "native_language": student.native_language.value if student.native_language else None,
+        "employer_or_institution_affiliated": student.employer_or_institution_affiliated,
+        "health_status": student.health_status,
+        "hobby": student.hobby,
+        "is_ethnic_chinese": student.is_ethnic_chinese,
+        "chinese_language_proficiency": student.chinese_language_proficiency.value if student.chinese_language_proficiency else None,
+        "english_language_proficiency": student.english_language_proficiency.value if student.english_language_proficiency else None,
+        "other_language_proficiency": student.other_language_proficiency,
+        "level_of_hsk": student.level_of_hsk.value if student.level_of_hsk else None,
+        "hsk_test_score_report_no": student.hsk_test_score_report_no,
+        "other_certificate_english_name": student.other_certificate_english_name,
         "target_university_id": student.target_university_id,
         "target_major_id": student.target_major_id,
         "target_intake_id": student.target_intake_id,
@@ -197,7 +233,7 @@ async def get_student_profile(
         "application_stage": student.application_stage.value if student.application_stage else None,
         "home_address": student.home_address,
         "current_address": student.current_address,
-        "highest_degree_name": student.highest_degree_name,
+        "highest_degree_name": student.highest_degree_name.value if student.highest_degree_name else None,
         "highest_degree_medium": student.highest_degree_medium.value if student.highest_degree_medium else None,
         "highest_degree_institution": student.highest_degree_institution,
         "highest_degree_country": student.highest_degree_country,
@@ -218,6 +254,17 @@ async def get_student_profile(
         "education_history": student.education_history,
         "employment_history": student.employment_history,
         "family_members": student.family_members,
+        "criminal_record": student.criminal_record,
+        "criminal_record_details": student.criminal_record_details,
+        "financial_supporter": student.financial_supporter,
+        "guarantor_in_china": student.guarantor_in_china,
+        "social_media_accounts": student.social_media_accounts,
+        "studied_in_china": student.studied_in_china,
+        "studied_in_china_details": student.studied_in_china_details,
+        "work_experience": student.work_experience,
+        "work_experience_details": student.work_experience_details,
+        "worked_in_china": student.worked_in_china,
+        "worked_in_china_details": student.worked_in_china_details,
         "created_at": student.created_at.isoformat() if student.created_at else None,
     }
     
@@ -237,8 +284,6 @@ async def update_student_profile(
         db.add(student)
     
     # Basic identification
-    if profile.full_name is not None:
-        student.full_name = profile.full_name
     if profile.given_name is not None:
         student.given_name = profile.given_name
     if profile.family_name is not None:
@@ -259,8 +304,8 @@ async def update_student_profile(
         student.phone = profile.phone
     if profile.email is not None:
         student.email = profile.email
-    if profile.wechat_id is not None:
-        student.wechat_id = profile.wechat_id
+    if hasattr(profile, 'video_url') and profile.video_url is not None:
+        student.video_url = profile.video_url
     
     # Passport information
     if profile.passport_number is not None:
@@ -373,11 +418,59 @@ async def update_student_profile(
         except ValueError:
             pass
     if profile.occupation is not None:
-        student.occupation = profile.occupation
+        from app.models import Occupation
+        try:
+            student.occupation = Occupation(profile.occupation)
+        except ValueError:
+            pass
+    if profile.native_language is not None:
+        from app.models import NativeLanguage
+        try:
+            student.native_language = NativeLanguage(profile.native_language)
+        except ValueError:
+            pass
+    if profile.employer_or_institution_affiliated is not None:
+        student.employer_or_institution_affiliated = profile.employer_or_institution_affiliated
+    if profile.health_status is not None:
+        student.health_status = profile.health_status
+    if profile.hobby is not None:
+        student.hobby = profile.hobby
+    if profile.is_ethnic_chinese is not None:
+        student.is_ethnic_chinese = profile.is_ethnic_chinese
+    if profile.chinese_language_proficiency is not None:
+        from app.models import LanguageProficiency
+        try:
+            student.chinese_language_proficiency = LanguageProficiency(profile.chinese_language_proficiency)
+        except ValueError:
+            pass
+    if profile.english_language_proficiency is not None:
+        from app.models import LanguageProficiency
+        try:
+            student.english_language_proficiency = LanguageProficiency(profile.english_language_proficiency)
+        except ValueError:
+            pass
+    if profile.other_language_proficiency is not None:
+        student.other_language_proficiency = profile.other_language_proficiency
+    if profile.level_of_hsk is not None:
+        from app.models import HSKLevel
+        try:
+            student.level_of_hsk = HSKLevel(profile.level_of_hsk)
+        except ValueError:
+            pass
+    if profile.hsk_test_score_report_no is not None:
+        student.hsk_test_score_report_no = profile.hsk_test_score_report_no
+    if profile.other_certificate_english_name is not None:
+        student.other_certificate_english_name = profile.other_certificate_english_name
+    if hasattr(profile, 'video_url') and profile.video_url is not None:
+        student.video_url = profile.video_url
     
     # Highest degree information
     if hasattr(profile, 'highest_degree_name') and profile.highest_degree_name is not None:
-        student.highest_degree_name = profile.highest_degree_name
+        from app.models import HighestEducationLevel
+        try:
+            student.highest_degree_name = HighestEducationLevel(profile.highest_degree_name)
+        except ValueError:
+            pass
     if profile.highest_degree_medium is not None and profile.highest_degree_medium != '':
         from app.models import DegreeMedium
         try:

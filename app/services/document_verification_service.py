@@ -292,34 +292,40 @@ PHYSICAL EXAMINATION FORM SPECIFIC REQUIREMENTS:
 - Extract: examination_date, doctor_name, hospital_name, test_results
 """,
             "photo": """
-PASSPORT SIZE PHOTO SPECIFIC REQUIREMENTS:
-- **CRITICAL: Background MUST be pure white or off-white (no colors, patterns, or shadows)**
+PASSPORT SIZE PHOTO SPECIFIC REQUIREMENTS (Colored 2-inch bare-headed photo):
+- **CRITICAL: Background MUST be pure white or off-white (no colors, patterns, borders, or shadows)**
+- **CRITICAL: Photo must be colored (not grayscale or black and white)**
+- **CRITICAL: Width must be less than height (portrait orientation)**
+- **CRITICAL: Head must account for approximately 2/3 (66-70%) of the photo size**
 - Photo must be passport size (typically 35mm x 45mm or 2x2 inches)
-- Face must be clearly visible, centered, and take up 70-80% of the photo
+- Face must be clearly visible, centered, and take up 66-70% of the photo height
+- **Bare-headed: No headwear (except for religious reasons, must not obscure face)**
 - Neutral expression (no smiling, mouth closed)
 - Eyes must be open and clearly visible
-- No headwear (except for religious reasons, must not obscure face)
 - No glasses (unless medically necessary, must not obscure eyes)
 - Recent photo (taken within last 6 months)
 - High quality, sharp, and clear
 - Proper lighting with no shadows on face or background
 - Professional appearance
-- Extract: photo_quality, background_color, face_visibility, photo_size, meets_requirements
+- Extract: photo_quality, background_color, face_visibility, photo_size, head_proportion, is_colored, orientation, meets_requirements
 """,
             "passport_photo": """
-PASSPORT SIZE PHOTO SPECIFIC REQUIREMENTS:
-- **CRITICAL: Background MUST be pure white or off-white (no colors, patterns, or shadows)**
+PASSPORT SIZE PHOTO SPECIFIC REQUIREMENTS (Colored 2-inch bare-headed photo):
+- **CRITICAL: Background MUST be pure white or off-white (no colors, patterns, borders, or shadows)**
+- **CRITICAL: Photo must be colored (not grayscale or black and white)**
+- **CRITICAL: Width must be less than height (portrait orientation)**
+- **CRITICAL: Head must account for approximately 2/3 (66-70%) of the photo size**
 - Photo must be passport size (typically 35mm x 45mm or 2x2 inches)
-- Face must be clearly visible, centered, and take up 70-80% of the photo
+- Face must be clearly visible, centered, and take up 66-70% of the photo height
+- **Bare-headed: No headwear (except for religious reasons, must not obscure face)**
 - Neutral expression (no smiling, mouth closed)
 - Eyes must be open and clearly visible
-- No headwear (except for religious reasons, must not obscure face)
 - No glasses (unless medically necessary, must not obscure eyes)
 - Recent photo (taken within last 6 months)
 - High quality, sharp, and clear
 - Proper lighting with no shadows on face or background
 - Professional appearance
-- Extract: photo_quality, background_color, face_visibility, photo_size, meets_requirements
+- Extract: photo_quality, background_color, face_visibility, photo_size, head_proportion, is_colored, orientation, meets_requirements
 """
         }
         
