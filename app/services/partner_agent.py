@@ -1024,8 +1024,20 @@ Output ONLY valid JSON, no other text:"""
         t_state_end = time.perf_counter()
         print(f"DEBUG: Extracted state: {state.to_dict()} (used_quick={used_quick}) in {(t_state_end - t_state_start):.3f}s")
 
-        # If degree level is missing, ask for it before proceeding to heavy DB/LLM work.
-        if not state.degree_level:
+        # Detect language intent early and auto-fill degree/major
+        language_kw = ["language program", "language", "non-degree", "non degree", "chinese language", "english language", "mandarin course"]
+        is_language_intent = any(kw in user_message.lower() for kw in language_kw)
+        if is_language_intent:
+            state.degree_level = state.degree_level or "Language"
+            if "chinese language" in user_message.lower():
+                state.major = state.major or "Chinese Language (One Year)"
+            elif "english language" in user_message.lower():
+                state.major = state.major or "English Language Program"
+            else:
+                state.major = state.major or "Language Program"
+
+        # If degree level is missing and not language intent, ask for it before proceeding
+        if not state.degree_level and not is_language_intent:
             return {
                 "response": (
                     "To tailor fees and requirements, please confirm the degree level "
@@ -1117,6 +1129,9 @@ Output ONLY valid JSON, no other text:"""
             intent = "scholarship_only"
         elif any(k in user_lower for k in ["eligible", "requirements", "age", "ielts", "hsk", "csca"]):
             intent = "eligibility_only"
+        # fees_compare for cheapest/lowest cost queries
+        if any(k in user_lower for k in ["cheapest", "lowest", "less fee", "low fee", "lowest cost", "less cost"]) and is_language_intent:
+            intent = "fees_compare"
 
         include_total = any(k in user_lower for k in ["total", "overall", "year 1 total", "year one total"])
         year1_total_included = False  # We no longer compute totals unless explicitly added later
@@ -1147,6 +1162,18 @@ Output ONLY valid JSON, no other text:"""
         t_db_end = time.perf_counter()
         print(f"DEBUG: DB intakes load time: {(t_db_end - t_db_start):.3f}s, count={len(filtered_intakes)} (matched majors: {len(major_ids) if major_ids else 0}, intake_term_enum={norm_intake_term})")
 
+        # If language intent with specific intake term and no results, return early
+        if is_language_intent and norm_intake_term and not filtered_intakes:
+            fallback_msg = f"No {norm_intake_term.value.title()} language intakes available right now."
+            if norm_intake_term == IntakeTerm.MARCH:
+                fallback_msg += " Want me to check September language intakes instead?"
+            return {
+                "response": fallback_msg,
+                "used_db": True,
+                "used_tavily": False,
+                "sources": []
+            }
+
         # Hard cap to avoid sending huge lists to LLM
         if is_list_query:
             filtered_intakes = filtered_intakes[:300]
@@ -1163,6 +1190,13 @@ Output ONLY valid JSON, no other text:"""
         # Flags based on intent
         include_docs = include_exams = include_scholarships = include_eligibility = include_deadlines = include_cost = True
         if intent == "fees_only":
+            include_docs = False
+            include_exams = False
+            include_scholarships = False
+            include_eligibility = False
+            include_deadlines = True
+            include_cost = True
+        elif intent == "fees_compare":
             include_docs = False
             include_exams = False
             include_scholarships = False
