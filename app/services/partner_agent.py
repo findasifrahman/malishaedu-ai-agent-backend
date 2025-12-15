@@ -9,8 +9,9 @@ from app.services.db_query_service import DBQueryService
 from app.services.tavily_service import TavilyService
 from app.services.openai_service import OpenAIService
 from difflib import SequenceMatcher
-from app.models import University, Major, ProgramIntake, ProgramDocument, ProgramIntakeScholarship, Scholarship, ProgramExamRequirement
+from app.models import University, Major, ProgramIntake, ProgramDocument, ProgramIntakeScholarship, Scholarship, ProgramExamRequirement, IntakeTerm
 from datetime import datetime, date
+import time
 import json
 import re
 
@@ -70,9 +71,10 @@ SYSTEM CORE (CRITICAL RULES):
 - Treat CURRENT DATE in DATABASE CONTEXT as the single source of truth for deadline checks and days remaining
 - Never assume fee periods; always use *_fee_period. If missing, say "period not specified"
 - If multiple deadlines exist (scholarship vs self-paid), show both clearly
-- If info is missing in DB, say "not provided in our database" - do NOT infer or hallucinate
+- If info is missing in DB, say "not provided" - do NOT infer or hallucinate
 - If uncertain match, offer top 2-3 options and ask user to pick (do not guess)
-- Always respond using the STRICT RESPONSE FORMAT below
+- Use the intent-specific template; be concise.
+- When intent is fees_only, do NOT include unrelated sections.
 - For ambiguous queries, ask only 1-2 key disambiguators (degree level + intake/year)
 
 CURRENT DATE AWARENESS:
@@ -196,55 +198,15 @@ SCOPE:
 - Do NOT answer questions about other countries or education systems
 - If asked about non-China topics, politely redirect: "I can only help with questions about Chinese universities and MalishaEdu programs."
 
-STRICT RESPONSE FORMAT (MANDATORY - follow this exact structure):
-1. Best Match:
-   - University Name + Program Name + Intake (term and year)
-   - Teaching Language
-   
-2. Deadlines:
-   - Application Deadline: [date] ([X] days remaining from CURRENT DATE: [date from DB context])
-   - Scholarship Deadline: [date if different] OR "Same as application deadline"
-   - If both scholarship and self-funded deadlines exist, show both explicitly
-   - Recommend the earlier deadline if student wants scholarship
-   
-3. Eligibility:
-   - Age: [age_min] to [age_max] years OR "not provided in our database"
-   - Minimum Score: [min_average_score] OR "not provided in our database"
-   - Language Tests: [HSK/IELTS/TOEFL requirements] OR "not provided in our database"
-   - Exams: [CSCA subjects/requirements] OR "not provided in our database"
-   - Interview: [Required/Not required] OR "not provided in our database"
-   - Written Test: [Required/Not required] OR "not provided in our database"
-   
-4. Cost Summary:
-   - Tuition: [amount] [currency]/[year or semester]
-   - Accommodation: [amount] [currency] per [period from accommodation_fee_period]
-     * If monthly: Also show estimated annual (×12, marked "estimate")
-   - Medical Insurance: [amount] [currency] per [period from medical_insurance_fee_period]
-     * If monthly: Also show estimated annual (×12, marked "estimate")
-   - Application Fee: [amount] [currency] (one-time)
-   - Arrival Medical Checkup: [amount] [currency] (one-time)
-   - Visa Extension: [amount] [currency] (annual, required each year)
-   - Year 1 Total Estimate: [sum of all above for first year]
-   
-5. Scholarships:
-   - For each scholarship:
-     * Name: [scholarship_name]
-     * Coverage: Tuition [Yes/No/XX% waiver], Accommodation [Yes/No], Insurance [Yes/No]
-     * Living Allowance: [monthly/yearly amount] OR "None"
-     * First Year Only: [Yes/No] OR "not provided in our database"
-     * Renewal Required: [Yes/No] OR "not provided in our database"
-     * Deadline: [date] OR "Same as application deadline"
-   
-6. Required Documents:
-   - List ALL documents (do not truncate)
-   - For each: [Document Name] ([Required/Optional]) - [rules if available]
-   
-7. Next Step Question:
-   - Ask exactly 1 question to move the lead forward
-   - Examples: "Do they want scholarship or self-funded?", "What's their preferred intake term?", "Do they have IELTS/HSK scores?"
+RESPONSE TEMPLATES BY INTENT (use minimal necessary info):
+- fees_only: Program line (university + major + degree + intake + language), Deadlines (application + scholarship if present), Fees (tuition, accommodation with period, insurance, application, medical, visa extension, bank if present). No eligibility/exams/documents/scholarship list. No Year 1 total unless user explicitly asks for total/overall/year 1.
+- documents_only: Program line + all required documents with rules. Omit fees unless asked.
+- scholarship_only: Program line + scholarships (what they cover) + scholarship deadlines. Omit fees unless asked.
+- eligibility_only: Program line + eligibility only (age, min score, language tests, CSCA/exams, interview/written). Omit fees.
+- general: Be concise, structured, and DB-first; include only relevant sections.
 
 MISSING INFORMATION HANDLING:
-- If a field is not present in DATABASE CONTEXT, say "not provided in our database" - do NOT infer or guess
+- If a field is not present in DATABASE CONTEXT, say "not provided" - do NOT infer or guess
 - Do NOT make up values for fees, deadlines, or requirements that are not in the database
 - If uncertain about a match, present 2-3 options and ask the user to confirm
 
@@ -253,15 +215,6 @@ FUZZY MATCHING BEHAVIOR:
 - Do NOT assume which university/major the user meant if there are similar options
 - Example: "I found a few options that might match. Did you mean [Option 1], [Option 2], or [Option 3]? Please let me know which one."
 
-AGENT MODE DETECTION:
-- If user message includes: "student profile", "eligible", "can I apply", "eligibility" → Focus on Eligibility-first (age, scores, language tests, requirements)
-- If user message includes: "commission", "process", "documents checklist", "what to collect", "pitch" → Focus on Operations-first (documents, process, fees, deadlines)
-
-MULTI-DEADLINE CLARITY:
-- If both scholarship deadline and self-paid deadline exist, show both explicitly
-- Recommend the earlier deadline if the student wants scholarship
-- Clearly distinguish between application deadline and scholarship deadline
-
 Style Guidelines:
 - CONCISE: Keep responses brief
 - CONVERSATIONAL: Talk naturally, not like a textbook
@@ -269,7 +222,9 @@ Style Guidelines:
 - PROGRESSIVE: Start with basics, add details when asked
 - FRIENDLY: Warm and helpful
 - STRUCTURED: Use bullet points for lists (3+ items)
-- ALWAYS follow the RESPONSE FORMAT above
+- PHRASING: Prefer "MalishaEdu offers" instead of "I found"; avoid saying "in our database"
+- DEFAULTS: If teaching language is not specified, assume English and state the assumption. If degree level is missing, ask for it before giving program details (Language/Non-degree, Bachelor, Master, PhD).
+- Use the intent-based template; when intent is fees_only, do not include unrelated sections.
 """
 
     def __init__(self, db: Session):
@@ -312,6 +267,25 @@ Style Guidelines:
             traceback.print_exc()
             return []
     
+    def _normalize_keywords(self, raw_keywords: Any) -> List[str]:
+        """Normalize keywords field from DB (list, JSON string, or comma-separated string)."""
+        if isinstance(raw_keywords, list):
+            return [str(k).strip() for k in raw_keywords if str(k).strip()]
+        if isinstance(raw_keywords, str):
+            raw = raw_keywords.strip()
+            if not raw:
+                return []
+            # Try JSON first
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return [str(k).strip() for k in parsed if str(k).strip()]
+            except Exception:
+                pass
+            # Fallback: comma-separated
+            return [k.strip() for k in raw.split(",") if k.strip()]
+        return []
+    
     def _load_all_majors(self) -> List[Dict[str, Any]]:
         """Load all majors with university and degree level associations at startup"""
         try:
@@ -323,7 +297,7 @@ Style Guidelines:
                     "id": major.id,
                     "name": major.name,
                     "name_cn": major.name_cn,
-                    "keywords": major.keywords if isinstance(major.keywords, list) else (json.loads(major.keywords) if isinstance(major.keywords, str) else []),
+                    "keywords": self._normalize_keywords(major.keywords),
                     "university_id": major.university_id,
                     "university_name": major.university.name,
                     "degree_level": major.degree_level if major.degree_level else None,  # Already a string, no .value needed
@@ -511,10 +485,11 @@ Output ONLY valid JSON, no other text:"""
         
         return False, None, []
     
-    def _fuzzy_match_major(self, user_input: str, university_id: Optional[int] = None, degree_level: Optional[str] = None) -> List[Tuple[Dict[str, Any], float]]:
+    def _fuzzy_match_major(self, user_input: str, university_id: Optional[int] = None, degree_level: Optional[str] = None) -> Tuple[bool, Optional[Dict[str, Any]], List[Tuple[Dict[str, Any], float]]]:
         """
         Fuzzy match user input to major from pre-loaded array.
-        Checks name, keywords, and filters by university/degree level if provided.
+        Returns (matched: bool, best_match: Optional[Dict], all_matches: List[Tuple[Dict, score]])
+        If multiple close matches, return top 2-3 for user to pick.
         """
         user_input_clean = re.sub(r'[^\w\s&]', '', user_input.lower())
         
@@ -530,8 +505,7 @@ Output ONLY valid JSON, no other text:"""
             
             # Exact match
             if user_input_clean == major_name_clean:
-                matches.append((major, 1.0))
-                continue
+                return True, major, [(major, 1.0)]
             
             # Substring match
             if user_input_clean in major_name_clean or major_name_clean in user_input_clean:
@@ -544,6 +518,10 @@ Output ONLY valid JSON, no other text:"""
             if keywords:
                 for keyword in keywords:
                     keyword_clean = re.sub(r'[^\w\s&]', '', str(keyword).lower())
+                    if not keyword_clean:
+                        continue
+                    if user_input_clean == keyword_clean:
+                        return True, major, [(major, 1.0)]
                     if user_input_clean in keyword_clean or keyword_clean in user_input_clean:
                         match_ratio = SequenceMatcher(None, user_input_clean, keyword_clean).ratio()
                         matches.append((major, match_ratio))
@@ -558,22 +536,61 @@ Output ONLY valid JSON, no other text:"""
                 if match_ratio >= 0.4:
                     matches.append((major, match_ratio))
         
-        # Sort by match ratio
-        matches.sort(key=lambda x: x[1], reverse=True)
-        return matches[:10]  # Return top 10 matches
+        if matches:
+            # Remove duplicates (same major with different match scores)
+            seen_majors = {}
+            for major, score in matches:
+                major_id = major.get("id")
+                if major_id not in seen_majors or seen_majors[major_id][1] < score:
+                    seen_majors[major_id] = (major, score)
+            matches = list(seen_majors.values())
+            
+            # Sort by match ratio
+            matches.sort(key=lambda x: x[1], reverse=True)
+            best_match = matches[0]
+            if best_match[1] >= 0.8:  # High confidence threshold (80%)
+                return True, best_match[0], matches[:3]  # Return top 3 for context
+            elif best_match[1] >= 0.6:  # Medium confidence (60-80%)
+                # Return top 2-3 options for user to pick
+                return False, None, matches[:3]
+        
+        return False, None, []
     
-    def _get_upcoming_intakes(self, current_date: date) -> List[Dict[str, Any]]:
+    def _get_upcoming_intakes(
+        self,
+        current_date: date,
+        degree_level: Optional[str] = None,
+        university_id: Optional[int] = None,
+        major_ids: Optional[List[int]] = None,
+        intake_term: Optional[str] = None,
+        intake_year: Optional[int] = None,
+        teaching_language: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Get all program intakes with upcoming deadlines (deadline > current_date).
-        Returns list of intakes with university, major, and deadline info.
+        Get program intakes with upcoming deadlines (deadline > current_date) using filtered SQL to reduce load.
         """
         try:
-            print(f"DEBUG: Loading upcoming intakes (deadline > {current_date})...")
-            intakes = self.db.query(ProgramIntake).join(Major).join(University).filter(
+            print(f"DEBUG: Loading filtered upcoming intakes (deadline > {current_date})...")
+            query = self.db.query(ProgramIntake).join(Major).join(University).filter(
                 University.is_partner == True,
                 ProgramIntake.application_deadline > current_date
-            ).all()
-            print(f"DEBUG: Found {len(intakes)} upcoming intakes")
+            ).order_by(ProgramIntake.application_deadline.asc())
+            
+            if university_id:
+                query = query.filter(ProgramIntake.university_id == university_id)
+            if major_ids:
+                query = query.filter(ProgramIntake.major_id.in_(major_ids))
+            if degree_level:
+                query = query.filter(Major.degree_level.ilike(f"%{degree_level}%"))
+            if intake_term:
+                query = query.filter(ProgramIntake.intake_term == intake_term)
+            if intake_year:
+                query = query.filter(ProgramIntake.intake_year == intake_year)
+            if teaching_language:
+                query = query.filter(ProgramIntake.teaching_language.ilike(f"%{teaching_language}%"))
+            
+            intakes = query.all()
+            print(f"DEBUG: Found {len(intakes)} upcoming intakes after filtering")
             
             result = []
             for intake in intakes:
@@ -583,7 +600,7 @@ Output ONLY valid JSON, no other text:"""
                     "university_name": intake.university.name,
                     "major_id": intake.major_id,
                     "major_name": intake.major.name,
-                    "degree_level": intake.major.degree_level if intake.major and intake.major.degree_level else None,  # Get from Major, not ProgramIntake
+                    "degree_level": intake.major.degree_level if intake.major and intake.major.degree_level else None,
                     "intake_term": intake.intake_term.value if intake.intake_term else None,
                     "intake_year": intake.intake_year,
                     "application_deadline": intake.application_deadline.isoformat() if intake.application_deadline else None,
@@ -622,37 +639,41 @@ Output ONLY valid JSON, no other text:"""
             traceback.print_exc()
             return []
     
-    def _get_program_documents(self, program_intake_id: int) -> List[Dict[str, Any]]:
-        """Get required documents for a program intake"""
+    def _get_program_documents_batch(self, intake_ids: List[int]) -> Dict[int, List[Dict[str, Any]]]:
+        """Batch load required documents for multiple program intakes (avoid N+1)."""
+        if not intake_ids:
+            return {}
         try:
             documents = self.db.query(ProgramDocument).filter(
-                ProgramDocument.program_intake_id == program_intake_id
+                ProgramDocument.program_intake_id.in_(intake_ids)
             ).all()
             
-            return [
-                {
+            result: Dict[int, List[Dict[str, Any]]] = {}
+            for doc in documents:
+                result.setdefault(doc.program_intake_id, []).append({
                     "name": doc.name,
                     "is_required": doc.is_required,
                     "rules": doc.rules,
                     "applies_to": doc.applies_to
-                }
-                for doc in documents
-            ]
+                })
+            return result
         except Exception as e:
             print(f"Error loading program documents: {e}")
-            return []
+            return {}
     
-    def _get_program_scholarships(self, program_intake_id: int) -> List[Dict[str, Any]]:
-        """Get scholarships available for a program intake"""
+    def _get_program_scholarships_batch(self, intake_ids: List[int]) -> Dict[int, List[Dict[str, Any]]]:
+        """Batch load scholarships for multiple program intakes (avoid N+1)."""
+        if not intake_ids:
+            return {}
         try:
             intake_scholarships = self.db.query(ProgramIntakeScholarship).filter(
-                ProgramIntakeScholarship.program_intake_id == program_intake_id
+                ProgramIntakeScholarship.program_intake_id.in_(intake_ids)
             ).all()
             
-            result = []
+            result: Dict[int, List[Dict[str, Any]]] = {}
             for intake_sch in intake_scholarships:
                 scholarship = intake_sch.scholarship
-                result.append({
+                sch_dict = {
                     "scholarship_name": scholarship.name if scholarship else None,
                     "provider": scholarship.provider if scholarship else None,
                     "covers_tuition": intake_sch.covers_tuition,
@@ -665,21 +686,24 @@ Output ONLY valid JSON, no other text:"""
                     "renewal_required": intake_sch.renewal_required,
                     "deadline": intake_sch.deadline.isoformat() if intake_sch.deadline else None,
                     "eligibility_note": intake_sch.eligibility_note
-                })
+                }
+                result.setdefault(intake_sch.program_intake_id, []).append(sch_dict)
             return result
         except Exception as e:
             print(f"Error loading program scholarships: {e}")
-            return []
+            return {}
     
-    def _get_program_exam_requirements(self, program_intake_id: int) -> List[Dict[str, Any]]:
-        """Get exam requirements for a program intake"""
+    def _get_program_exam_requirements_batch(self, intake_ids: List[int]) -> Dict[int, List[Dict[str, Any]]]:
+        """Batch load exam requirements for program intakes to avoid N+1 queries."""
+        if not intake_ids:
+            return {}
         try:
             exam_reqs = self.db.query(ProgramExamRequirement).filter(
-                ProgramExamRequirement.program_intake_id == program_intake_id
+                ProgramExamRequirement.program_intake_id.in_(intake_ids)
             ).all()
-            
-            return [
-                {
+            result: Dict[int, List[Dict[str, Any]]] = {}
+            for req in exam_reqs:
+                result.setdefault(req.program_intake_id, []).append({
                     "exam_name": req.exam_name,
                     "required": req.required,
                     "subjects": req.subjects,
@@ -687,27 +711,36 @@ Output ONLY valid JSON, no other text:"""
                     "min_score": req.min_score,
                     "exam_language": req.exam_language,
                     "notes": req.notes
-                }
-                for req in exam_reqs
-            ]
+                })
+            return result
         except Exception as e:
             print(f"Error loading exam requirements: {e}")
-            return []
+            return {}
     
-    def _build_database_context(self, state: PartnerQueryState, current_date: date) -> str:
+    def _build_database_context(
+        self,
+        state: PartnerQueryState,
+        current_date: date,
+        intakes: List[Dict[str, Any]],
+        show_catalog: bool = False,
+        match_notes: Optional[List[str]] = None,
+        include_docs: bool = True,
+        include_exams: bool = True,
+        include_scholarships: bool = True,
+        include_deadlines: bool = True,
+        include_eligibility: bool = True,
+        include_cost: bool = True,
+        is_list_query: bool = False
+    ) -> str:
         """
-        Build database context based on query state.
-        Only includes universities/programs with upcoming deadlines.
+        Build database context based on query state and already-filtered intakes.
         """
-        context_parts = []
-        
-        # Get current date string
+        context_parts: List[str] = []
         current_date_str = current_date.isoformat()
         context_parts.append(f"CURRENT DATE: {current_date_str}")
-        context_parts.append("IMPORTANT: Only suggest universities/programs with application_deadline > current_date")
+        context_parts.append("IMPORTANT: Only suggest programs with application_deadline > current_date")
         
-        # Add all partner universities
-        if self.all_universities:
+        if show_catalog and self.all_universities:
             uni_list = []
             for uni in self.all_universities:
                 uni_info = f"- {uni['name']}"
@@ -729,8 +762,7 @@ Output ONLY valid JSON, no other text:"""
                 uni_list.append(uni_info)
             context_parts.append(f"\nDATABASE UNIVERSITIES (MalishaEdu Partner Universities):\n" + "\n".join(uni_list))
         
-        # Add all majors (limited to avoid token limits)
-        if self.all_majors:
+        if show_catalog and self.all_majors:
             major_list = []
             for major in self.all_majors[:200]:
                 major_info = f"- {major['name']}"
@@ -749,170 +781,202 @@ Output ONLY valid JSON, no other text:"""
             if len(self.all_majors) > 200:
                 context_parts.append(f"... and {len(self.all_majors) - 200} more majors")
         
-        # Get upcoming intakes
-        upcoming_intakes = self._get_upcoming_intakes(current_date)
+        if match_notes:
+            context_parts.extend(match_notes)
         
-        # Filter intakes based on state
-        filtered_intakes = upcoming_intakes
-        if state.degree_level:
-            filtered_intakes = [i for i in filtered_intakes if i.get('degree_level') and state.degree_level.lower() in str(i['degree_level']).lower()]
-        if state.university:
-            matched_uni, uni_dict, uni_matches = self._fuzzy_match_university(state.university)
-            if matched_uni and uni_dict:
-                filtered_intakes = [i for i in filtered_intakes if i['university_id'] == uni_dict['id']]
-            elif uni_matches and len(uni_matches) > 1:
-                # Multiple close matches - add to context for LLM to handle
-                context_parts.append(f"\nNOTE: Multiple university matches found for '{state.university}':")
-                for uni_match, score in uni_matches[:3]:
-                    context_parts.append(f"  - {uni_match['name']} (match score: {score:.2f})")
-                context_parts.append("Please ask user to clarify which university they meant.")
-        if state.major:
-            matched_major, major_dict, major_matches = self._fuzzy_match_major(state.major, degree_level=state.degree_level)
-            if matched_major and major_dict:
-                filtered_intakes = [i for i in filtered_intakes if i['major_id'] == major_dict['id']]
-            elif major_matches:
-                # Multiple close matches - use top matches
-                matched_major_ids = [m[0]['id'] for m in major_matches[:3]]
-                filtered_intakes = [i for i in filtered_intakes if i['major_id'] in matched_major_ids]
-                # Add to context for LLM to handle
-                if len(major_matches) > 1:
-                    context_parts.append(f"\nNOTE: Multiple major matches found for '{state.major}':")
-                    for major_match, score in major_matches[:3]:
-                        context_parts.append(f"  - {major_match['name']} at {major_match.get('university_name', 'N/A')} (match score: {score:.2f})")
-                    context_parts.append("Showing programs for all matches. Please ask user to clarify if needed.")
-        if state.intake_term:
-            # CRITICAL: Exact match for intake_term (March vs September are different)
-            # In China, there are only two main intakes: March and September
-            filtered_intakes = [i for i in filtered_intakes if i.get('intake_term') and str(i['intake_term']).lower() == state.intake_term.lower()]
-            print(f"DEBUG: Filtered by intake_term '{state.intake_term}': {len(filtered_intakes)} intakes remaining")
-        if state.intake_year:
-            filtered_intakes = [i for i in filtered_intakes if i.get('intake_year') == state.intake_year]
-        if state.teaching_language:
-            filtered_intakes = [i for i in filtered_intakes if i.get('teaching_language') and state.teaching_language.lower() in str(i['teaching_language']).lower()]
+        filtered_intakes = intakes if is_list_query else intakes[:20]
+        intake_ids = [i['id'] for i in filtered_intakes] if not is_list_query else []
+        docs_map = self._get_program_documents_batch(intake_ids) if (not is_list_query and intake_ids) else {}
+        scholarships_map = self._get_program_scholarships_batch(intake_ids) if (not is_list_query and intake_ids) else {}
+        exams_map = self._get_program_exam_requirements_batch(intake_ids) if (not is_list_query and intake_ids) else {}
         
-        # Limit to top 20 intakes
-        filtered_intakes = filtered_intakes[:20]
-        
-        if filtered_intakes:
+        if is_list_query and filtered_intakes:
+            # Compact summary: unique universities with counts and earliest deadline / languages
+            uni_map: Dict[int, Dict[str, Any]] = {}
+            for intake in filtered_intakes:
+                uid = intake['university_id']
+                uni_entry = uni_map.setdefault(uid, {
+                    "name": intake['university_name'],
+                    "count": 0,
+                    "earliest_deadline": None,
+                    "languages": set()
+                })
+                uni_entry["count"] += 1
+                if intake.get('application_deadline'):
+                    dt = datetime.fromisoformat(intake['application_deadline']).date()
+                    if uni_entry["earliest_deadline"] is None or dt < uni_entry["earliest_deadline"]:
+                        uni_entry["earliest_deadline"] = dt
+                if intake.get('teaching_language'):
+                    uni_entry["languages"].add(intake['teaching_language'])
+            # Sort by earliest deadline then name
+            uni_items = list(uni_map.values())
+            uni_items.sort(key=lambda x: (x["earliest_deadline"] or date.max, x["name"]))
+            top = uni_items[:10]
+            more = max(0, len(uni_items) - len(top))
+            context_parts.append("=== MATCHED UNIVERSITIES (compact) ===")
+            for uni in top:
+                lang_str = ", ".join(sorted(uni["languages"])) if uni["languages"] else "not provided"
+                deadline_str = uni["earliest_deadline"].isoformat() if uni["earliest_deadline"] else "not provided"
+                context_parts.append(f"- {uni['name']} — {uni['count']} program(s), earliest deadline {deadline_str}, languages: {lang_str}")
+            if more:
+                context_parts.append(f"+ {more} more universities not shown in list context.")
+            context_parts.append("=== END MATCHED UNIVERSITIES ===")
+        elif filtered_intakes:
             context_parts.append(f"\n=== MATCHED PROGRAM INTAKES (Upcoming Deadlines Only) ===")
             for intake in filtered_intakes:
                 intake_info = f"\nProgram: {intake['university_name']} - {intake['major_name']} ({intake.get('degree_level', 'N/A')})"
                 intake_info += f"\n  Intake: {intake.get('intake_term', 'N/A')} {intake.get('intake_year', 'N/A')}"
-                if intake.get('application_deadline'):
-                    deadline_date = datetime.fromisoformat(intake['application_deadline']).date()
-                    days_remaining = (deadline_date - current_date).days
-                    intake_info += f"\n  Application Deadline: {intake['application_deadline']} ({days_remaining} days remaining)"
-                intake_info += f"\n  Teaching Language: {intake.get('teaching_language', 'N/A')}"
+                if include_deadlines:
+                    if intake.get('application_deadline'):
+                        deadline_date = datetime.fromisoformat(intake['application_deadline']).date()
+                        days_remaining = (deadline_date - current_date).days
+                        intake_info += f"\n  Application Deadline: {intake['application_deadline']} ({days_remaining} days remaining from CURRENT DATE: {current_date.isoformat()})"
+                    # Earliest scholarship deadline if any
+                    scholarships = scholarships_map.get(intake['id'], [])
+                    if scholarships:
+                        deadlines = [sch.get('deadline') for sch in scholarships if sch.get('deadline')]
+                        if deadlines:
+                            earliest = sorted(deadlines)[0]
+                            intake_info += f"\n  Scholarship Deadline: {earliest}"
+                if include_eligibility:
+                    intake_info += f"\n  Teaching Language: {intake.get('teaching_language', 'N/A')}"
+                    if intake.get('age_min') or intake.get('age_max'):
+                        age_range = []
+                        if intake.get('age_min'):
+                            age_range.append(f"Min: {intake['age_min']}")
+                        if intake.get('age_max'):
+                            age_range.append(f"Max: {intake['age_max']}")
+                        intake_info += f"\n  Age Requirements: {', '.join(age_range)}"
+                    if intake.get('min_average_score'):
+                        intake_info += f"\n  Minimum Average Score: {intake['min_average_score']}"
+                    if intake.get('interview_required'):
+                        intake_info += f"\n  Interview Required: Yes"
+                    if intake.get('written_test_required'):
+                        intake_info += f"\n  Written Test Required: Yes"
                 
-                # Age requirements
-                if intake.get('age_min') or intake.get('age_max'):
-                    age_range = []
-                    if intake.get('age_min'):
-                        age_range.append(f"Min: {intake['age_min']}")
-                    if intake.get('age_max'):
-                        age_range.append(f"Max: {intake['age_max']}")
-                    intake_info += f"\n  Age Requirements: {', '.join(age_range)}"
-                
-                # Minimum score
-                if intake.get('min_average_score'):
-                    intake_info += f"\n  Minimum Average Score: {intake['min_average_score']}"
-                
-                # Interview/written test
-                if intake.get('interview_required'):
-                    intake_info += f"\n  Interview Required: Yes"
-                if intake.get('written_test_required'):
-                    intake_info += f"\n  Written Test Required: Yes"
-                
-                # Fees
-                if intake.get('tuition_per_year'):
-                    intake_info += f"\n  Tuition: {intake['tuition_per_year']} {intake.get('currency', 'CNY')}/year"
-                elif intake.get('tuition_per_semester'):
-                    intake_info += f"\n  Tuition: {intake['tuition_per_semester']} {intake.get('currency', 'CNY')}/semester"
-                if intake.get('application_fee'):
-                    intake_info += f"\n  Application Fee: {intake['application_fee']} {intake.get('currency', 'CNY')}"
-                if intake.get('accommodation_fee'):
-                    period = intake.get('accommodation_fee_period', 'period not specified')
+                if include_cost:
                     currency = intake.get('currency', 'CNY')
-                    fee = intake['accommodation_fee']
-                    intake_info += f"\n  Accommodation Fee: {fee} {currency} per {period}"
-                    # If monthly, also show estimated annual
-                    if period and 'month' in str(period).lower():
-                        annual_estimate = float(fee) * 12
+
+                    tuition = None
+                    if intake.get('tuition_per_year') is not None:
+                        tuition = f"{intake['tuition_per_year']} {currency}/year"
+                    elif intake.get('tuition_per_semester') is not None:
+                        tuition = f"{intake['tuition_per_semester']} {currency}/semester"
+                    if tuition:
+                        intake_info += f"\n  Tuition: {tuition}"
+                    else:
+                        intake_info += f"\n  Tuition: not provided"
+
+                    application_fee = intake.get('application_fee')
+                    if application_fee is None:
+                        application_fee = 0
+                    intake_info += f"\n  Application Fee: {application_fee} {currency}"
+
+                    accommodation_fee = intake.get('accommodation_fee')
+                    if accommodation_fee is None:
+                        accommodation_fee = 0
+                    acc_period = intake.get('accommodation_fee_period') or 'year'
+                    intake_info += f"\n  Accommodation: {accommodation_fee} {currency} per {acc_period}"
+                    if acc_period and 'month' in str(acc_period).lower():
+                        annual_estimate = float(accommodation_fee) * 12
                         intake_info += f" (estimated annual: {annual_estimate:.2f} {currency})"
-                if intake.get('medical_insurance_fee'):
-                    period = intake.get('medical_insurance_fee_period', 'period not specified')
-                    currency = intake.get('currency', 'CNY')
-                    fee = intake['medical_insurance_fee']
-                    intake_info += f"\n  Medical Insurance: {fee} {currency} per {period}"
-                    # If monthly, also show estimated annual
-                    if period and 'month' in str(period).lower():
-                        annual_estimate = float(fee) * 12
+
+                    medical_fee = intake.get('medical_insurance_fee')
+                    if medical_fee is None:
+                        medical_fee = 0
+                    med_period = intake.get('medical_insurance_fee_period') or 'year'
+                    intake_info += f"\n  Medical Insurance: {medical_fee} {currency} per {med_period}"
+                    if med_period and 'month' in str(med_period).lower():
+                        annual_estimate = float(medical_fee) * 12
                         intake_info += f" (estimated annual: {annual_estimate:.2f} {currency})"
-                if intake.get('arrival_medical_checkup_fee'):
+
+                    arrival_fee = intake.get('arrival_medical_checkup_fee')
+                    if arrival_fee is None:
+                        arrival_fee = 0
                     one_time = " (one-time)" if intake.get('arrival_medical_checkup_is_one_time', True) else ""
-                    intake_info += f"\n  Arrival Medical Checkup: {intake['arrival_medical_checkup_fee']} {intake.get('currency', 'CNY')}{one_time}"
-                if intake.get('bank_statement_amount'):
-                    intake_info += f"\n  Bank Statement Required: {intake['bank_statement_amount']} {intake.get('bank_statement_currency', 'CNY')}"
-                    if intake.get('bank_statement_note'):
-                        intake_info += f" ({intake['bank_statement_note']})"
+                    intake_info += f"\n  Arrival Medical Checkup: {arrival_fee} {currency}{one_time}"
+
+                    visa_fee = intake.get('visa_extension_fee')
+                    if visa_fee not in [None, ""]:
+                        intake_info += f"\n  Visa Extension: {visa_fee} {currency} per year"
+
+                    bank_amount = intake.get('bank_statement_amount')
+                    if bank_amount not in [None, ""]:
+                        bank_currency = intake.get('bank_statement_currency', 'CNY')
+                        intake_info += f"\n  Bank Statement Required: {bank_amount} {bank_currency}"
+                        if intake.get('bank_statement_note'):
+                            intake_info += f" ({intake['bank_statement_note']})"
                 
-                # Language requirements
-                if intake.get('hsk_required'):
-                    intake_info += f"\n  HSK Required: Level {intake.get('hsk_level', 'N/A')}, Min Score: {intake.get('hsk_min_score', 'N/A')}"
-                if intake.get('english_test_required'):
-                    intake_info += f"\n  English Test Required: {intake.get('english_test_note', 'Yes')}"
+                if include_eligibility:
+                    if intake.get('hsk_required'):
+                        lvl = intake.get('hsk_level')
+                        min_score = intake.get('hsk_min_score')
+                        hsk_line = "  HSK Required:"
+                        if lvl is not None:
+                            hsk_line += f" Level {lvl}"
+                        if min_score is not None:
+                            hsk_line += f", Min Score: {min_score}"
+                        intake_info += f"\n{hsk_line}"
+
+                    if intake.get('english_test_required'):
+                        note = intake.get('english_test_note')
+                        if note:
+                            intake_info += f"\n  English Test Required: {note}"
+                        else:
+                            intake_info += f"\n  English Test Required"
                 
-                # Scholarships
-                if intake.get('scholarship_available'):
-                    scholarships = self._get_program_scholarships(intake['id'])
+                if include_scholarships:
+                    scholarships = scholarships_map.get(intake['id'], [])
                     if scholarships:
                         intake_info += f"\n  Scholarships Available:"
                         for sch in scholarships[:3]:
-                            sch_info = f"    - {sch.get('scholarship_name', 'N/A')}"
+                            sch_lines = []
                             if sch.get('covers_tuition'):
-                                intake_info += f"\n      Covers Tuition: Yes"
-                            if sch.get('tuition_waiver_percent'):
-                                intake_info += f"\n      Tuition Waiver: {sch['tuition_waiver_percent']}%"
+                                sch_lines.append("Covers Tuition: Yes")
+                            if sch.get('tuition_waiver_percent') is not None:
+                                sch_lines.append(f"Tuition Waiver: {sch['tuition_waiver_percent']}%")
                             if sch.get('covers_accommodation'):
-                                intake_info += f"\n      Covers Accommodation: Yes"
+                                sch_lines.append("Covers Accommodation: Yes")
                             if sch.get('covers_insurance'):
-                                intake_info += f"\n      Covers Insurance: Yes"
-                            if sch.get('living_allowance_monthly'):
-                                intake_info += f"\n      Living Allowance: {sch['living_allowance_monthly']} CNY/month"
-                            elif sch.get('living_allowance_yearly'):
-                                intake_info += f"\n      Living Allowance: {sch['living_allowance_yearly']} CNY/year"
+                                sch_lines.append("Covers Insurance: Yes")
+                            if sch.get('living_allowance_monthly') is not None:
+                                sch_lines.append(f"Living Allowance: {sch['living_allowance_monthly']} CNY/month")
+                            elif sch.get('living_allowance_yearly') is not None:
+                                sch_lines.append(f"Living Allowance: {sch['living_allowance_yearly']} CNY/year")
                             if sch.get('first_year_only'):
-                                intake_info += f"\n      First Year Only: Yes"
+                                sch_lines.append("First Year Only: Yes")
                             if sch.get('renewal_required'):
-                                intake_info += f"\n      Renewal Required: Yes"
+                                sch_lines.append("Renewal Required: Yes")
                             if sch.get('deadline'):
-                                intake_info += f"\n      Scholarship Deadline: {sch['deadline']}"
+                                sch_lines.append(f"Scholarship Deadline: {sch['deadline']}")
                             if sch.get('eligibility_note'):
-                                intake_info += f"\n      Eligibility Note: {sch['eligibility_note']}"
+                                sch_lines.append(f"Eligibility Note: {sch['eligibility_note']}")
+                            if sch_lines:
+                                intake_info += "\n    - " + "; ".join(sch_lines)
                 
-                # Documents - Show ALL documents (do not truncate)
-                documents = self._get_program_documents(intake['id'])
-                if documents:
-                    intake_info += f"\n  Required Documents ({len(documents)} total):"
-                    for doc in documents:  # Show all, not truncated
-                        req_str = "Required" if doc.get('is_required') else "Optional"
-                        intake_info += f"\n    - {doc.get('name', 'N/A')} ({req_str})"
-                        if doc.get('rules'):
-                            intake_info += f": {doc['rules']}"
-                        if doc.get('applies_to'):
-                            intake_info += f" [Applies to: {doc['applies_to']}]"
+                if include_docs:
+                    documents = docs_map.get(intake['id'], [])
+                    if documents:
+                        intake_info += f"\n  Required Documents ({len(documents)} total):"
+                        for doc in documents:
+                            req_str = "Required" if doc.get('is_required') else "Optional"
+                            intake_info += f"\n    - {doc.get('name', 'N/A')} ({req_str})"
+                            if doc.get('rules'):
+                                intake_info += f": {doc['rules']}"
+                            if doc.get('applies_to'):
+                                intake_info += f" [Applies to: {doc['applies_to']}]"
                 
-                # Exam requirements
-                exam_reqs = self._get_program_exam_requirements(intake['id'])
-                if exam_reqs:
-                    intake_info += f"\n  Exam Requirements:"
-                    for req in exam_reqs[:3]:
-                        req_str = "Required" if req.get('required') else "Optional"
-                        intake_info += f"\n    - {req.get('exam_name', 'N/A')} ({req_str})"
-                        if req.get('subjects'):
-                            intake_info += f": {req['subjects']}"
-                        if req.get('min_score'):
-                            intake_info += f", Min Score: {req['min_score']}"
+                if include_exams:
+                    exam_reqs = exams_map.get(intake['id'], [])
+                    if exam_reqs:
+                        intake_info += f"\n  Exam Requirements:"
+                        for req in exam_reqs[:3]:
+                            req_str = "Required" if req.get('required') else "Optional"
+                            intake_info += f"\n    - {req.get('exam_name', 'N/A')} ({req_str})"
+                            if req.get('subjects'):
+                                intake_info += f": {req['subjects']}"
+                            if req.get('min_score'):
+                                intake_info += f", Min Score: {req['min_score']}"
                 
                 context_parts.append(intake_info)
             context_parts.append("=== END MATCHED PROGRAMS ===")
@@ -933,15 +997,213 @@ Output ONLY valid JSON, no other text:"""
         current_date = date.today()
         print(f"DEBUG: Current date: {current_date}")
         
-        # Extract query state from conversation
-        print(f"DEBUG: Extracting partner query state...")
-        state = self.extract_partner_query_state(conversation_history)
-        print(f"DEBUG: Extracted state: {state.to_dict()}")
+        t_state_start = time.perf_counter()
+        quick = self._quick_extract_query(user_message)
+        used_quick = False
+        if quick.get("confident"):
+            print(f"DEBUG: Using quick extraction path: {quick}")
+            state = PartnerQueryState(
+                degree_level=self._normalize_degree_level_value(quick.get("degree_level")),
+                major=quick.get("major_text"),
+                university=None,
+                intake_term=quick.get("intake_term"),
+                intake_year=quick.get("intake_year")
+            )
+            used_quick = True
+        else:
+            print(f"DEBUG: Extracting partner query state via LLM...")
+            state = self.extract_partner_query_state(conversation_history)
+            # If quick pass found a degree level, prefer it when LLM didn't set one
+            if not state.degree_level and quick.get("degree_level"):
+                state.degree_level = self._normalize_degree_level_value(quick.get("degree_level"))
+            # If still missing degree level, do a tiny LLM degree-level-only extraction from the current message
+            if not state.degree_level:
+                dl = self._llm_quick_extract_degree_level(user_message)
+                if dl:
+                    state.degree_level = dl
+        t_state_end = time.perf_counter()
+        print(f"DEBUG: Extracted state: {state.to_dict()} (used_quick={used_quick}) in {(t_state_end - t_state_start):.3f}s")
+
+        # If degree level is missing, ask for it before proceeding to heavy DB/LLM work.
+        if not state.degree_level:
+            return {
+                "response": (
+                    "To tailor fees and requirements, please confirm the degree level "
+                    "(Language/Non-degree, Bachelor, Master, PhD). "
+                    "I will assume English teaching language unless you prefer Chinese."
+                ),
+                "used_db": False,
+                "used_tavily": False,
+                "sources": []
+            }
         
-        # Build database context
+        # List-query detection (early)
+        user_lower = user_message.lower()
+        list_trigger = any(w in user_lower for w in ["list", "which", "show", "universit", "offering"])
+        list_universit = "universit" in user_lower
+        is_list_query = list_trigger and list_universit
+        show_catalog = is_list_query
+
+        # Try to detect university from the current user message if absent
+        if not state.university:
+            detected_uni = self._detect_university_in_text(user_message)
+            if detected_uni:
+                state.university = detected_uni.get("name")
+
+        # Fuzzy match university/major to build SQL filters early
+        match_notes: List[str] = []
+        university_id = None
+        major_ids: List[int] = []
+        
+        if state.university:
+            matched_uni, uni_dict, uni_matches = self._fuzzy_match_university(state.university)
+            if matched_uni and uni_dict:
+                university_id = uni_dict["id"]
+            elif uni_matches and len(uni_matches) > 1:
+                match_notes.append(f"\nNOTE: Multiple university matches for '{state.university}':")
+                for uni_match, score in uni_matches[:3]:
+                    match_notes.append(f"  - {uni_match['name']} (match score: {score:.2f})")
+                match_notes.append("Please ask which university they prefer.")
+        
+        if state.major and not is_list_query:
+            cleaned_major = state.major
+            if university_id:
+                uni_dict = next((u for u in self.all_universities if u["id"] == university_id), None)
+                cleaned_major = self._strip_university_from_major(state.major, uni_dict) if uni_dict else state.major
+            matched_major, major_dict, major_matches = self._fuzzy_match_major(
+                cleaned_major,
+                degree_level=state.degree_level,
+                university_id=university_id
+            )
+            if matched_major and major_dict:
+                major_ids = [major_dict["id"]]
+            elif major_matches:
+                major_ids = [m[0]["id"] for m in major_matches[:3]]
+                match_notes.append(f"\nNOTE: Multiple major matches for '{state.major}':")
+                for major_match, score in major_matches[:3]:
+                    match_notes.append(f"  - {major_match['name']} at {major_match.get('university_name', 'N/A')} (match score: {score:.2f})")
+                match_notes.append("Showing top matches. Ask the partner to pick one.")
+
+        # For list queries, gather broader major ids by topic (ignore single best-match path)
+        if is_list_query:
+            topic = state.major or quick.get("major_text") or user_message
+            major_ids = self._find_major_ids_by_topic(topic, degree_level=state.degree_level)
+            if len(major_ids) > 300:
+                major_ids = major_ids[:300]
+            print(f"DEBUG: List query major_ids matched: {len(major_ids)} topic='{topic}'")
+
+        # If still nothing to filter by (non-list), ask for missing info
+        if not is_list_query and not university_id and not major_ids:
+            return {
+                "response": (
+                    "I can share exact fees and documents once you confirm:\n"
+                    "- Degree level (Bachelor/Master/PhD/Language)\n"
+                    "- Major/subject\n"
+                    "- I will suggest partner universities based on your major and intake.\n"
+                    "Please provide these so I can narrow it down."
+                ),
+                "used_db": False,
+                "used_tavily": False,
+                "sources": []
+            }
+
+        # Intent classifier (rule-based)
+        intent = "general"
+        if any(k in user_lower for k in ["fee", "fees", "tuition", "cost", "price", "how much", "budget", "per year", "per month"]):
+            intent = "fees_only"
+        elif any(k in user_lower for k in ["documents", "required documents", "what documents"]):
+            intent = "documents_only"
+        elif any(k in user_lower for k in ["scholarship", "waiver", "type-a", "first class", "stipend"]):
+            intent = "scholarship_only"
+        elif any(k in user_lower for k in ["eligible", "requirements", "age", "ielts", "hsk", "csca"]):
+            intent = "eligibility_only"
+
+        include_total = any(k in user_lower for k in ["total", "overall", "year 1 total", "year one total"])
+        year1_total_included = False  # We no longer compute totals unless explicitly added later
+        print(f"DEBUG: Detected intent={intent}, include_total_requested={include_total}")
+
+        # Teaching language defaults
+        if not state.teaching_language and state.degree_level in ["Bachelor", "Master", "PhD"]:
+            if "chinese" in user_lower or "mandarin" in user_lower:
+                state.teaching_language = "Chinese"
+            elif "both" in user_lower:
+                state.teaching_language = None  # no filter
+            else:
+                state.teaching_language = "English"
+                match_notes.append("Defaulted to English-medium programs. Say 'include Chinese' if you want Chinese-medium too.")
+
+        # Filter intakes in SQL to reduce load
+        t_db_start = time.perf_counter()
+        norm_intake_term = self._normalize_intake_term_enum(state.intake_term)
+        filtered_intakes = self._get_upcoming_intakes(
+            current_date=current_date,
+            degree_level=state.degree_level,
+            university_id=university_id,
+            major_ids=major_ids if major_ids else None,
+            intake_term=norm_intake_term,
+            intake_year=state.intake_year,
+            teaching_language=state.teaching_language
+        )
+        t_db_end = time.perf_counter()
+        print(f"DEBUG: DB intakes load time: {(t_db_end - t_db_start):.3f}s, count={len(filtered_intakes)} (matched majors: {len(major_ids) if major_ids else 0}, intake_term_enum={norm_intake_term})")
+
+        # Hard cap to avoid sending huge lists to LLM
+        if is_list_query:
+            filtered_intakes = filtered_intakes[:300]
+        else:
+            filtered_intakes = filtered_intakes[:40]
+        if is_list_query:
+            uniq_unis = len({i['university_id'] for i in filtered_intakes})
+            print(f"DEBUG: List query unique universities: {uniq_unis}, intake_count={len(filtered_intakes)}")
+        
+        # Build database context (already filtered) with batch-loaded related data
         print(f"DEBUG: Building database context...")
-        db_context = self._build_database_context(state, current_date)
-        print(f"DEBUG: Database context length: {len(db_context)} characters")
+        t_ctx_start = time.perf_counter()
+
+        # Flags based on intent
+        include_docs = include_exams = include_scholarships = include_eligibility = include_deadlines = include_cost = True
+        if intent == "fees_only":
+            include_docs = False
+            include_exams = False
+            include_scholarships = False
+            include_eligibility = False
+            include_deadlines = True
+            include_cost = True
+        elif intent == "documents_only":
+            include_docs = True
+            include_exams = False
+            include_scholarships = False
+            include_eligibility = False
+            include_cost = False
+        elif intent == "scholarship_only":
+            include_docs = False
+            include_exams = False
+            include_scholarships = True
+            include_eligibility = False
+            include_cost = False
+        elif intent == "eligibility_only":
+            include_docs = False
+            include_exams = True
+            include_scholarships = False
+            include_eligibility = True
+            include_cost = False
+
+        db_context = self._build_database_context(
+            state=state,
+            current_date=current_date,
+            intakes=filtered_intakes,
+            show_catalog=show_catalog,
+            match_notes=match_notes,
+            include_docs=include_docs,
+            include_exams=include_exams,
+            include_scholarships=include_scholarships,
+            include_deadlines=include_deadlines,
+            include_eligibility=include_eligibility,
+            include_cost=include_cost,
+            is_list_query=is_list_query
+        )
+        t_ctx_end = time.perf_counter()
+        print(f"DEBUG: Database context length: {len(db_context)} characters (built in {(t_ctx_end - t_ctx_start):.3f}s)")
         
         # Build system prompt with state summary
         state_summary = self._state_to_summary_string(state)
@@ -949,6 +1211,9 @@ Output ONLY valid JSON, no other text:"""
 
 CURRENT CONVERSATION STATE:
 {state_summary}
+
+CURRENT INTENT: {intent}
+INCLUDE_TOTAL_REQUESTED: {include_total}
 
 DATABASE CONTEXT:
 {db_context}
@@ -964,14 +1229,18 @@ IMPORTANT INSTRUCTIONS:
 - For language programs: Focus on duration (one semester vs one year) and intake term
 - If multiple deadlines exist (scholarship vs self-paid), show both explicitly
 - Use accommodation_fee_period and medical_insurance_fee_period exactly - do NOT assume "per year"
-- If a field is missing in DATABASE CONTEXT, say "not provided in our database" - do NOT infer
+- If a field is missing in DATABASE CONTEXT, say "not provided" - do NOT infer
 - If uncertain about a match, present 2-3 options and ask user to confirm
 - Always follow the RESPONSE FORMAT structure (Best match → Deadlines → Eligibility → Cost → Scholarships → Next question)
 - Be concise and build conversation gradually
 - If list is long (>10), show top 10 and mention there are more
 - Calculate costs accurately from database
 - Provide exact document requirements from database
-- Only use Tavily for questions like "Is China student dorm friendly for Muslim?" or latest policy updates"""
+- If intent=fees_only, omit eligibility/documents/scholarship lists unless explicitly requested.
+- Do NOT include Year 1 total unless INCLUDE_TOTAL_REQUESTED=True.
+- Only use Tavily for questions like "Is China student dorm friendly for Muslim?" or latest policy updates
+- Use phrasing like "MalishaEdu offers..." instead of "I found"; avoid saying "in our database"
+- Present results with clear bullet points for readability"""
 
         # Build messages for LLM
         messages = [
@@ -1034,15 +1303,18 @@ IMPORTANT INSTRUCTIONS:
             print(f"DEBUG: System prompt length: {len(messages[0]['content'])} characters")
             print(f"DEBUG: Use Tavily: {use_tavily}")
             
+            t_llm_start = time.perf_counter()
             response = self.openai_service.chat_completion(
                 messages=messages,
                 temperature=0.7
             )
+            t_llm_end = time.perf_counter()
             
             assistant_message = response.choices[0].message.content.strip()
-            print(f"DEBUG: Generated response length: {len(assistant_message)} characters")
+            print(f"DEBUG: Generated response length: {len(assistant_message)} characters in {(t_llm_end - t_llm_start):.3f}s")
             print(f"DEBUG: Response preview: {assistant_message[:200]}...")
             
+            print(f"DEBUG: intent={intent}, include_total_requested={include_total}, year1_total_included={year1_total_included}")
             return {
                 "response": assistant_message,
                 "used_db": True,
@@ -1093,4 +1365,185 @@ IMPORTANT INSTRUCTIONS:
             return "No specific preferences mentioned yet."
         
         return "\n".join(summary_lines)
+
+    def _quick_extract_query(self, user_message: str) -> Dict[str, Any]:
+        """
+        Lightweight regex-based extraction for intake term/year and fee-focused queries.
+        Skips LLM state extraction when confident (has major text + intake term + year).
+        """
+        text = user_message.strip()
+        lower = text.lower()
+        
+        term = None
+        if re.search(r'\bmar(ch)?\b', lower):
+            term = "March"
+        elif re.search(r'\bsep(t|tember)?\b', lower):
+            term = "September"
+        
+        year_match = re.search(r'\b(20[2-9]\d)\b', lower)
+        year = int(year_match.group(1)) if year_match else None
+        
+        fee_focus = bool(re.search(r'\b(fee|fees|tuition|cost|expense|charge|budget)\b', lower))
+
+        # Degree level quick mapping
+        degree_level = None
+        degree_map = {
+            "bachelor": ["bachelor", "undergrad", "undergraduate", "b.sc", "bsc", "b.s", "bs", "b.a", "ba", "beng", "b.eng"],
+            "master": ["master", "postgrad", "post-graduate", "graduate", "msc", "m.sc", "ms", "m.s", "ma", "m.a", "mba"],
+            "Phd": ["phd", "doctorate", "doctoral", "dphil"],
+            "Language": ["language program", "language", "non-degree", "non degree"],
+            "Diploma": ["diploma", "associate", "assoc"]
+        }
+        for lvl, keywords in degree_map.items():
+            if any(re.search(rf"\b{re.escape(k)}\b", lower) for k in keywords):
+                degree_level = lvl
+                break
+        
+        cleaned = re.sub(r'\b(20[2-9]\d)\b', '', text, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b(mar(ch)?|sep(t|tember)?)\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b(fee|fees|tuition|cost|expense|charge|budget)\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        
+        confident = bool(term and year and cleaned)
+        return {
+            "intake_term": term,
+            "intake_year": year,
+            "major_text": cleaned,
+            "fee_focus": fee_focus,
+            "degree_level": degree_level,
+            "confident": confident
+        }
+
+    def _llm_quick_extract_degree_level(self, user_message: str) -> Optional[str]:
+        """
+        Use a very small LLM prompt to recover degree level from noisy input
+        (e.g., typos like 'undergradute').
+        """
+        prompt = f"""Extract ONLY the degree level from this query. Respond with one of:
+- Bachelor
+- Master
+- PhD
+- Language
+- Non-degree
+- Diploma
+- None
+
+Query: "{user_message}"
+
+Return exactly one of the above terms (case-sensitive)."""
+        try:
+            resp = self.openai_service.chat_completion(
+                messages=[{"role": "system", "content": "Return exactly one token from the allowed list."},
+                          {"role": "user", "content": prompt}],
+                temperature=0.0
+            )
+            val = resp.choices[0].message.content.strip()
+            allowed = {"Bachelor", "Master", "PhD", "Language", "Non-degree", "Diploma", "None"}
+            return val if val in allowed and val != "None" else None
+        except Exception:
+            return None
+
+    def _detect_university_in_text(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        Detect university by direct alias/name presence in text or fuzzy match.
+        """
+        lower = text.lower()
+        for uni in self.all_universities:
+            aliases = [uni.get("name"), uni.get("name_cn")] + (uni.get("aliases") or [])
+            for alias in aliases:
+                if alias and str(alias).lower() in lower:
+                    return uni
+        matched, uni_dict, _ = self._fuzzy_match_university(text)
+        if matched and uni_dict:
+            return uni_dict
+        return None
+
+    def _strip_university_from_major(self, major_text: str, university: Dict[str, Any]) -> str:
+        """Remove university aliases from major text to improve matching."""
+        if not major_text or not university:
+            return major_text
+        lower = major_text.lower()
+        aliases = [university.get("name"), university.get("name_cn")] + (university.get("aliases") or [])
+        for alias in aliases:
+            if alias:
+                alias_lower = str(alias).lower()
+                lower = lower.replace(alias_lower, "")
+        return re.sub(r'\s+', ' ', lower).strip()
+
+    def _normalize_degree_level_value(self, value: Optional[str]) -> Optional[str]:
+        """Normalize degree level text to canonical casing."""
+        if not value:
+            return None
+        mapping = {
+            "bachelor": "Bachelor",
+            "master": "Master",
+            "phd": "PhD",
+            "doctorate": "PhD",
+            "doctoral": "PhD",
+            "language": "Language",
+            "non-degree": "Non-degree",
+            "non degree": "Non-degree",
+            "diploma": "Diploma",
+            "associate": "Diploma",
+            "vocational college": "Vocational College",
+            "junior high": "Junior high",
+            "senior high": "Senior high"
+        }
+        key = value.strip().lower()
+        return mapping.get(key, value.strip().capitalize())
+
+    def _normalize_intake_term_enum(self, term: Optional[str]) -> Optional[IntakeTerm]:
+        """Normalize intake term string to IntakeTerm enum."""
+        if not term:
+            return None
+        t = term.strip().lower()
+        if t in ["march", "mar", "spring"]:
+            return IntakeTerm.MARCH
+        if t in ["september", "sep", "sept", "fall", "autumn"]:
+            return IntakeTerm.SEPTEMBER
+        return None
+
+    def _find_major_ids_by_topic(self, topic_text: str, degree_level: Optional[str] = None, limit: int = 300) -> List[int]:
+        """Find many major ids by topic/keywords for list queries."""
+        if not topic_text:
+            return []
+        topic = topic_text.lower()
+        tokens = {t for t in re.split(r'\W+', topic) if t}
+        synonyms = {
+            "computer science": ["cs", "cse", "software", "programming", "it", "information technology", "cyber", "cybersecurity", "ai", "artificial intelligence", "data", "data science"],
+            "business": ["management", "mba", "commerce", "marketing"],
+            "electrical": ["ece", "eee", "electronic"],
+        }
+        def topic_hits(name: str, keywords: List[str]) -> bool:
+            name_l = name.lower()
+            if topic in name_l or name_l in topic:
+                return True
+            if tokens and (set(name_l.split()) & tokens):
+                return True
+            for kw in keywords:
+                kw_l = str(kw).lower()
+                if kw_l and (topic in kw_l or kw_l in topic):
+                    return True
+                kw_tokens = set(re.split(r'\W+', kw_l))
+                if kw_tokens and tokens and kw_tokens & tokens:
+                    return True
+            # synonym overlap
+            for base, syns in synonyms.items():
+                if base in topic or any(s in topic for s in syns):
+                    if any(s in name_l for s in ([base] + syns)):
+                        return True
+                    if any(s in " ".join(keywords).lower() for s in ([base] + syns)):
+                        return True
+            return False
+
+        matched = []
+        for m in self.all_majors:
+            if degree_level and m.get("degree_level") and degree_level.lower() not in str(m["degree_level"]).lower():
+                continue
+            kws = m.get("keywords") or []
+            if topic_hits(m.get("name", ""), kws):
+                matched.append(m["id"])
+                if len(matched) >= limit:
+                    break
+        return matched
 
