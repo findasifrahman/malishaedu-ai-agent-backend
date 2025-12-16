@@ -52,6 +52,7 @@ class DegreeLevel(str, enum.Enum):
     BACHELOR = "Bachelor"
     MASTER = "Master"
     PHD = "Phd"
+    LANGUAGE_PROGRAM = "Language Program"
 
 class TeachingLanguage(str, enum.Enum):
     CHINESE = "Chinese"
