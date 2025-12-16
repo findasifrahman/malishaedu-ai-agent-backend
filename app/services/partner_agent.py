@@ -1263,7 +1263,24 @@ Output ONLY valid JSON, no other text:"""
                         if intake.get('bank_statement_note'):
                             intake_info += f" ({intake['bank_statement_note']})"
                 
-                if include_eligibility:
+                if include_eligibility or include_docs:
+                    # Always show structured requirement fields for docs/eligibility intents
+                    # Bank statement requirement (always show for docs/eligibility)
+                    if intent in ["documents_only", "eligibility_only"]:
+                        bank_req = intake.get('bank_statement_required')
+                        if bank_req is True:
+                            bank_amount = intake.get('bank_statement_amount')
+                            bank_currency = intake.get('bank_statement_currency', 'CNY')
+                            bank_note = intake.get('bank_statement_note', '')
+                            bank_line = f"  Bank Statement Required: {bank_amount} {bank_currency}" if bank_amount else "  Bank Statement Required: Yes"
+                            if bank_note:
+                                bank_line += f" ({bank_note})"
+                            intake_info += f"\n{bank_line}"
+                        elif bank_req is False:
+                            intake_info += f"\n  Bank Statement Required: No (not required)"
+                        else:
+                            intake_info += f"\n  Bank Statement Required: Not specified"
+                    
                     # Age requirements
                     if intake.get('age_min') or intake.get('age_max'):
                         age_range = []
@@ -1277,8 +1294,24 @@ Output ONLY valid JSON, no other text:"""
                     if intake.get('min_average_score'):
                         intake_info += f"\n  Minimum Average Score: {intake['min_average_score']}"
                     
-                    # HSK requirements
-                    if intake.get('hsk_required'):
+                    # HSK requirements (always show for docs/eligibility)
+                    if intent in ["documents_only", "eligibility_only"]:
+                        hsk_req = intake.get('hsk_required')
+                        if hsk_req is True:
+                            lvl = intake.get('hsk_level')
+                            min_score = intake.get('hsk_min_score')
+                            hsk_line = "  HSK Required: Yes"
+                            if lvl is not None:
+                                hsk_line += f" (Level {lvl})"
+                            if min_score is not None:
+                                hsk_line += f", Min Score: {min_score}"
+                            intake_info += f"\n{hsk_line}"
+                        elif hsk_req is False:
+                            intake_info += f"\n  HSK Required: No (not required)"
+                        else:
+                            intake_info += f"\n  HSK Required: Not specified"
+                    elif include_eligibility and intake.get('hsk_required'):
+                        # For other intents, only show if required
                         lvl = intake.get('hsk_level')
                         min_score = intake.get('hsk_min_score')
                         hsk_line = "  HSK Required:"
@@ -1288,8 +1321,21 @@ Output ONLY valid JSON, no other text:"""
                             hsk_line += f", Min Score: {min_score}"
                         intake_info += f"\n{hsk_line}"
 
-                    # English test requirements
-                    if intake.get('english_test_required'):
+                    # English test requirements (always show for docs/eligibility)
+                    if intent in ["documents_only", "eligibility_only"]:
+                        eng_req = intake.get('english_test_required')
+                        if eng_req is True:
+                            note = intake.get('english_test_note')
+                            if note:
+                                intake_info += f"\n  English Test Required: Yes ({note})"
+                            else:
+                                intake_info += f"\n  English Test Required: Yes"
+                        elif eng_req is False:
+                            intake_info += f"\n  English Test Required: No (not required)"
+                        else:
+                            intake_info += f"\n  English Test Required: Not specified"
+                    elif include_eligibility and intake.get('english_test_required'):
+                        # For other intents, only show if required
                         note = intake.get('english_test_note')
                         if note:
                             intake_info += f"\n  English Test Required: {note}"
@@ -1304,8 +1350,19 @@ Output ONLY valid JSON, no other text:"""
                     if intake.get('acceptance_letter_required'):
                         intake_info += f"\n  Acceptance Letter Required: Yes"
                     
-                    # Inside China applicants
-                    if intake.get('inside_china_applicants_allowed') is not None:
+                    # Inside China applicants (always show for docs/eligibility)
+                    if intent in ["documents_only", "eligibility_only"]:
+                        inside_china = intake.get('inside_china_applicants_allowed')
+                        if inside_china is True:
+                            intake_info += f"\n  Inside China Applicants: Allowed"
+                            if intake.get('inside_china_extra_requirements'):
+                                intake_info += f" (Extra requirements: {intake['inside_china_extra_requirements']})"
+                        elif inside_china is False:
+                            intake_info += f"\n  Inside China Applicants: Not Allowed"
+                        else:
+                            intake_info += f"\n  Inside China Applicants: Not specified"
+                    elif include_eligibility and intake.get('inside_china_applicants_allowed') is not None:
+                        # For other intents, only show if specified
                         if intake.get('inside_china_applicants_allowed'):
                             intake_info += f"\n  Inside China Applicants: Allowed"
                             if intake.get('inside_china_extra_requirements'):
@@ -1314,9 +1371,20 @@ Output ONLY valid JSON, no other text:"""
                             intake_info += f"\n  Inside China Applicants: Not Allowed"
                 
                 if include_scholarships:
-                    scholarships = scholarships_map.get(intake['id'], [])
-                    if scholarships:
-                        intake_info += f"\n  Scholarships Available:"
+                    # Check scholarship_available flag first
+                    scholarship_available = intake.get('scholarship_available')
+                    if scholarship_available is False:
+                        intake_info += f"\n  Scholarship Available: No (scholarship is not available for this intake per database)"
+                    else:
+                        scholarships = scholarships_map.get(intake['id'], [])
+                        if not scholarships and intent == "scholarship_only":
+                            # For scholarship_only intent, even if no structured scholarships, check scholarship_info
+                            if intake.get('scholarship_info'):
+                                intake_info += f"\n  Scholarship Info: {intake['scholarship_info']}"
+                            else:
+                                intake_info += f"\n  Scholarships: No structured scholarship records in database for this intake"
+                        elif scholarships:
+                            intake_info += f"\n  Scholarships Available:"
                         for sch in scholarships[:3]:
                             sch_lines = []
                             if sch.get('covers_tuition'):
@@ -1366,7 +1434,7 @@ Output ONLY valid JSON, no other text:"""
                                             competitiveness_notes.append("Competitive (World ranking < 1000)")
                                     
                                     # Check if any scholarship offers 100% waiver
-                                    has_100_percent = any(sch.get('tuition_waiver_percent') == 100 for sch in scholarships)
+                                    has_100_percent = any(sch.get('tuition_waiver_percent') == 100 for sch in scholarships) if scholarships else False
                                     if has_100_percent and competitiveness_notes:
                                         competitiveness_notes.append("100% waiver is highly competitive; usually requires excellent GPA + strong profile")
                                     
@@ -1377,46 +1445,66 @@ Output ONLY valid JSON, no other text:"""
                                     
                                     if competitiveness_notes:
                                         intake_info += f"\n  Competitiveness Note: {', '.join(competitiveness_notes)}"
-                                    
-                                    # Check scholarship_info and notes for scholarship-specific forms
-                                    scholarship_forms = []
-                                    if intake.get('scholarship_info'):
-                                        scholarship_info_lower = intake.get('scholarship_info', '').lower()
-                                        # Look for form names
-                                        form_keywords = ["form", "application form", "scholarship form", "talents", "outstanding"]
-                                        if any(kw in scholarship_info_lower for kw in form_keywords):
-                                            # Extract form name from scholarship_info
-                                            scholarship_forms.append(intake.get('scholarship_info'))
-                                    
-                                    if intake.get('notes'):
-                                        notes_lower = intake.get('notes', '').lower()
-                                        if any(kw in notes_lower for kw in ["scholarship form", "application form", "talents", "outstanding"]):
-                                            # Check if notes mention a specific form
-                                            if "form" in notes_lower:
-                                                scholarship_forms.append(intake.get('notes'))
-                                    
-                                    # Also check documents for scholarship-specific forms
-                                    for doc in documents:
-                                        doc_name_lower = doc.get('name', '').lower()
-                                        if any(kw in doc_name_lower for kw in ["scholarship", "talents", "outstanding", "form"]):
-                                            if doc not in scholarship_forms:
-                                                scholarship_forms.append(doc.get('name'))
-                                    
-                                    if scholarship_forms:
-                                        intake_info += f"\n  Scholarship-Specific Documents Required:"
-                                        for form in scholarship_forms[:5]:  # Limit to 5
-                                            if isinstance(form, str):
-                                                intake_info += f"\n    - {form}"
-                                            elif isinstance(form, dict):
-                                                intake_info += f"\n    - {form.get('name', 'N/A')}"
-                                                if form.get('rules'):
-                                                    intake_info += f": {form['rules']}"
+                    
+                    # For scholarship_only intent, always check scholarship_info and notes for forms (even if no structured scholarships)
+                    if intent == "scholarship_only":
+                        scholarship_forms = []
+                        # Check scholarship_info for forms
+                        if intake.get('scholarship_info'):
+                            scholarship_info_lower = intake.get('scholarship_info', '').lower()
+                            form_keywords = ["form", "application form", "scholarship form", "talents", "outstanding"]
+                            if any(kw in scholarship_info_lower for kw in form_keywords):
+                                # Extract the form name - try to find a specific form name
+                                scholarship_forms.append(intake.get('scholarship_info'))
+                        
+                        # Check notes for forms
+                        if intake.get('notes'):
+                            notes_lower = intake.get('notes', '').lower()
+                            if any(kw in notes_lower for kw in ["scholarship form", "application form", "talents", "outstanding", "form"]):
+                                # Extract form name from notes if it mentions a specific form
+                                scholarship_forms.append(intake.get('notes'))
+                        
+                        # Check documents for scholarship-specific forms
+                        documents_for_sch = docs_map.get(intake['id'], [])
+                        for doc in documents_for_sch:
+                            doc_name_lower = doc.get('name', '').lower()
+                            if any(kw in doc_name_lower for kw in ["scholarship", "talents", "outstanding", "form"]):
+                                if doc.get('name') not in [f if isinstance(f, str) else f.get('name', '') for f in scholarship_forms]:
+                                    scholarship_forms.append(doc.get('name'))
+                        
+                        if scholarship_forms:
+                            intake_info += f"\n  Scholarship-Specific Documents Required:"
+                            for form in scholarship_forms[:5]:  # Limit to 5
+                                if isinstance(form, str):
+                                    # Try to extract just the form name if it's a long text
+                                    if len(form) > 100:
+                                        # Look for form name patterns
+                                        import re
+                                        form_match = re.search(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Form|Application))', form)
+                                        if form_match:
+                                            intake_info += f"\n    - {form_match.group(1)}"
+                                        else:
+                                            intake_info += f"\n    - {form[:80]}..."
+                                    else:
+                                        intake_info += f"\n    - {form}"
+                                elif isinstance(form, dict):
+                                    intake_info += f"\n    - {form.get('name', 'N/A')}"
+                                    if form.get('rules'):
+                                        intake_info += f": {form['rules']}"
                 
                 # Include ProgramIntake notes and scholarship_info
-                if intake.get('notes'):
-                    intake_info += f"\n  Important Notes: {intake['notes']}"
-                if intake.get('scholarship_info'):
-                    intake_info += f"\n  Scholarship Info: {intake['scholarship_info']}"
+                # For scholarship_only intent, always read and mention notes and scholarship_info
+                if intent == "scholarship_only":
+                    if intake.get('notes'):
+                        intake_info += f"\n  Important Notes: {intake['notes']}"
+                    if intake.get('scholarship_info'):
+                        intake_info += f"\n  Scholarship Info: {intake['scholarship_info']}"
+                else:
+                    # For other intents, include notes if present
+                    if intake.get('notes'):
+                        intake_info += f"\n  Important Notes: {intake['notes']}"
+                    if intake.get('scholarship_info'):
+                        intake_info += f"\n  Scholarship Info: {intake['scholarship_info']}"
                 
                 if include_docs:
                     # Merge documents_required (free text) with structured ProgramDocument requirements
@@ -1463,11 +1551,12 @@ Output ONLY valid JSON, no other text:"""
                             documents = filtered_docs
                         
                         # Add structured document requirements (bank statement, HSK, English test, etc.)
-                        # Bank Statement
-                        if intake.get('bank_statement_required'):
-                            bank_doc_name = "Bank Statement"
-                            # Check if already in documents list
-                            if not any('bank' in doc.get('name', '').lower() and 'statement' in doc.get('name', '').lower() for doc in documents):
+                        # Bank Statement - always show with True/False/NULL handling
+                        bank_req = intake.get('bank_statement_required')
+                        bank_statement_already_in_docs = any('bank' in doc.get('name', '').lower() and 'statement' in doc.get('name', '').lower() for doc in documents)
+                        
+                        if not bank_statement_already_in_docs:
+                            if bank_req is True:
                                 bank_amount = intake.get('bank_statement_amount')
                                 bank_currency = intake.get('bank_statement_currency', 'CNY')
                                 bank_note = intake.get('bank_statement_note', '')
@@ -1475,11 +1564,28 @@ Output ONLY valid JSON, no other text:"""
                                 if bank_note:
                                     bank_rules += f" ({bank_note})" if bank_rules else bank_note
                                 documents.append({
-                                    'name': bank_doc_name,
+                                    'name': 'Bank Statement',
                                     'is_required': True,
                                     'rules': bank_rules if bank_rules else None,
                                     'applies_to': None
                                 })
+                            elif bank_req is False:
+                                # Explicitly say not required
+                                documents.append({
+                                    'name': 'Bank Statement',
+                                    'is_required': False,
+                                    'rules': 'Not required',
+                                    'applies_to': None
+                                })
+                            else:
+                                # NULL - not specified (only show for doc/eligibility intents)
+                                if intent in ["documents_only", "eligibility_only"]:
+                                    documents.append({
+                                        'name': 'Bank Statement',
+                                        'is_required': None,
+                                        'rules': 'Not specified',
+                                        'applies_to': None
+                                    })
                         
                         # HSK Certificate (if required and not already in documents)
                         if intake.get('hsk_required') and not any('hsk' in doc.get('name', '').lower() for doc in documents):
@@ -1530,9 +1636,22 @@ Output ONLY valid JSON, no other text:"""
                             doc_label = "Scholarship-Related Documents" if intent == "scholarship_only" else "Required Documents"
                             intake_info += f"\n  {doc_label} ({len(documents)} total):"
                             for doc in documents:
-                                req_str = "Required" if doc.get('is_required') else "Optional"
-                                intake_info += f"\n    - {doc.get('name', 'N/A')} ({req_str})"
-                                if doc.get('rules'):
+                                doc_name = doc.get('name', 'N/A')
+                                is_required = doc.get('is_required')
+                                
+                                # Special handling for bank statement with True/False/NULL
+                                if doc_name.lower() == 'bank statement':
+                                    if is_required is True:
+                                        req_str = "Required"
+                                    elif is_required is False:
+                                        req_str = "Not required"
+                                    else:
+                                        req_str = "Not specified"
+                                else:
+                                    req_str = "Required" if is_required else "Optional"
+                                
+                                intake_info += f"\n    - {doc_name} ({req_str})"
+                                if doc.get('rules') and doc.get('rules') not in ['Not required', 'Not specified']:
                                     intake_info += f": {doc['rules']}"
                                 if doc.get('applies_to'):
                                     intake_info += f" [Applies to: {doc['applies_to']}]"
@@ -1636,17 +1755,18 @@ Output ONLY valid JSON, no other text:"""
 
         # Intent classifier (rule-based) - detect early for follow-up resolution
         # Use normalized text for intent detection
+        # IMPORTANT: documents_only must be checked BEFORE eligibility_only
         intent = "general"
         if any(k in user_message_normalized for k in ["fee", "fees", "tuition", "cost", "price", "how much", "budget", "per year", "per month"]):
             intent = "fees_only"
-        elif any(k in user_message_normalized for k in ["documents", "required documents", "what documents"]):
+        elif any(k in user_message_normalized for k in ["document", "documents", "required documents", "doc list", "paper", "papers", "materials", "what doc", "what documents"]):
             intent = "documents_only"
         elif any(k in user_message_normalized for k in ["scholarship", "waiver", "type-a", "first class", "stipend", "how to get", "how can i get"]):
             intent = "scholarship_only"
         elif any(k in user_message_normalized for k in ["eligible", "requirements", "age", "ielts", "hsk", "csca"]):
             intent = "eligibility_only"
-        # fees_compare for cheapest/lowest cost queries
-        if any(k in user_message_normalized for k in ["cheapest", "lowest", "less fee", "low fee", "lowest cost", "less cost"]):
+        # fees_compare for cheapest/lowest cost queries (must include "lowest fees", "lowest tuition")
+        if any(k in user_message_normalized for k in ["cheapest", "lowest", "lowest fees", "lowest tuition", "less fee", "low fee", "lowest cost", "less cost"]):
             intent = "fees_compare"
         print(f"DEBUG: Early intent detection: {intent}")
 
@@ -1743,9 +1863,10 @@ Output ONLY valid JSON, no other text:"""
             print(f"DEBUG: Detected list query (patterns matched) - setting major_query to None")
 
         # Detect language intent early and auto-fill degree/major_query (only if not list query)
+        # For fees_compare, do NOT set major_query - we want to query all Language intakes
         language_kw = ["language program", "language", "non-degree", "non degree", "chinese language", "english language", "mandarin course"]
         is_language_intent = any(kw in user_message.lower() for kw in language_kw)
-        if is_language_intent and not is_list_query:
+        if is_language_intent and not is_list_query and intent != "fees_compare":
             state.degree_level = state.degree_level or "Language"
             if "chinese language" in user_message.lower():
                 state.major_query = state.major_query or "chinese language (one year)"
@@ -1753,6 +1874,10 @@ Output ONLY valid JSON, no other text:"""
                 state.major_query = state.major_query or "english language program"
             else:
                 state.major_query = state.major_query or "language program"
+        elif is_language_intent and intent == "fees_compare":
+            # For fees_compare, only set degree_level, NOT major_query
+            state.degree_level = state.degree_level or "Language"
+            state.major_query = None  # Don't filter by major name - query all Language intakes
 
         # If degree level is missing and not language intent, ask for it before proceeding
         if not state.degree_level and not is_language_intent:
@@ -1808,6 +1933,168 @@ Output ONLY valid JSON, no other text:"""
                 for uni_match, score in uni_matches[:3]:
                     match_notes.append(f"  - {uni_match['name']} (match score: {score:.2f})")
                 match_notes.append("Please ask which university they prefer.")
+        
+        # Normalize intake term early (needed for special handling blocks)
+        norm_intake_term = self._normalize_intake_term_enum(state.intake_term)
+        
+        # Special handling for doc/eligibility questions with language programs
+        # If user specifies university + intake_term + degree_level Language but didn't specify a specific major,
+        # fetch ALL Language programs for that university instead of fuzzy-matching "language program"
+        if (intent in ["documents_only", "eligibility_only"] and 
+            university_id and 
+            state.intake_term and 
+            state.degree_level and 
+            "Language" in str(state.degree_level) and
+            (not state.major_query or state.major_query in ["language program", "language", "chinese language", "english language"])):
+            print(f"DEBUG: Doc/eligibility query for Language program - fetching ALL Language intakes for university_id={university_id}")
+            # For doc/eligibility with Language programs, ignore state.teaching_language unless user explicitly requested it
+            # Check if user explicitly mentioned a language
+            explicit_language_keywords = ["english", "chinese", "mandarin", "english-taught", "chinese-taught", "中文", "汉语"]
+            user_explicitly_requested_language = any(kw in user_message_normalized for kw in explicit_language_keywords)
+            
+            teaching_language_filter = state.teaching_language if user_explicitly_requested_language else None
+            print(f"DEBUG: user_explicitly_requested_language={user_explicitly_requested_language}, teaching_language_filter={teaching_language_filter}")
+            
+            # Query all Language intakes for this university + intake_term
+            all_language_intakes = self._get_upcoming_intakes(
+                current_date=current_date,
+                degree_level=state.degree_level,
+                university_id=university_id,
+                major_ids=None,  # Don't filter by major - get all Language programs
+                intake_term=norm_intake_term,
+                intake_year=state.intake_year,
+                teaching_language=teaching_language_filter  # Only filter if user explicitly requested it
+            )
+            
+            if len(all_language_intakes) > 1:
+                # Multiple Language programs found - check for distinct teaching languages
+                print(f"DEBUG: Found {len(all_language_intakes)} Language programs - checking for distinct teaching languages")
+                
+                # Get distinct teaching languages
+                distinct_languages = set()
+                for intake in all_language_intakes:
+                    eff_lang = intake.get('effective_teaching_language') or intake.get('teaching_language')
+                    if eff_lang:
+                        distinct_languages.add(eff_lang)
+                
+                print(f"DEBUG: Distinct teaching languages found: {distinct_languages}")
+                
+                uni_name = next((u["name"] for u in self.all_universities if u["id"] == university_id), "this university")
+                intake_term_str = norm_intake_term.value.title() if norm_intake_term else state.intake_term
+                intake_year_str = f" {state.intake_year}" if state.intake_year else ""
+                
+                response_parts = [
+                    f"I found {len(all_language_intakes)} {intake_term_str}{intake_year_str} language program(s) at {uni_name}:"
+                ]
+                
+                for idx, intake in enumerate(all_language_intakes[:10], 1):  # Limit to 10 for readability
+                    eff_lang = intake.get('effective_teaching_language') or intake.get('teaching_language') or 'N/A'
+                    deadline_str = intake.get('application_deadline', 'N/A')
+                    response_parts.append(
+                        f"\n{idx}) {intake.get('major_name', 'N/A')} — Teaching language: {eff_lang} — deadline: {deadline_str}"
+                    )
+                
+                if len(all_language_intakes) > 10:
+                    response_parts.append(f"\n... and {len(all_language_intakes) - 10} more program(s)")
+                
+                # If user asked "documents required" and there are <=2 items, show both document lists
+                # Also show if there are multiple distinct teaching languages (e.g., English + Chinese)
+                should_show_both_docs = (intent == "documents_only" and len(all_language_intakes) <= 2) or (len(distinct_languages) > 1 and len(all_language_intakes) <= 2)
+                
+                if should_show_both_docs:
+                    # Load documents for these intakes
+                    intake_ids_for_docs = [i['id'] for i in all_language_intakes]
+                    docs_map_temp = self._get_program_documents_batch(intake_ids_for_docs)
+                    
+                    response_parts.append("\n\nDocument requirements for each program:")
+                    for intake in all_language_intakes:
+                        response_parts.append(f"\n--- {intake.get('major_name', 'N/A')} ({intake.get('effective_teaching_language', 'N/A')}-taught) ---")
+                        # Get documents for this intake
+                        intake_docs = docs_map_temp.get(intake['id'], [])
+                        # Also merge with documents_required text and structured fields
+                        if intake.get('documents_required'):
+                            doc_names_from_text = [d.strip() for d in intake.get('documents_required', '').split(',') if d.strip()]
+                            existing_doc_names = {doc.get('name', '').lower() for doc in intake_docs}
+                            for doc_name in doc_names_from_text:
+                                if doc_name.lower() not in existing_doc_names:
+                                    intake_docs.append({
+                                        'name': doc_name.title(),
+                                        'is_required': True,
+                                        'rules': None,
+                                        'applies_to': None
+                                    })
+                        
+                        # Add structured fields - always show bank statement requirement
+                        bank_req = intake.get('bank_statement_required')
+                        bank_statement_already_in_docs = any('bank' in d.get('name', '').lower() and 'statement' in d.get('name', '').lower() for d in intake_docs)
+                        
+                        if not bank_statement_already_in_docs:
+                            if bank_req is True:
+                                bank_amount = intake.get('bank_statement_amount')
+                                bank_currency = intake.get('bank_statement_currency', 'CNY')
+                                bank_note = intake.get('bank_statement_note', '')
+                                bank_rules = f"{bank_amount} {bank_currency}" if bank_amount else ""
+                                if bank_note:
+                                    bank_rules += f" ({bank_note})" if bank_rules else bank_note
+                                intake_docs.append({
+                                    'name': 'Bank Statement',
+                                    'is_required': True,
+                                    'rules': bank_rules if bank_rules else None,
+                                    'applies_to': None
+                                })
+                            elif bank_req is False:
+                                # Explicitly say not required
+                                intake_docs.append({
+                                    'name': 'Bank Statement',
+                                    'is_required': False,
+                                    'rules': 'Not required',
+                                    'applies_to': None
+                                })
+                            else:
+                                # NULL - not specified
+                                intake_docs.append({
+                                    'name': 'Bank Statement',
+                                    'is_required': None,
+                                    'rules': 'Not specified',
+                                    'applies_to': None
+                                })
+                        
+                        if intake_docs:
+                            for doc in intake_docs:
+                                doc_name = doc.get('name', 'N/A')
+                                is_required = doc.get('is_required')
+                                
+                                # Special handling for bank statement with True/False/NULL
+                                if doc_name.lower() == 'bank statement':
+                                    if is_required is True:
+                                        req_str = "Required"
+                                    elif is_required is False:
+                                        req_str = "Not required"
+                                    else:
+                                        req_str = "Not specified"
+                                else:
+                                    req_str = "Required" if is_required else "Optional"
+                                
+                                doc_line = f"  - {doc_name} ({req_str})"
+                                if doc.get('rules') and doc.get('rules') not in ['Not required', 'Not specified']:
+                                    doc_line += f": {doc['rules']}"
+                                response_parts.append(doc_line)
+                        else:
+                            response_parts.append("  (No documents specified in database)")
+                else:
+                    response_parts.append("\nWhich one do you want documents/requirements for?")
+                
+                return {
+                    "response": "\n".join(response_parts),
+                    "used_db": True,
+                    "used_tavily": False,
+                    "sources": []
+                }
+            elif len(all_language_intakes) == 1:
+                # Single Language program - use it
+                major_ids = [all_language_intakes[0]["major_id"]]
+                print(f"DEBUG: Single Language program found - using major_id={major_ids[0]}")
+                state.major_query = None  # Clear major_query to avoid fuzzy matching
         
         # Step 2: Match major_query if specified (deterministic matching after state extraction)
         if state.major_query and not is_list_query:
@@ -2048,10 +2335,44 @@ Output ONLY valid JSON, no other text:"""
         print(f"DEBUG: Detected intent={intent}, include_total_requested={include_total}")
 
         # Teaching language: only set if user explicitly stated preference
-        # Do NOT default to "English" - keep it None to avoid filtering out valid programs
-        if not state.teaching_language:
-            if "chinese" in user_message_normalized or "mandarin" in user_message_normalized:
-                state.teaching_language = "Chinese"
+        # Do NOT infer Chinese just because user wrote "language program"
+        # Explicit language keywords: english, chinese, mandarin, 中文, 汉语, english-taught, chinese-taught
+        explicit_language_keywords = {
+            "english": "English",
+            "english-taught": "English",
+            "english taught": "English",
+            "chinese": "Chinese",
+            "chinese-taught": "Chinese",
+            "chinese taught": "Chinese",
+            "mandarin": "Chinese",
+            "中文": "Chinese",
+            "汉语": "Chinese"
+        }
+        
+        # Check if user explicitly mentioned a teaching language
+        user_has_explicit_language = False
+        detected_language = None
+        for keyword, lang in explicit_language_keywords.items():
+            if keyword in user_message_normalized:
+                detected_language = lang
+                user_has_explicit_language = True
+                print(f"DEBUG: Explicit language keyword detected: '{keyword}' → {lang}")
+                break
+        
+        # Post-processing: clear teaching_language if it was inferred incorrectly
+        # For doc/eligibility with Language programs, only keep teaching_language if explicitly mentioned
+        if intent in ["documents_only", "eligibility_only"] and state.degree_level and "Language" in str(state.degree_level):
+            if user_has_explicit_language:
+                state.teaching_language = detected_language
+                print(f"DEBUG: Keeping explicit teaching_language={detected_language} for Language program doc/eligibility query")
+            else:
+                # Clear teaching_language - user didn't explicitly request a language
+                state.teaching_language = None
+                print(f"DEBUG: Clearing teaching_language for Language program doc/eligibility query (not explicitly mentioned)")
+        elif not state.teaching_language:
+            # For other intents, set if explicitly mentioned
+            if user_has_explicit_language:
+                state.teaching_language = detected_language
             elif "both" in user_message_normalized:
                 state.teaching_language = None  # no filter - show both
             # If user didn't specify, keep teaching_language = None (no filter)
@@ -2060,7 +2381,7 @@ Output ONLY valid JSON, no other text:"""
         # Only enforce "upcoming deadline" rule when user asks about applying, fees, scholarships, or deadlines
         requires_upcoming_deadline = any(k in user_message_normalized for k in ["apply", "application", "fee", "fees", "tuition", "cost", "price", "scholarship", "deadline", "deadline"])
         
-        norm_intake_term = self._normalize_intake_term_enum(state.intake_term)
+        # norm_intake_term already computed earlier (before special handling blocks)
         
         # For list queries, check majors first
         if is_list_query:
@@ -2132,6 +2453,12 @@ Output ONLY valid JSON, no other text:"""
         # Filter intakes in SQL to reduce load (for non-list queries or list queries that need upcoming deadlines)
         t_db_start = time.perf_counter()
         
+        # For fees_compare with language programs, do NOT filter by major_ids - query all Language intakes
+        # Then filter by "one year" vs "one semester" AFTER retrieving intakes if user specified
+        if intent == "fees_compare" and is_language_intent and state.degree_level and "Language" in str(state.degree_level):
+            print(f"DEBUG: fees_compare for Language program - clearing major_ids to query all Language intakes")
+            major_ids = None  # Don't filter by major name - query all Language intakes
+        
         # Show matched major details before querying
         if major_ids:
             matched_major_details = []
@@ -2151,6 +2478,15 @@ Output ONLY valid JSON, no other text:"""
             intake_year=state.intake_year,
             teaching_language=state.teaching_language
         )
+        
+        # For fees_compare, if user asked "one year" vs "one semester", filter by major name AFTER retrieving intakes
+        if intent == "fees_compare" and filtered_intakes:
+            if "one year" in user_message_normalized or "1 year" in user_message_normalized:
+                print(f"DEBUG: Filtering fees_compare results to 'One Year' programs")
+                filtered_intakes = [i for i in filtered_intakes if "one year" in i.get('major_name', '').lower() or "1 year" in i.get('major_name', '').lower()]
+            elif "one semester" in user_message_normalized or "1 semester" in user_message_normalized or "six month" in user_message_normalized or "6 month" in user_message_normalized:
+                print(f"DEBUG: Filtering fees_compare results to 'One Semester' / 'Six Month' programs")
+                filtered_intakes = [i for i in filtered_intakes if any(term in i.get('major_name', '').lower() for term in ["one semester", "1 semester", "six month", "6 month"])]
         t_db_end = time.perf_counter()
         print(f"DEBUG: Intent chosen: {intent}")
         print(f"DEBUG: Programs matched before filters: {len(major_ids) if major_ids else 'all'} major(s)")
