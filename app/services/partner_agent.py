@@ -66,13 +66,14 @@ class PartnerQueryState:
 @dataclass
 class PaginationState:
     """State for list query pagination"""
-    results: List[Dict[str, Any]]
+    results: List[int]  # Store IDs only (program_intake IDs OR university IDs OR major IDs)
+    result_type: str  # "intake_ids", "university_ids", or "major_ids"
     offset: int
     total: int
     page_size: int
     intent: str
     timestamp: float
-    last_displayed: Optional[List[Dict[str, Any]]] = None  # Last displayed intakes for follow-up questions
+    last_displayed: Optional[List[Dict[str, Any]]] = None  # Last displayed intakes for follow-up questions (full objects for duration questions)
 
 
 class PartnerAgent:
@@ -352,13 +353,216 @@ Style Guidelines:
             traceback.print_exc()
             return []
     
+    def parse_query_rules(self, text: str) -> Dict[str, Any]:
+        """
+        Rule-based parsing of user query without LLM.
+        Returns dict with: intent, university_raw, major_raw, degree_level, teaching_language,
+        intake_term, intake_year, duration_text, wants_scholarship, wants_documents, wants_fees,
+        wants_deadline, wants_list, page_action.
+        """
+        if not text:
+            return {}
+        
+        normalized = self._normalize_unicode_text(text)
+        lower = normalized.lower()  # Ensure lowercase for regex matching
+        
+        result = {
+            "intent": "general",
+            "university_raw": None,
+            "major_raw": None,
+            "degree_level": None,
+            "teaching_language": None,
+            "intake_term": None,
+            "intake_year": None,
+            "duration_text": None,
+            "wants_scholarship": False,
+            "wants_documents": False,
+            "wants_fees": False,
+            "wants_deadline": False,
+            "wants_list": False,
+            "page_action": "none"
+        }
+        
+        # Page actions (pagination)
+        if re.search(r'\b(next|more|show more|next page|page \d+|continue)\b', lower):
+            result["page_action"] = "next"
+        elif re.search(r'\b(prev|previous|back|page 1|first page)\b', lower):
+            result["page_action"] = "prev"
+        
+        # Intake term detection
+        if re.search(r'\b(mar(ch)?|spring)\b', lower):
+            result["intake_term"] = "March"
+        elif re.search(r'\b(sep(t|tember)?|fall|autumn)\b', lower):
+            result["intake_term"] = "September"
+        
+        # Intake year detection
+        year_match = re.search(r'\b(20[2-9]\d)\b', lower)
+        if year_match:
+            result["intake_year"] = int(year_match.group(1))
+        
+        # Degree level detection
+        if re.search(r'\b(bachelor|undergrad|undergraduate|b\.?sc|bsc|b\.?s|bs|b\.?a|ba|beng|b\.?eng)\b', lower):
+            result["degree_level"] = "Bachelor"
+        elif re.search(r'\b(master|masters|postgrad|post-graduate|graduate|msc|m\.?sc|ms|m\.?s|ma|m\.?a|mba)\b', lower):
+            result["degree_level"] = "Master"
+        elif re.search(r'\b(phd|ph\.?d|doctorate|doctoral|dphil)\b', lower):
+            result["degree_level"] = "PhD"
+        elif re.search(r'\b(language\s+program|language\s+course|non-?degree|foundation|foundation\s+program)\b', lower):
+            result["degree_level"] = "Language"
+        elif re.search(r'\b(diploma|associate|assoc)\b', lower):
+            result["degree_level"] = "Diploma"
+        
+        # Teaching language detection
+        if re.search(r'\b(english|english-?taught|english\s+program)\b', lower):
+            result["teaching_language"] = "English"
+        elif re.search(r'\b(chinese|chinese-?taught|chinese\s+program|mandarin)\b', lower):
+            result["teaching_language"] = "Chinese"
+        
+        # Duration detection
+        if re.search(r'\b(1\s+semester|one\s+semester|half\s+year|6\s+month|six\s+month|0\.5|0\s*\.\s*5)\b', lower):
+            result["duration_text"] = "one_semester"
+        elif re.search(r'\b(2\s+semester|two\s+semester)\b', lower):
+            result["duration_text"] = "two_semester"
+        elif re.search(r'\b(1\s+year|one\s+year)\b', lower):
+            result["duration_text"] = "one_year"
+        elif re.search(r'\b(2\s+years?|two\s+years?)\b', lower):
+            result["duration_text"] = "two_year"
+        elif re.search(r'\b(3\s+years?|three\s+years?)\b', lower):
+            result["duration_text"] = "three_year"
+        elif re.search(r'\b(4\s+years?|four\s+years?)\b', lower):
+            result["duration_text"] = "four_year"
+        
+        # Intent detection
+        if re.search(r'\b(scholarship|waiver|type-?a|type-?b|type-?c|type-?d|partial|stipend|how\s+to\s+get|how\s+can\s+i\s+get)\b', lower):
+            result["wants_scholarship"] = True
+            result["intent"] = "scholarship_only"
+        if re.search(r'\b(document|documents|required\s+documents?|doc\s+list|paper|papers|materials|what\s+doc|what\s+documents?)\b', lower):
+            result["wants_documents"] = True
+            result["intent"] = "documents_only"
+        if re.search(r'\b(fee|fees|tuition|cost|price|how\s+much|budget|per\s+year|per\s+month|application\s+fee)\b', lower):
+            result["wants_fees"] = True
+            if result["intent"] == "general":
+                result["intent"] = "fees_only"
+        if re.search(r'\b(deadline|when|application\s+deadline|last\s+date|due\s+date)\b', lower):
+            result["wants_deadline"] = True
+        if re.search(r'\b(cheapest|lowest|lowest\s+fees?|lowest\s+tuition|less\s+fee|low\s+fee|lowest\s+cost|less\s+cost|compare|comparison)\b', lower):
+            result["intent"] = "fees_compare"
+        if re.search(r'\b(list|show|all|available|what\s+programs?|which\s+programs?|programs?\s+available|majors?\s+available)\b', lower):
+            result["wants_list"] = True
+            result["intent"] = "list_programs"
+        
+        # University detection (try to find university names in text)
+        # This is a simple extraction - fuzzy matching happens later
+        # Look for common patterns like "at X University", "X University", "in X"
+        uni_patterns = [
+            r'\b(at|in|from)\s+([A-Z][a-zA-Z\s&]+(?:University|College|Institute|Medical|Normal))',
+            r'\b([A-Z][a-zA-Z\s&]+(?:University|College|Institute|Medical|Normal))\b'
+        ]
+        for pattern in uni_patterns:
+            match = re.search(pattern, text)  # Use original text (not normalized) to preserve capitalization
+            if match:
+                uni_candidate = match.group(2) if len(match.groups()) > 1 else match.group(1)
+                if uni_candidate and len(uni_candidate.strip()) > 3:
+                    result["university_raw"] = uni_candidate.strip()
+                    break
+        
+        # Major extraction (remove common words and extract subject)
+        # Remove intake terms, years, fees, etc. to get major
+        cleaned = re.sub(r'\b(20[2-9]\d)\b', '', normalized, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b(mar(ch)?|sep(t|tember)?|spring|fall|autumn)\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b(fee|fees|tuition|cost|price|application\s+fee|deadline|scholarship|document|documents?)\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b(list|show|all|available|what|which|programs?|majors?|courses?)\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b(bachelor|master|phd|language|diploma|degree|program|course)\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b(english|chinese|taught|in|at|for|the|a|an|and|or|of|to)\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        
+        # If cleaned text has meaningful content (2+ words or known major keywords), treat as major
+        if cleaned and len(cleaned.split()) >= 1:
+            # Check if it's not just a city/province
+            city_province_keywords = ["guangzhou", "beijing", "shanghai", "guangdong", "jiangsu", "zhejiang"]
+            if cleaned.lower() not in city_province_keywords:
+                result["major_raw"] = cleaned
+        
+        return result
+    
     def extract_partner_query_state(self, conversation_history: List[Dict[str, str]]) -> PartnerQueryState:
         """
         Extract and consolidate PartnerQueryState from conversation history (last 16 messages).
-        Uses LLM to infer state.
+        Uses rule-based parsing first, then LLM only if needed.
         """
         if not conversation_history:
             return PartnerQueryState()
+        
+        # Get the latest user message for rule-based parsing
+        latest_user_message = ""
+        for msg in reversed(conversation_history):
+            if msg.get('role') == 'user':
+                latest_user_message = msg.get('content', '')
+                break
+        
+        # Step 1: Try rule-based parsing first
+        rules_result = self.parse_query_rules(latest_user_message)
+        print(f"DEBUG: Rule-based parsing result: {rules_result}")
+        
+        # Check if rules provide enough info (intake_term + intake_year, or degree_level + major_raw, or university + major, or page action)
+        has_critical_info = (
+            (rules_result.get("intake_term") and rules_result.get("intake_year")) or
+            (rules_result.get("degree_level") and rules_result.get("major_raw")) or
+            (rules_result.get("university_raw") and rules_result.get("major_raw")) or
+            rules_result.get("page_action") != "none"
+        )
+        
+        # If rules provide enough info, build state from rules and return (regardless of university_raw)
+        if has_critical_info:
+            print(f"DEBUG: Using rule-based extraction (sufficient info found)")
+            # Map duration_text to duration_preference
+            duration_text = rules_result.get("duration_text")
+            duration_preference = duration_text  # Already in correct format
+            duration_years_target = None
+            if duration_text == "one_semester":
+                duration_years_target = 0.5
+            elif duration_text in ["two_semester", "one_year"]:
+                duration_years_target = 1.0
+            elif duration_text == "two_year":
+                duration_years_target = 2.0
+            elif duration_text == "three_year":
+                duration_years_target = 3.0
+            elif duration_text == "four_year":
+                duration_years_target = 4.0
+            
+            # Extract city/province from conversation if present
+            city = None
+            province = None
+            conversation_text = " ".join([msg.get('content', '') for msg in conversation_history[-16:]])
+            # Simple city/province detection (can be improved)
+            city_keywords = ["guangzhou", "beijing", "shanghai", "shenzhen", "hangzhou", "nanjing", "chengdu"]
+            province_keywords = ["guangdong", "jiangsu", "zhejiang", "sichuan", "shaanxi"]
+            for c in city_keywords:
+                if c in conversation_text.lower():
+                    city = c.title()
+                    break
+            for p in province_keywords:
+                if p in conversation_text.lower():
+                    province = p.title()
+                    break
+            
+            state = PartnerQueryState(
+                degree_level=self._normalize_degree_level_value(rules_result.get("degree_level")),
+                major_query=rules_result.get("major_raw").lower().strip() if rules_result.get("major_raw") else None,
+                university=rules_result.get("university_raw"),
+                city=city,
+                province=province,
+                intake_term=rules_result.get("intake_term"),
+                intake_year=rules_result.get("intake_year"),
+                teaching_language=rules_result.get("teaching_language"),
+                duration_preference=duration_preference,
+                duration_years_target=duration_years_target
+            )
+            print(f"DEBUG: Built state from rules: {state.to_dict()}")
+            return state
+        
+        # Step 2: If missing critical info, call LLM with minimal input (NO university/major lists)
+        print(f"DEBUG: Rule-based parsing insufficient, calling LLM for extraction")
         
         # Build conversation text from last 16 messages
         conversation_text = ""
@@ -367,42 +571,30 @@ Style Guidelines:
             content = msg.get('content', '')
             conversation_text += f"{role}: {content}\n"
         
-        # Get list of universities for reference (majors no longer needed in prompt)
-        uni_list = [uni["name"] for uni in self.all_universities[:50]]
-        uni_list_str = ", ".join(uni_list)
-        if len(self.all_universities) > 50:
-            uni_list_str += f"\n... and {len(self.all_universities) - 50} more universities"
-        
-        # Use LLM to extract state
-        extraction_prompt = f"""You are a state extractor for partner queries. Given the conversation, output a JSON object with these fields:
-- degree_level: "Bachelor", "Master", "PhD", "Language", "Non-degree", "Associate", "Vocational College", "Junior high", "Senior high", or null
-- major_query: Extract the user's requested subject/major exactly as written (e.g., "mechanical engineering", "painting", "materials science"). Use lowercase normalization, but preserve the original wording. Do NOT force it to match any database list. If user mentions a major/subject, extract it as-is. If not mentioned, use null.
-- university: university name from the database list below, or the closest match, or null
-- city: city name or null
-- province: province name or null
-- intake_term: "March", "September", or null
-- intake_year: year number (e.g., 2026) or null
-- teaching_language: "English", "Chinese", or null (ONLY set if user explicitly stated a preference; do NOT default to "English")
-- scholarship_type: "Type-A", "Type-B", "Type-C", "Type-D", "Partial-Low", "Partial-Mid", "Partial-High", "Self-Paid", "None", or null
-- has_ielts: true/false/null
-- has_hsk: true/false/null
-- has_csca: true/false/null
-- ielts_score: score number or null
-- hsk_score: score number or null
-- csca_score: score number or null
-- duration_preference: "one_semester" (for "1 semester", "one semester", "half year", "6 months"), "two_semester" (for "2 semesters"), "one_year" (for "1 year", "one year"), "two_year" (for "2 years", "two years"), "three_year" (for "3 years", "three years"),"4_year" (for "4 years", "four years"), or null
+        # Minimal LLM prompt - NO university/major lists
+        extraction_prompt = f"""Extract information from this conversation. Output ONLY valid JSON with these exact fields:
+{{
+  "university_raw": string or null,
+  "major_raw": string or null,
+  "degree_level": "Bachelor" | "Master" | "PhD" | "Language" | "Non-degree" | "Diploma" | null,
+  "teaching_language": "English" | "Chinese" | null,
+  "intake_term": "March" | "September" | null,
+  "intake_year": number or null,
+  "duration_text": "one_semester" | "two_semester" | "one_year" | "two_year" | "three_year" | "four_year" | null,
+  "wants_scholarship": boolean,
+  "wants_documents": boolean,
+  "wants_fees": boolean,
+  "wants_deadline": boolean,
+  "wants_list": boolean,
+  "page_action": "next" | "prev" | "first" | "none"
+}}
 
-AVAILABLE UNIVERSITIES IN DATABASE (for matching):
-{uni_list_str}
-
-CRITICAL RULES:
-1. Use ONLY information explicitly stated by the user. Do NOT guess.
-2. LATEST MESSAGE WINS: If user changes their mind, use the LATEST statement.
-3. For major_query: Extract the subject/major the user wants to study exactly as they wrote it (e.g., "mechanical engineering", "materials", "finance", "painting"). Do NOT try to match it to a database list. Just extract what the user said.
-4. **IMPORTANT: Do NOT extract fee-related words as major_query. If user says "what's the tuition", "application fee", "cost", "price", "tuition fee", etc., set major_query to null unless a real major/subject is explicitly mentioned (e.g., "tuition for Business Administration" → major_query="business administration", but "what's the tuition" → major_query=null).**
-5. For university matching: Look through AVAILABLE UNIVERSITIES to find the closest match.
-6. Use fuzzy matching for degree_level: "masters" = "Master", "phd" = "PhD", "doctoral" = "PhD", "bachelor" = "Bachelor"
-7. For teaching_language: ONLY set if user explicitly said "English" or "Chinese". Do NOT default to "English".
+RULES:
+- Extract ONLY what the user explicitly stated. Do NOT guess.
+- For university_raw: Extract the university name as written by the user (e.g., "Ningxia Medical University").
+- For major_raw: Extract the subject/major as written (e.g., "Chinese Language", "Pharmacy", "MBBS").
+- Do NOT extract fee-related words as major_raw.
+- For teaching_language: ONLY set if user explicitly said "English" or "Chinese".
 
 Conversation:
 {conversation_text}
@@ -410,82 +602,158 @@ Conversation:
 Output ONLY valid JSON, no other text:"""
 
         try:
-            print(f"DEBUG: PartnerAgent - Extracting state from conversation (last 16 messages)")
-            response = self.openai_service.chat_completion(
-                messages=[
-                    {"role": "system", "content": "You are a JSON extractor. Output only valid JSON."},
-                    {"role": "user", "content": extraction_prompt}
-                ],
-                temperature=0.1
-            )
+            max_retries = 2
+            extracted = None
+            for attempt in range(max_retries):
+                try:
+                    response = self.openai_service.chat_completion(
+                        messages=[
+                            {"role": "system", "content": "You are a JSON extractor. Output only valid JSON matching the exact schema."},
+                            {"role": "user", "content": extraction_prompt}
+                        ],
+                        temperature=0.0  # Deterministic
+                    )
+                    
+                    content = response.choices[0].message.content.strip()
+                    # Remove markdown code blocks if present
+                    if content.startswith("```json"):
+                        content = content[7:]
+                    if content.startswith("```"):
+                        content = content[3:]
+                    if content.endswith("```"):
+                        content = content[:-3]
+                    content = content.strip()
+                    
+                    extracted = json.loads(content)
+                    
+                    # Validate required keys
+                    required_keys = ["university_raw", "major_raw", "degree_level", "teaching_language", 
+                                   "intake_term", "intake_year", "duration_text", "wants_scholarship",
+                                   "wants_documents", "wants_fees", "wants_deadline", "wants_list", "page_action"]
+                    if all(key in extracted for key in required_keys):
+                        break  # Valid JSON with all keys
+                    else:
+                        raise ValueError(f"Missing required keys: {set(required_keys) - set(extracted.keys())}")
+                        
+                except (json.JSONDecodeError, ValueError, KeyError) as e:
+                    if attempt < max_retries - 1:
+                        print(f"DEBUG: JSON parse error (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                        extraction_prompt = f"""Fix the JSON to match this exact schema:
+{{
+  "university_raw": string or null,
+  "major_raw": string or null,
+  "degree_level": "Bachelor" | "Master" | "PhD" | "Language" | "Non-degree" | "Diploma" | null,
+  "teaching_language": "English" | "Chinese" | null,
+  "intake_term": "March" | "September" | null,
+  "intake_year": number or null,
+  "duration_text": "one_semester" | "two_semester" | "one_year" | "two_year" | "three_year" | "four_year" | null,
+  "wants_scholarship": boolean,
+  "wants_documents": boolean,
+  "wants_fees": boolean,
+  "wants_deadline": boolean,
+  "wants_list": boolean,
+  "page_action": "next" | "prev" | "first" | "none"
+}}
+
+Previous invalid output: {content[:200]}
+
+Conversation:
+{conversation_text}
+
+Output ONLY valid JSON:"""
+                    else:
+                        print(f"DEBUG: JSON parse failed after {max_retries} attempts, using fallback")
+                        extracted = {
+                            "university_raw": None,
+                            "major_raw": None,
+                            "degree_level": None,
+                            "teaching_language": None,
+                            "intake_term": None,
+                            "intake_year": None,
+                            "duration_text": None,
+                            "wants_scholarship": False,
+                            "wants_documents": False,
+                            "wants_fees": False,
+                            "wants_deadline": False,
+                            "wants_list": False,
+                            "page_action": "none"
+                        }
             
-            content = response.choices[0].message.content.strip()
-            # Remove markdown code blocks if present
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
+            # Merge rule-based values (rule-based wins if conflict)
+            if rules_result:
+                for key in ["intake_term", "intake_year", "degree_level", "teaching_language", "duration_text"]:
+                    if rules_result.get(key):
+                        extracted[key] = rules_result[key]
+                if rules_result.get("major_raw"):
+                    extracted["major_raw"] = rules_result["major_raw"]
+                if rules_result.get("university_raw"):
+                    extracted["university_raw"] = rules_result["university_raw"]
             
-            extracted = json.loads(content)
-            
-            # Normalize major_query to lowercase if present
-            major_query = extracted.get('major_query') or extracted.get('major')  # Backward compatibility
+            # Normalize major_query from major_raw
+            major_query = extracted.get('major_raw')
             if major_query:
                 major_query = major_query.lower().strip()
-                # Remove fee-related keywords from major_query (they shouldn't be treated as major names)
+                # Remove fee-related keywords from major_query
                 fee_keywords = ["tuition", "fee", "fees", "cost", "price", "application fee", "tuition fee", "application", "scholarship"]
                 major_words = major_query.split()
-                # If major_query only contains fee keywords or is just fee keywords, set to None
                 if all(word in fee_keywords for word in major_words):
                     major_query = None
                     print(f"DEBUG: Cleaned major_query - removed fee keywords, set to None")
-                # If major_query starts with fee keywords, remove them
                 elif major_words[0] in fee_keywords:
-                    # Check if there's a real major after fee keywords (e.g., "tuition for business" → "business")
                     if len(major_words) > 1:
-                        # Look for words after "for", "of", "at" that might be the major
                         for i, word in enumerate(major_words):
                             if word in ["for", "of", "at"] and i + 1 < len(major_words):
                                 major_query = " ".join(major_words[i+1:])
                                 print(f"DEBUG: Cleaned major_query - extracted '{major_query}' after fee keywords")
                                 break
                         else:
-                            # No "for/of/at" found, set to None
                             major_query = None
                             print(f"DEBUG: Cleaned major_query - no major found after fee keywords, set to None")
                     else:
                         major_query = None
                         print(f"DEBUG: Cleaned major_query - only fee keyword, set to None")
             
-            # Derive duration_years_target from duration_preference
-            duration_pref = extracted.get('duration_preference')
-            duration_years = None
-            if duration_pref == "one_semester" or duration_pref == "half_year":
-                duration_years = 0.5
-            elif duration_pref == "one_year" or duration_pref == "two_semester":
-                duration_years = 1.0
+            # Derive duration_years_target from duration_text
+            duration_text = extracted.get('duration_text')
+            duration_preference = duration_text
+            duration_years_target = None
+            if duration_text == "one_semester":
+                duration_years_target = 0.5
+            elif duration_text in ["two_semester", "one_year"]:
+                duration_years_target = 1.0
+            elif duration_text == "two_year":
+                duration_years_target = 2.0
+            elif duration_text == "three_year":
+                duration_years_target = 3.0
+            elif duration_text == "four_year":
+                duration_years_target = 4.0
+            
+            # Extract city/province from conversation if present
+            city = None
+            province = None
+            conversation_text = " ".join([msg.get('content', '') for msg in conversation_history[-16:]])
+            city_keywords = ["guangzhou", "beijing", "shanghai", "shenzhen", "hangzhou", "nanjing", "chengdu", "xian", "wuhan"]
+            province_keywords = ["guangdong", "jiangsu", "zhejiang", "sichuan", "shaanxi", "hubei"]
+            for c in city_keywords:
+                if c in conversation_text.lower():
+                    city = c.title()
+                    break
+            for p in province_keywords:
+                if p in conversation_text.lower():
+                    province = p.title()
+                    break
             
             state = PartnerQueryState(
-                degree_level=extracted.get('degree_level'),
+                degree_level=self._normalize_degree_level_value(extracted.get('degree_level')),
                 major_query=major_query,
-                university=extracted.get('university'),
-                city=extracted.get('city'),
-                province=extracted.get('province'),
+                university=extracted.get('university_raw'),  # Use university_raw, fuzzy matching happens later
+                city=city,
+                province=province,
                 intake_term=extracted.get('intake_term'),
                 intake_year=extracted.get('intake_year'),
-                teaching_language=extracted.get('teaching_language'),  # Only set if explicitly stated
-                scholarship_type=extracted.get('scholarship_type'),
-                has_ielts=extracted.get('has_ielts'),
-                has_hsk=extracted.get('has_hsk'),
-                has_csca=extracted.get('has_csca'),
-                ielts_score=extracted.get('ielts_score'),
-                hsk_score=extracted.get('hsk_score'),
-                csca_score=extracted.get('csca_score'),
-                duration_preference=duration_pref,
-                duration_years_target=duration_years
+                teaching_language=extracted.get('teaching_language'),
+                duration_preference=duration_preference,
+                duration_years_target=duration_years_target
             )
             
             print(f"DEBUG: Successfully extracted state: {state.to_dict()}")
@@ -2276,18 +2544,38 @@ Output ONLY valid JSON, no other text:"""
                              results: List[Dict[str, Any]], offset: int, total: int, 
                              page_size: int, intent: str, last_displayed: Optional[List[Dict[str, Any]]] = None,
                              conversation_id: Optional[str] = None):
-        """Store pagination state in cache"""
+        """Store pagination state in cache - stores IDs only, not full objects"""
         cache_key = self._get_pagination_cache_key(partner_id, conversation_history, conversation_id)
+        
+        # Extract IDs from results (determine type from first item)
+        result_ids = []
+        result_type = "intake_ids"
+        if results:
+            first_item = results[0]
+            if 'id' in first_item:  # ProgramIntake ID
+                result_ids = [item.get('id') for item in results if item.get('id')]
+                result_type = "intake_ids"
+            elif 'university_id' in first_item:  # University ID (from grouped results)
+                result_ids = list(set([item.get('university_id') for item in results if item.get('university_id')]))
+                result_type = "university_ids"
+            elif 'major_id' in first_item:  # Major ID
+                result_ids = [item.get('major_id') for item in results if item.get('major_id')]
+                result_type = "major_ids"
+        
         self._pagination_cache[cache_key] = PaginationState(
-            results=results,
+            results=result_ids,
+            result_type=result_type,
             offset=offset,
             total=total,
             page_size=page_size,
             intent=intent,
             timestamp=time.time(),
-            last_displayed=last_displayed
+            last_displayed=last_displayed  # Keep full objects for duration questions
         )
-        print(f"DEBUG: Stored pagination state for key: {cache_key}, offset={offset}, total={total}, page_size={page_size}, last_displayed_count={len(last_displayed) if last_displayed else 0}")
+        # Store this key as last pagination key for this partner (for stable fallback)
+        if partner_id:
+            self._last_pagination_key_by_partner[partner_id] = cache_key
+        print(f"DEBUG: Stored pagination state for key: {cache_key}, offset={offset}, total={total}, page_size={page_size}, result_type={result_type}, ids_count={len(result_ids)}, last_displayed_count={len(last_displayed) if last_displayed else 0}")
     
     def generate_response(self, user_message: str, conversation_history: List[Dict[str, str]], 
                          partner_id: Optional[int] = None, conversation_id: Optional[str] = None) -> Dict[str, Any]:
@@ -2314,28 +2602,83 @@ Output ONLY valid JSON, no other text:"""
             pagination_state = self._get_pagination_state(partner_id, conversation_history, conversation_id)
             
             if pagination_state:
-                # Compute next slice
+                # Fetch results by IDs
+                result_ids = pagination_state.results
+                result_type = pagination_state.result_type
                 next_offset = pagination_state.offset + pagination_state.page_size
-                next_batch = pagination_state.results[next_offset:next_offset + pagination_state.page_size]
+                page_ids = result_ids[next_offset:next_offset + pagination_state.page_size]
                 
-                if next_batch:
-                    print(f"DEBUG: Returning list page offset={next_offset} size={len(next_batch)} total={pagination_state.total}")
-                    # Update pagination state in cache (including last_displayed)
-                    self._set_pagination_state(
-                        partner_id=partner_id,
-                        conversation_history=conversation_history,
-                        results=pagination_state.results,  # Keep all results
-                        offset=next_offset,
-                        total=pagination_state.total,
-                        page_size=pagination_state.page_size,
-                        intent=pagination_state.intent,
-                        last_displayed=next_batch,  # Update with what we're showing now
-                        conversation_id=conversation_id
-                    )
-                    return self._format_list_response_deterministic(
-                        next_batch, next_offset, pagination_state.total,
-                        duration_preference=None, user_message=user_message
-                    )
+                if page_ids:
+                    # Fetch full objects by IDs
+                    if result_type == "intake_ids":
+                        intakes = self.db.query(ProgramIntake).filter(ProgramIntake.id.in_(page_ids)).all()
+                        next_batch = []
+                        for intake in intakes:
+                            next_batch.append({
+                                "id": intake.id,
+                                "university_id": intake.university_id,
+                                "major_id": intake.major_id,
+                                "university_name": intake.university.name if intake.university else "N/A",
+                                "major_name": intake.major.name if intake.major else "N/A",
+                                "degree_level": intake.major.degree_level if intake.major else None,
+                                "teaching_language": intake.teaching_language or (intake.major.teaching_language if intake.major else None),
+                                "tuition_per_year": intake.tuition_per_year,
+                                "tuition_per_semester": intake.tuition_per_semester,
+                                "application_fee": intake.application_fee,
+                                "application_deadline": intake.application_deadline.isoformat() if intake.application_deadline else None,
+                                "intake_term": intake.intake_term.value if intake.intake_term else None,
+                                "intake_year": intake.intake_year,
+                                "currency": intake.currency or "CNY"
+                            })
+                    elif result_type == "university_ids":
+                        # For university_ids, we need to fetch intakes for those universities
+                        # This is more complex - for now, use last_displayed if available
+                        next_batch = pagination_state.last_displayed[next_offset:next_offset + pagination_state.page_size] if pagination_state.last_displayed else []
+                    else:
+                        next_batch = pagination_state.last_displayed[next_offset:next_offset + pagination_state.page_size] if pagination_state.last_displayed else []
+                    
+                    if next_batch:
+                        print(f"DEBUG: Returning list page offset={next_offset} size={len(next_batch)} total={pagination_state.total}")
+                        # Update pagination state in cache (including last_displayed)
+                        # Re-fetch all results to update
+                        all_results = []
+                        if result_type == "intake_ids":
+                            all_intakes = self.db.query(ProgramIntake).filter(ProgramIntake.id.in_(result_ids)).all()
+                            for intake in all_intakes:
+                                all_results.append({
+                                    "id": intake.id,
+                                    "university_id": intake.university_id,
+                                    "major_id": intake.major_id,
+                                    "university_name": intake.university.name if intake.university else "N/A",
+                                    "major_name": intake.major.name if intake.major else "N/A",
+                                    "degree_level": intake.major.degree_level if intake.major else None,
+                                    "teaching_language": intake.teaching_language or (intake.major.teaching_language if intake.major else None),
+                                    "tuition_per_year": intake.tuition_per_year,
+                                    "tuition_per_semester": intake.tuition_per_semester,
+                                    "application_fee": intake.application_fee,
+                                    "application_deadline": intake.application_deadline.isoformat() if intake.application_deadline else None,
+                                    "intake_term": intake.intake_term.value if intake.intake_term else None,
+                                    "intake_year": intake.intake_year,
+                                    "currency": intake.currency or "CNY"
+                                })
+                        else:
+                            all_results = pagination_state.last_displayed if pagination_state.last_displayed else []
+                        
+                        self._set_pagination_state(
+                            partner_id=partner_id,
+                            conversation_history=conversation_history,
+                            results=all_results,
+                            offset=next_offset,
+                            total=pagination_state.total,
+                            page_size=pagination_state.page_size,
+                            intent=pagination_state.intent,
+                            last_displayed=next_batch,
+                            conversation_id=conversation_id
+                        )
+                        return self._format_list_response_deterministic(
+                            next_batch, next_offset, pagination_state.total,
+                            duration_preference=None, user_message=user_message
+                        )
                 else:
                     return {
                         "response": "No more results. You've reached the end.",
@@ -4262,7 +4605,7 @@ IMPORTANT INSTRUCTIONS:
             t_llm_start = time.perf_counter()
             response = self.openai_service.chat_completion(
                 messages=messages,
-                temperature=0.7
+                temperature=0.0  # Deterministic
             )
             t_llm_end = time.perf_counter()
             
@@ -4571,4 +4914,44 @@ Return exactly one of the above terms (case-sensitive)."""
         else:
             print(f"DEBUG: _find_major_ids_by_topic found NO matches for topic '{topic_text}' (tokens: {tokens})")
         return matched
+
+
+# Lightweight test function for parse_query_rules
+if __name__ == "__main__":
+    # Create a minimal PartnerAgent instance for testing (without DB)
+    class MockDB:
+        pass
+    
+    class MockOpenAI:
+        pass
+    
+    class MockTavily:
+        pass
+    
+    # Create minimal agent instance
+    agent = PartnerAgent.__new__(PartnerAgent)
+    agent.all_universities = []
+    agent.all_majors = []
+    
+    # Test queries
+    test_queries = [
+        "I want Chinese language one semester program, March 2026 intake, tuition and application fee",
+        "List universities in Guangzhou with English taught programs",
+        "Ningxia Medical University Chinese Language March 2026, scholarship and required documents",
+        "next page",
+        "Show majors of Xidian University",
+        "Masters in Pharmacy in any university, September 2026, scholarship?",
+        "What documents do I need for MBBS?",
+        "deadline for March intake?"
+    ]
+    
+    print("=" * 80)
+    print("Testing parse_query_rules() function")
+    print("=" * 80)
+    
+    for query in test_queries:
+        print(f"\nQuery: {query}")
+        result = agent.parse_query_rules(query)
+        print(f"Result: {result}")
+        print("-" * 80)
 

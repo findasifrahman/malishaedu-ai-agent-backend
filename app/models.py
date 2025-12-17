@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from pgvector.sqlalchemy import Vector
 from app.database import Base
+from typing import Optional
 import enum
 
 class UserRole(str, enum.Enum):
@@ -53,6 +54,54 @@ class DegreeLevel(str, enum.Enum):
     MASTER = "Master"
     PHD = "Phd"
     LANGUAGE_PROGRAM = "Language Program"
+    
+    @staticmethod
+    def canonicalize(value: Optional[str]) -> Optional[str]:
+        """
+        Canonicalize degree level string to enum value.
+        Returns canonical value or None if not recognized.
+        """
+        if not value:
+            return None
+        
+        value_lower = str(value).strip().lower()
+        
+        # Mapping to canonical values
+        mapping = {
+            "bachelor": "Bachelor",
+            "bsc": "Bachelor",
+            "b.sc": "Bachelor",
+            "undergraduate": "Bachelor",
+            "undergrad": "Bachelor",
+            "master": "Master",
+            "masters": "Master",
+            "msc": "Master",
+            "m.sc": "Master",
+            "postgraduate": "Master",
+            "post-graduate": "Master",
+            "graduate": "Master",
+            "phd": "Phd",
+            "ph.d": "Phd",
+            "ph.d.": "Phd",
+            "doctorate": "Phd",
+            "doctoral": "Phd",
+            "dphil": "Phd",
+            "language": "Language Program",
+            "language program": "Language Program",
+            "non-degree": "Non Degree",
+            "non degree": "Non Degree",
+            "foundation": "Language Program",
+            "foundation program": "Language Program",
+            "diploma": "Associate",
+            "associate": "Associate",
+            "assoc": "Associate",
+            "vocational college": "Vocational College",
+            "vocational": "Vocational College",
+            "junior high": "Junior high",
+            "senior high": "Senior high"
+        }
+        
+        return mapping.get(value_lower, None)
 
 class TeachingLanguage(str, enum.Enum):
     CHINESE = "Chinese"
