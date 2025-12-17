@@ -390,7 +390,7 @@ Style Guidelines:
 - ielts_score: score number or null
 - hsk_score: score number or null
 - csca_score: score number or null
-- duration_preference: "one_semester" (for "1 semester", "one semester", "half year", "6 months"), "two_semester" (for "2 semesters"), "one_year" (for "1 year", "one year"), or null
+- duration_preference: "one_semester" (for "1 semester", "one semester", "half year", "6 months"), "two_semester" (for "2 semesters"), "one_year" (for "1 year", "one year"), "two_year" (for "2 years", "two years"), "three_year" (for "3 years", "three years"),"4_year" (for "4 years", "four years"), or null
 
 AVAILABLE UNIVERSITIES IN DATABASE (for matching):
 {uni_list_str}
@@ -1971,8 +1971,29 @@ Output ONLY valid JSON, no other text:"""
             app_fee = intake.get('application_fee', 0) or 0
             app_fee_str = f"{app_fee} {currency}" if app_fee else "Not provided"
             
-            # Format deadline
-            deadline = intake.get('application_deadline', 'N/A')
+            # Format deadline (extract date only, no time)
+            deadline_raw = intake.get('application_deadline', 'N/A')
+            deadline = 'N/A'
+            if deadline_raw and deadline_raw != 'N/A':
+                try:
+                    # Parse ISO format datetime and extract date only
+                    if isinstance(deadline_raw, str):
+                        deadline_dt = datetime.fromisoformat(deadline_raw.replace('Z', '+00:00'))
+                        deadline = deadline_dt.date().isoformat()  # Format as YYYY-MM-DD
+                    else:
+                        deadline = str(deadline_raw)
+                except (ValueError, AttributeError):
+                    # If parsing fails, try to extract date part from string
+                    if isinstance(deadline_raw, str):
+                        # Try to extract YYYY-MM-DD pattern
+                        import re
+                        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', deadline_raw)
+                        if date_match:
+                            deadline = date_match.group(1)
+                        else:
+                            deadline = deadline_raw  # Fallback to original
+                    else:
+                        deadline = str(deadline_raw)
             
             prefix = f"{idx}. " if idx is not None else ""
             return (
@@ -2812,7 +2833,25 @@ Output ONLY valid JSON, no other text:"""
                 
                 for idx, intake in enumerate(all_language_intakes[:10], 1):  # Limit to 10 for readability
                     eff_lang = intake.get('effective_teaching_language') or intake.get('teaching_language') or 'N/A'
-                    deadline_str = intake.get('application_deadline', 'N/A')
+                    deadline_raw = intake.get('application_deadline', 'N/A')
+                    deadline_str = 'N/A'
+                    if deadline_raw and deadline_raw != 'N/A':
+                        try:
+                            if isinstance(deadline_raw, str):
+                                deadline_dt = datetime.fromisoformat(deadline_raw.replace('Z', '+00:00'))
+                                deadline_str = deadline_dt.date().isoformat()
+                            else:
+                                deadline_str = str(deadline_raw)
+                        except (ValueError, AttributeError):
+                            if isinstance(deadline_raw, str):
+                                import re
+                                date_match = re.search(r'(\d{4}-\d{2}-\d{2})', deadline_raw)
+                                if date_match:
+                                    deadline_str = date_match.group(1)
+                                else:
+                                    deadline_str = deadline_raw
+                            else:
+                                deadline_str = str(deadline_raw)
                     response_parts.append(
                         f"\n{idx}) {intake.get('major_name', 'N/A')} — Teaching language: {eff_lang} — deadline: {deadline_str}"
                     )
@@ -3931,48 +3970,52 @@ Output ONLY valid JSON, no other text:"""
             uniq_unis = len({i['university_id'] for i in filtered_intakes})
             print(f"DEBUG: List query unique universities: {uniq_unis}, intake_count={len(filtered_intakes)}")
             
-            # Fix 4: For list queries with Language degree_level OR fees_only/fees_compare, ALWAYS use deterministic formatter
+            # Fix 4: For list queries with Language degree_level OR fees_only/fees_compare OR documents_only/eligibility_only, ALWAYS use deterministic formatter
             # Never build DB context or call OpenAI for these
             is_language_list = state.degree_level and "Language" in str(state.degree_level)
-            should_use_deterministic = (intent in ["fees_compare", "fees_only"]) or is_language_list
+            should_use_deterministic = (intent in ["fees_compare", "fees_only", "documents_only", "eligibility_only"]) or is_language_list
             
             if should_use_deterministic:
                 print(f"DEBUG: Using deterministic formatter for list query with intent={intent}, is_language={is_language_list}")
-                # Select best intake per university (up to MAX_LIST_UNIVERSITIES)
+                # Group by university
                 from collections import defaultdict
                 by_university = defaultdict(list)
                 for intake in filtered_intakes:
                     by_university[intake.get('university_id')].append(intake)
                 
-                # Select best intake per university
-                selected_intakes = []
-                # Import datetime locally to avoid closure issues
-                from datetime import datetime as dt_func
-                current_dt = current_date
-                for uni_id, uni_intakes in list(by_university.items())[:self.MAX_LIST_UNIVERSITIES]:
-                    # Sort by: upcoming deadline first, then tuition (lowest), then deadline
-                    def sort_key(i, dt=dt_func, current=current_dt):
-                        deadline = i.get('application_deadline')
-                        tuition = i.get('tuition_per_year') or (i.get('tuition_per_semester', 0) * 2) or float('inf')
-                        is_upcoming = False
-                        if deadline:
-                            try:
-                                deadline_date = dt.fromisoformat(deadline).date()
-                                is_upcoming = deadline_date > current
-                            except:
-                                is_upcoming = False
-                        return (not is_upcoming, tuition, deadline or '')
-                    
-                    best = sorted(uni_intakes, key=sort_key)[0]
-                    selected_intakes.append(best)
-                
-                # Compute total unique universities for pagination
-                # Check if single-university case
+                # Check if single-university case OR documents_only/eligibility_only intent
                 unique_uni_ids = set(i.get('university_id') for i in filtered_intakes if i.get('university_id'))
-                if len(unique_uni_ids) == 1:
-                    # Single-university: total = total programs (intakes)
+                is_single_university = len(unique_uni_ids) == 1
+                should_show_all_programs = is_single_university or intent in ["documents_only", "eligibility_only"] or state.duration_preference
+                
+                if should_show_all_programs:
+                    # Show ALL programs (not just one per university)
+                    print(f"DEBUG: Single-university or documents_only/eligibility_only - showing all {len(filtered_intakes)} programs")
+                    selected_intakes = filtered_intakes
                     total_for_formatter = len(filtered_intakes)
                 else:
+                    # Multi-university: Select best intake per university
+                    selected_intakes = []
+                    # Import datetime locally to avoid closure issues
+                    from datetime import datetime as dt_func
+                    current_dt = current_date
+                    for uni_id, uni_intakes in list(by_university.items())[:self.MAX_LIST_UNIVERSITIES]:
+                        # Sort by: upcoming deadline first, then tuition (lowest), then deadline
+                        def sort_key(i, dt=dt_func, current=current_dt):
+                            deadline = i.get('application_deadline')
+                            tuition = i.get('tuition_per_year') or (i.get('tuition_per_semester', 0) * 2) or float('inf')
+                            is_upcoming = False
+                            if deadline:
+                                try:
+                                    deadline_date = dt.fromisoformat(deadline).date()
+                                    is_upcoming = deadline_date > current
+                                except:
+                                    is_upcoming = False
+                            return (not is_upcoming, tuition, deadline or '')
+                        
+                        best = sorted(uni_intakes, key=sort_key)[0]
+                        selected_intakes.append(best)
+                    
                     # Multi-university: total = unique universities (not intakes)
                     total_for_formatter = len(unique_uni_ids)
                 
