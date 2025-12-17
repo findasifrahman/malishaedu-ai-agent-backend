@@ -399,7 +399,8 @@ async def chat(
             agent = PartnerAgent(db)
             result = agent.generate_response(
                 user_message=request.message,
-                conversation_history=messages_history
+                conversation_history=messages_history,
+                partner_id=current_partner.id
             )
             
             print("\n" + "="*80)
@@ -618,7 +619,8 @@ async def chat_stream(
             agent = PartnerAgent(db)
             result = agent.generate_response(
                 user_message=request.message,
-                conversation_history=messages_history
+                conversation_history=messages_history,
+                partner_id=current_partner.id
             )
             full_response = result['response']
             used_rag = False

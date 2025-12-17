@@ -37,6 +37,8 @@ class PartnerQueryState:
     ielts_score: Optional[float] = None
     hsk_score: Optional[int] = None
     csca_score: Optional[float] = None
+    duration_preference: Optional[str] = None  # "one_semester" | "half_year" | "one_year" | "two_semester" | None
+    duration_years_target: Optional[float] = None  # Derived: one_semester/half_year -> 0.5, one_year -> 1.0, two_semester -> 1.0
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for LLM context"""
@@ -55,12 +57,30 @@ class PartnerQueryState:
             "has_csca": self.has_csca,
             "ielts_score": self.ielts_score,
             "hsk_score": self.hsk_score,
-            "csca_score": self.csca_score
+            "csca_score": self.csca_score,
+            "duration_preference": self.duration_preference,
+            "duration_years_target": self.duration_years_target
         }
+
+
+@dataclass
+class PaginationState:
+    """State for list query pagination"""
+    results: List[Dict[str, Any]]
+    offset: int
+    total: int
+    page_size: int
+    intent: str
+    timestamp: float
+    last_displayed: Optional[List[Dict[str, Any]]] = None  # Last displayed intakes for follow-up questions
 
 
 class PartnerAgent:
     """Partner agent for answering questions about MalishaEdu universities and programs"""
+    
+    # List query caps to prevent huge context
+    MAX_LIST_UNIVERSITIES = 12
+    MAX_LIST_INTAKES = 24
     
     PARTNER_SYSTEM_PROMPT = """You are the MalishaEdu Partner Agent, helping partners answer questions about Chinese universities and programs offered by MalishaEdu.
 
@@ -244,6 +264,18 @@ Style Guidelines:
         self.last_selected_university_id: Optional[int] = None
         self.last_selected_major_id: Optional[int] = None
         self.last_selected_program_intake_id: Optional[int] = None
+        
+        # Multi-track info for responses with multiple teaching languages
+        self._multi_track_info: Optional[Dict[str, Any]] = None
+        
+        # List pagination cache: keyed by (partner_id, conversation_id) -> PaginationState
+        self._pagination_cache: Dict[Tuple[Optional[int], str], PaginationState] = {}
+        
+        # Stable session fallback IDs per partner (for pagination when no conversation_id)
+        self._session_fallback_id_by_partner: Dict[Optional[int], str] = {}
+        
+        # Last pagination key by partner (for stable fallback)
+        self._last_pagination_key_by_partner: Dict[Optional[int], Tuple[Optional[int], str]] = {}
     
     def _load_all_universities(self) -> List[Dict[str, Any]]:
         """Load all partner universities from database at startup"""
@@ -358,6 +390,7 @@ Style Guidelines:
 - ielts_score: score number or null
 - hsk_score: score number or null
 - csca_score: score number or null
+- duration_preference: "one_semester" (for "1 semester", "one semester", "half year", "6 months"), "two_semester" (for "2 semesters"), "one_year" (for "1 year", "one year"), or null
 
 AVAILABLE UNIVERSITIES IN DATABASE (for matching):
 {uni_list_str}
@@ -427,6 +460,14 @@ Output ONLY valid JSON, no other text:"""
                         major_query = None
                         print(f"DEBUG: Cleaned major_query - only fee keyword, set to None")
             
+            # Derive duration_years_target from duration_preference
+            duration_pref = extracted.get('duration_preference')
+            duration_years = None
+            if duration_pref == "one_semester" or duration_pref == "half_year":
+                duration_years = 0.5
+            elif duration_pref == "one_year" or duration_pref == "two_semester":
+                duration_years = 1.0
+            
             state = PartnerQueryState(
                 degree_level=extracted.get('degree_level'),
                 major_query=major_query,
@@ -442,7 +483,9 @@ Output ONLY valid JSON, no other text:"""
                 has_csca=extracted.get('has_csca'),
                 ielts_score=extracted.get('ielts_score'),
                 hsk_score=extracted.get('hsk_score'),
-                csca_score=extracted.get('csca_score')
+                csca_score=extracted.get('csca_score'),
+                duration_preference=duration_pref,
+                duration_years_target=duration_years
             )
             
             print(f"DEBUG: Successfully extracted state: {state.to_dict()}")
@@ -513,6 +556,78 @@ Output ONLY valid JSON, no other text:"""
                 return False, None, matches[:3]
         
         return False, None, []
+    
+    def _find_university_ids_by_location(self, city: Optional[str], province: Optional[str]) -> List[int]:
+        """
+        Find university IDs by location (city and/or province).
+        Searches self.all_universities and matches by city and/or province (case-insensitive).
+        Returns list of matching university IDs.
+        """
+        if not city and not province:
+            return []
+        
+        matching_ids = []
+        city_normalized = city.lower().strip() if city else None
+        province_normalized = province.lower().strip() if province else None
+        
+        for uni in self.all_universities:
+            uni_city = (uni.get("city") or "").lower().strip() if uni.get("city") else None
+            uni_province = (uni.get("province") or "").lower().strip() if uni.get("province") else None
+            
+            # Match city if provided
+            city_match = False
+            if city_normalized:
+                if uni_city == city_normalized:
+                    city_match = True
+                # Allow common whitespace variations
+                elif uni_city and city_normalized.replace(" ", "") == uni_city.replace(" ", ""):
+                    city_match = True
+            
+            # Match province if provided
+            province_match = False
+            if province_normalized:
+                if uni_province == province_normalized:
+                    province_match = True
+                # Allow common whitespace variations
+                elif uni_province and province_normalized.replace(" ", "") == uni_province.replace(" ", ""):
+                    province_match = True
+            
+            # Add if matches city (if city provided) and/or province (if province provided)
+            if city_normalized and province_normalized:
+                # Both provided - match both
+                if city_match and province_match:
+                    matching_ids.append(uni["id"])
+            elif city_normalized:
+                # Only city provided
+                if city_match:
+                    matching_ids.append(uni["id"])
+            elif province_normalized:
+                # Only province provided
+                if province_match:
+                    matching_ids.append(uni["id"])
+        
+        print(f"DEBUG: Location filter - city={city}, province={province}, matched_uni_ids={matching_ids}")
+        return matching_ids
+    
+    def _infer_duration_from_major_name(self, major_name: str) -> Optional[float]:
+        """
+        Infer duration in years from major name using robust regex/keywords.
+        Returns 0.5 for semester/half year/6 month, 1.0 for one year/academic year/year, or None if unclear.
+        """
+        if not major_name:
+            return None
+        
+        major_lower = major_name.lower()
+        
+        # Check for semester/half year patterns
+        if re.search(r'\b(1\s+semester|one\s+semester|half\s+year|6\s+month|six\s+month|0\.5|0\s*\.\s*5)\b', major_lower):
+            return 0.5
+        
+        # Check for one year patterns
+        if re.search(r'\b(1\s+year|one\s+year|academic\s+year|year\s+program)\b', major_lower):
+            return 1.0
+        
+        return None
     
     def _fuzzy_match_major(self, user_input: str, university_id: Optional[int] = None, degree_level: Optional[str] = None, top_k: int = 20) -> Tuple[bool, Optional[Dict[str, Any]], List[Tuple[Dict[str, Any], float]]]:
         """
@@ -624,14 +739,16 @@ Output ONLY valid JSON, no other text:"""
         major_ids: Optional[List[int]] = None,
         intake_term: Optional[str] = None,
         intake_year: Optional[int] = None,
-        teaching_language: Optional[str] = None
+        teaching_language: Optional[str] = None,
+        university_ids: Optional[List[int]] = None
     ) -> List[Dict[str, Any]]:
         """
         Get program intakes with upcoming deadlines (deadline > current_date) using filtered SQL to reduce load.
+        Option A: Accept university_ids parameter for location-based filtering.
         """
         try:
             print(f"DEBUG: Loading filtered upcoming intakes (deadline > {current_date})...")
-            print(f"DEBUG: Query parameters: university_id={university_id}, major_ids={major_ids}, degree_level={degree_level}, intake_term={intake_term}, intake_year={intake_year}, teaching_language={teaching_language}")
+            print(f"DEBUG: Query parameters: university_id={university_id}, university_ids={university_ids}, major_ids={major_ids}, degree_level={degree_level}, intake_term={intake_term}, intake_year={intake_year}, teaching_language={teaching_language}")
             
             # First, check if there are any intakes for the matched major(s) without date filter (for debugging)
             if major_ids:
@@ -662,6 +779,10 @@ Output ONLY valid JSON, no other text:"""
             if university_id:
                 query = query.filter(ProgramIntake.university_id == university_id)
                 filters_applied.append(f"university_id = {university_id}")
+            elif university_ids:
+                # Option A: Filter by list of university IDs (for location-based filtering)
+                query = query.filter(ProgramIntake.university_id.in_(university_ids))
+                filters_applied.append(f"university_id IN {university_ids}")
             if major_ids:
                 query = query.filter(ProgramIntake.major_id.in_(major_ids))
                 filters_applied.append(f"major_id IN {major_ids}")
@@ -751,7 +872,8 @@ Output ONLY valid JSON, no other text:"""
         intake_term: Optional[str] = None,
         intake_year: Optional[int] = None,
         teaching_language: Optional[str] = None,
-        limit_per_major: int = 3
+        limit_per_major: int = 3,
+        university_ids: Optional[List[int]] = None
     ) -> List[Dict[str, Any]]:
         """
         Get latest program intakes WITHOUT deadline filter (for fee queries when no upcoming deadlines).
@@ -759,7 +881,7 @@ Output ONLY valid JSON, no other text:"""
         or by intake_year desc, then intake_term.
         """
         try:
-            print(f"DEBUG: Loading latest intakes (any deadline) - university_id={university_id}, major_ids={major_ids}, degree_level={degree_level}, intake_term={intake_term}, teaching_language={teaching_language}")
+            print(f"DEBUG: Loading latest intakes (any deadline) - university_id={university_id}, university_ids={university_ids}, major_ids={major_ids}, degree_level={degree_level}, intake_term={intake_term}, teaching_language={teaching_language}")
             
             # Query without deadline filter
             query = self.db.query(ProgramIntake).join(Major).join(University).filter(
@@ -768,6 +890,9 @@ Output ONLY valid JSON, no other text:"""
             
             if university_id:
                 query = query.filter(ProgramIntake.university_id == university_id)
+            elif university_ids:
+                # Option A: Filter by list of university IDs (for location-based filtering)
+                query = query.filter(ProgramIntake.university_id.in_(university_ids))
             if major_ids:
                 query = query.filter(ProgramIntake.major_id.in_(major_ids))
             if degree_level:
@@ -865,7 +990,8 @@ Output ONLY valid JSON, no other text:"""
         self,
         university_id: Optional[int] = None,
         degree_level: Optional[str] = None,
-        teaching_language: Optional[str] = None
+        teaching_language: Optional[str] = None,
+        university_ids: Optional[List[int]] = None
     ) -> List[Dict[str, Any]]:
         """
         Query Majors table directly for list queries.
@@ -873,7 +999,7 @@ Output ONLY valid JSON, no other text:"""
         Used to check if programs exist regardless of intake availability.
         """
         try:
-            print(f"DEBUG: Querying majors for list query - university_id={university_id}, degree_level={degree_level}, teaching_language={teaching_language}")
+            print(f"DEBUG: Querying majors for list query - university_id={university_id}, university_ids={university_ids}, degree_level={degree_level}, teaching_language={teaching_language}")
             
             # Query majors from partner universities
             query = self.db.query(Major).join(University).filter(
@@ -882,6 +1008,9 @@ Output ONLY valid JSON, no other text:"""
             
             if university_id:
                 query = query.filter(Major.university_id == university_id)
+            elif university_ids:
+                # Filter by list of university IDs (for location-based filtering)
+                query = query.filter(Major.university_id.in_(university_ids))
             
             if degree_level:
                 query = query.filter(Major.degree_level.ilike(f"%{degree_level}%"))
@@ -1082,13 +1211,24 @@ Output ONLY valid JSON, no other text:"""
         if match_notes:
             context_parts.extend(match_notes)
         
-        filtered_intakes = intakes if is_list_query else intakes[:20]
-        intake_ids = [i['id'] for i in filtered_intakes] if not is_list_query else []
-        docs_map = self._get_program_documents_batch(intake_ids) if (not is_list_query and intake_ids) else {}
-        scholarships_map = self._get_program_scholarships_batch(intake_ids) if (not is_list_query and intake_ids) else {}
-        exams_map = self._get_program_exam_requirements_batch(intake_ids) if (not is_list_query and intake_ids) else {}
+        # Fix 1: Force detailed mode for single university with <=10 intakes for specific intents
+        force_detailed_single_university = False
+        if is_list_query and intakes:
+            unique_universities = len({i['university_id'] for i in intakes})
+            if (unique_universities == 1 and 
+                len(intakes) <= 10 and 
+                intent in ["fees_only", "documents_only", "eligibility_only", "scholarship_only", "general"]):
+                force_detailed_single_university = True
+                print(f"DEBUG: Forcing detailed mode for single university ({unique_universities} uni, {len(intakes)} intakes) with intent={intent}")
         
-        if is_list_query and filtered_intakes:
+        filtered_intakes = intakes if is_list_query else intakes[:20]
+        # If forcing detailed mode, include intake_ids even for list query
+        intake_ids = [i['id'] for i in filtered_intakes] if (not is_list_query or force_detailed_single_university) else []
+        docs_map = self._get_program_documents_batch(intake_ids) if intake_ids else {}
+        scholarships_map = self._get_program_scholarships_batch(intake_ids) if intake_ids else {}
+        exams_map = self._get_program_exam_requirements_batch(intake_ids) if intake_ids else {}
+        
+        if is_list_query and filtered_intakes and not force_detailed_single_university:
             # Compact summary: unique universities with counts and earliest deadline / languages
             uni_map: Dict[int, Dict[str, Any]] = {}
             for intake in filtered_intakes:
@@ -1120,7 +1260,12 @@ Output ONLY valid JSON, no other text:"""
                 context_parts.append(f"+ {more} more universities not shown in list context.")
             context_parts.append("=== END MATCHED UNIVERSITIES ===")
         elif filtered_intakes:
-            context_parts.append(f"\n=== MATCHED PROGRAM INTAKES (Upcoming Deadlines Only) ===")
+            # Add note if using latest intakes (not upcoming deadlines)
+            if using_latest_intakes:
+                context_parts.append(f"\n=== MATCHED PROGRAM INTAKES (Latest Recorded - Deadlines Not Currently Open) ===")
+                context_parts.append("NOTE: Deadlines are not currently open / not available yet in DB. Showing latest saved intake information from database.")
+            else:
+                context_parts.append(f"\n=== MATCHED PROGRAM INTAKES (Upcoming Deadlines Only) ===")
             
             # Check if multiple tracks exist (English/Chinese) for same university+major+degree
             # Group by university+major+degree to detect multiple tracks
@@ -1195,8 +1340,21 @@ Output ONLY valid JSON, no other text:"""
                             earliest = sorted(deadlines)[0]
                             intake_info += f"\n  Scholarship Deadline: {earliest}"
                 if include_eligibility:
-                    intake_info += f"\n  Teaching Language: {intake.get('teaching_language', 'N/A')}"
-                    if intake.get('age_min') or intake.get('age_max'):
+                    # Always show teaching language for eligibility
+                    effective_lang_elig = intake.get('effective_teaching_language') or intake.get('teaching_language') or intake.get('major_teaching_language') or 'N/A'
+                    intake_info += f"\n  Teaching Language: {effective_lang_elig}"
+                    # Always show age requirements for documents_only/eligibility_only
+                    if intent in ["documents_only", "eligibility_only"]:
+                        if intake.get('age_min') is not None or intake.get('age_max') is not None:
+                            age_range = []
+                            if intake.get('age_min') is not None:
+                                age_range.append(f"Min: {intake['age_min']}")
+                            if intake.get('age_max') is not None:
+                                age_range.append(f"Max: {intake['age_max']}")
+                            intake_info += f"\n  Age Requirements: {', '.join(age_range) if age_range else 'Not specified'}"
+                        else:
+                            intake_info += f"\n  Age Requirements: Not specified"
+                    elif intake.get('age_min') or intake.get('age_max'):
                         age_range = []
                         if intake.get('age_min'):
                             age_range.append(f"Min: {intake['age_min']}")
@@ -1342,13 +1500,39 @@ Output ONLY valid JSON, no other text:"""
                         else:
                             intake_info += f"\n  English Test Required"
                     
-                    # Interview and written test
-                    if intake.get('interview_required'):
-                        intake_info += f"\n  Interview Required: Yes"
-                    if intake.get('written_test_required'):
-                        intake_info += f"\n  Written Test Required: Yes"
-                    if intake.get('acceptance_letter_required'):
-                        intake_info += f"\n  Acceptance Letter Required: Yes"
+                    # Interview and written test (always show for docs/eligibility)
+                    if intent in ["documents_only", "eligibility_only"]:
+                        interview_req = intake.get('interview_required')
+                        if interview_req is True:
+                            intake_info += f"\n  Interview Required: Yes"
+                        elif interview_req is False:
+                            intake_info += f"\n  Interview Required: No"
+                        else:
+                            intake_info += f"\n  Interview Required: Not specified"
+                        
+                        written_test_req = intake.get('written_test_required')
+                        if written_test_req is True:
+                            intake_info += f"\n  Written Test Required: Yes"
+                        elif written_test_req is False:
+                            intake_info += f"\n  Written Test Required: No"
+                        else:
+                            intake_info += f"\n  Written Test Required: Not specified"
+                        
+                        acceptance_letter_req = intake.get('acceptance_letter_required')
+                        if acceptance_letter_req is True:
+                            intake_info += f"\n  Acceptance Letter Required: Yes"
+                        elif acceptance_letter_req is False:
+                            intake_info += f"\n  Acceptance Letter Required: No"
+                        else:
+                            intake_info += f"\n  Acceptance Letter Required: Not specified"
+                    else:
+                        # For other intents, only show if required
+                        if intake.get('interview_required'):
+                            intake_info += f"\n  Interview Required: Yes"
+                        if intake.get('written_test_required'):
+                            intake_info += f"\n  Written Test Required: Yes"
+                        if intake.get('acceptance_letter_required'):
+                            intake_info += f"\n  Acceptance Letter Required: Yes"
                     
                     # Inside China applicants (always show for docs/eligibility)
                     if intent in ["documents_only", "eligibility_only"]:
@@ -1493,11 +1677,13 @@ Output ONLY valid JSON, no other text:"""
                                         intake_info += f": {form['rules']}"
                 
                 # Include ProgramIntake notes and scholarship_info
-                # For scholarship_only intent, always read and mention notes and scholarship_info
-                if intent == "scholarship_only":
+                # Fix 3: Always show notes for documents_only/eligibility_only/scholarship_only
+                if intent in ["documents_only", "eligibility_only", "scholarship_only"]:
                     if intake.get('notes'):
                         intake_info += f"\n  Important Notes: {intake['notes']}"
-                    if intake.get('scholarship_info'):
+                    else:
+                        intake_info += f"\n  Important Notes: Not specified"
+                    if intent == "scholarship_only" and intake.get('scholarship_info'):
                         intake_info += f"\n  Scholarship Info: {intake['scholarship_info']}"
                 else:
                     # For other intents, include notes if present
@@ -1689,7 +1875,401 @@ Output ONLY valid JSON, no other text:"""
         text = text.replace('"', '"').replace('"', '"')  # Double curly quotes
         return text.lower()
     
-    def generate_response(self, user_message: str, conversation_history: List[Dict[str, str]]) -> Dict[str, Any]:
+    def _strip_degree_from_major_query(self, text: str) -> str:
+        """
+        Remove degree phrases from major_query, keeping only the subject name.
+        Example: "bachelor in chemistry" -> "chemistry"
+        Also handles: "subject is Bachelor in chemistry" -> "chemistry"
+        """
+        if not text:
+            return ""
+        
+        text_lower = text.lower().strip()
+        
+        # Degree phrases to strip (case-insensitive)
+        # Order matters: longer phrases first to avoid partial matches
+        degree_phrases = [
+            "bachelor in",
+            "bachelor of",
+            "bsc in",
+            "b.sc in",
+            "bsc ",  # Handle "BSc Applied Chemistry" -> "applied chemistry"
+            "b.sc ",  # Handle "B.Sc Applied Chemistry"
+            "master in",
+            "master of",
+            "msc in",
+            "m.sc in",
+            "msc ",  # Handle "MSc Applied Chemistry"
+            "m.sc ",  # Handle "M.Sc Applied Chemistry"
+            "phd in",
+            "doctorate in"
+        ]
+        
+        # First try removing from start (most common case)
+        for phrase in degree_phrases:
+            if text_lower.startswith(phrase):
+                # Remove the phrase and any following whitespace
+                cleaned = text_lower[len(phrase):].strip()
+                if cleaned:  # Only return if there's something left
+                    return cleaned
+        
+        # Also check if phrase appears anywhere in the text (e.g., "subject is Bachelor in chemistry")
+        for phrase in degree_phrases:
+            phrase_with_space = f" {phrase}"  # Look for phrase with leading space
+            if phrase_with_space in text_lower:
+                # Find the position and extract what comes after
+                idx = text_lower.find(phrase_with_space)
+                if idx >= 0:
+                    # Get text after the phrase
+                    after_phrase = text_lower[idx + len(phrase_with_space):].strip()
+                    # Also get text before the phrase (might be the subject if phrase is in middle)
+                    before_phrase = text_lower[:idx].strip()
+                    # If there's text after, prefer that; otherwise use before
+                    if after_phrase:
+                        return after_phrase
+                    elif before_phrase and not any(p in before_phrase for p in ["subject", "is", "for", "program"]):
+                        return before_phrase
+        
+        # If no degree phrase found, return original (already lowercased and stripped)
+        return text_lower
+    
+    def _format_list_response_deterministic(self, intakes: List[Dict[str, Any]], offset: int, total: int, 
+                                           duration_preference: Optional[str] = None, 
+                                           user_message: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Format a deterministic response for list/compare queries without LLM.
+        Returns a compact table-like list of universities with key fee information.
+        Handles single-university vs multi-university cases differently.
+        If duration_preference is specified OR user asked for "programs/courses", show all programs (not grouped by university).
+        """
+        if not intakes:
+            return {
+                "response": "No matching programs found.",
+                "used_db": True,
+                "used_tavily": False,
+                "sources": []
+            }
+        
+        response_parts = []
+        
+        # Helper function to format a single intake line
+        def format_intake_line(intake: Dict[str, Any], idx: int = None) -> str:
+            uni_name = intake.get('university_name', 'N/A')
+            major_name = intake.get('major_name', 'N/A')
+            degree_level = intake.get('degree_level', 'N/A')
+            teaching_lang = intake.get('effective_teaching_language') or intake.get('teaching_language', 'N/A')
+            
+            # Format tuition
+            currency = intake.get('currency', 'CNY')
+            tuition_str = "Not provided"
+            if intake.get('tuition_per_year'):
+                tuition_str = f"{intake['tuition_per_year']} {currency}/year"
+            elif intake.get('tuition_per_semester'):
+                tuition_str = f"{intake['tuition_per_semester']} {currency}/semester"
+            
+            # Format application fee
+            app_fee = intake.get('application_fee', 0) or 0
+            app_fee_str = f"{app_fee} {currency}" if app_fee else "Not provided"
+            
+            # Format deadline
+            deadline = intake.get('application_deadline', 'N/A')
+            
+            prefix = f"{idx}. " if idx is not None else ""
+            return (
+                f"{prefix}{uni_name} - {major_name} ({degree_level}, {teaching_lang}-taught)\n"
+                f"   Tuition: {tuition_str} | Application Fee: {app_fee_str} | Deadline: {deadline}"
+            )
+        
+        # Detect single-university case OR duration_preference OR "programs/courses" keywords
+        unique_university_ids = set(intake.get('university_id') for intake in intakes if intake.get('university_id'))
+        user_asked_for_programs = user_message and any(kw in user_message.lower() for kw in ["programs", "courses", "list programs", "show programs", "all programs"])
+        should_show_all_programs = (len(unique_university_ids) == 1) or duration_preference or user_asked_for_programs
+        
+        if should_show_all_programs:
+            # SINGLE-UNIVERSITY CASE: Show ALL programs, not just one representative
+            uni_id = list(unique_university_ids)[0]
+            uni_name = intakes[0].get('university_name', 'N/A')
+            
+            # Sort all intakes for this university (by deadline, then tuition)
+            dt_func = datetime
+            today_date = date.today()
+            def sort_key(i, dt=dt_func, today=today_date):
+                deadline = i.get('application_deadline')
+                tuition = i.get('tuition_per_year') or (i.get('tuition_per_semester', 0) * 2) or float('inf')
+                is_upcoming = False
+                if deadline:
+                    try:
+                        deadline_date = dt.fromisoformat(deadline).date()
+                        is_upcoming = deadline_date > today
+                    except:
+                        is_upcoming = False
+                return (not is_upcoming, tuition, deadline or '')
+            
+            sorted_intakes = sorted(intakes, key=sort_key)
+            
+            # Apply pagination to programs (not universities)
+            page_size = 12  # Reasonable page size for programs
+            start_idx = offset
+            end_idx = min(offset + page_size, len(sorted_intakes))
+            displayed_intakes = sorted_intakes[start_idx:end_idx]
+            displayed_count = len(displayed_intakes)
+            
+            # Use actual program count as total (not the passed total which might be for universities)
+            total_programs = len(sorted_intakes)
+            
+            # Header: "I found X language program(s) at <University Name>:"
+            program_word = "program" if total_programs == 1 else "programs"
+            response_parts.append(f"I found {total_programs} {program_word} at {uni_name}:\n")
+            
+            # List each program
+            for idx, intake in enumerate(displayed_intakes, 1):
+                response_parts.append(format_intake_line(intake, idx=idx))
+            
+            # Pagination: Only show if there's actually more to show
+            # Don't show pagination if total programs ≤ 5 and we're showing all (offset == 0)
+            if total_programs > offset + displayed_count:
+                remaining = total_programs - (offset + displayed_count)
+                start_num = offset + 1
+                end_num = offset + displayed_count
+                response_parts.append(f"\nShowing {start_num}–{end_num} of {total_programs} programs. Say 'show more' for the next page ({remaining} more available).")
+            # If total programs ≤ 5 and we're showing all, don't show pagination (already handled by condition above)
+        
+        else:
+            # MULTI-UNIVERSITY CASE: Select one representative intake per university
+            from collections import defaultdict
+            by_university = defaultdict(list)
+            for intake in intakes:
+                by_university[intake.get('university_id')].append(intake)
+            
+            # Select best intake per university (upcoming deadline, then lowest tuition, then earliest deadline)
+            selected_intakes = []
+            dt_func = datetime
+            today_date = date.today()
+            for uni_id, uni_intakes in by_university.items():
+                # Sort by: upcoming deadline first, then tuition (lowest), then deadline
+                def sort_key(i, dt=dt_func, today=today_date):
+                    deadline = i.get('application_deadline')
+                    tuition = i.get('tuition_per_year') or (i.get('tuition_per_semester', 0) * 2) or float('inf')
+                    is_upcoming = False
+                    if deadline:
+                        try:
+                            deadline_date = dt.fromisoformat(deadline).date()
+                            is_upcoming = deadline_date > today
+                        except:
+                            is_upcoming = False
+                    return (not is_upcoming, tuition, deadline or '')
+                
+                best = sorted(uni_intakes, key=sort_key)[0]
+                selected_intakes.append(best)
+            
+            # Sort selected intakes by university name
+            selected_intakes.sort(key=lambda x: x.get('university_name', ''))
+            
+            # Total unique universities (caller should pass this correctly)
+            # Use max of passed total and computed from intakes (defensive)
+            total_unique_universities = max(total, len(selected_intakes))
+            
+            # Apply pagination to universities
+            page_size = 12
+            start_idx = offset
+            end_idx = min(offset + page_size, len(selected_intakes))
+            displayed_intakes = selected_intakes[start_idx:end_idx]
+            displayed_count = len(displayed_intakes)
+            unique_universities_shown = len(displayed_intakes)
+            
+            # Format pagination header
+            start_num = offset + 1
+            end_num = offset + displayed_count
+            if offset == 0:
+                # Header: "Here are the top N universities with matching programs:"
+                # N = number of unique universities shown (not total)
+                response_parts.append(f"Here are the top {unique_universities_shown} universities with matching programs:\n")
+            else:
+                response_parts.append(f"Showing {start_num}–{end_num} of {total_unique_universities} universities:\n")
+            
+            # List each university (one representative program per university)
+            for idx, intake in enumerate(displayed_intakes, 1):
+                response_parts.append(format_intake_line(intake, idx=idx))
+            
+            # Pagination: Only show if there's actually more to show
+            if total_unique_universities > offset + displayed_count:
+                remaining = total_unique_universities - (offset + displayed_count)
+                response_parts.append(f"\nShowing {start_num}–{end_num} of {total_unique_universities} universities. Say 'show more' for the next page ({remaining} more available).")
+        
+        return {
+            "response": "\n".join(response_parts),
+            "used_db": True,
+            "used_tavily": False,
+            "sources": []
+        }
+    
+    def _is_duration_question(self, text: str) -> bool:
+        """
+        Detect if the user is asking about program duration.
+        Returns True for questions like "how long", "is it 1 year", "one year", "semester", etc.
+        """
+        if not text:
+            return False
+        
+        text_lower = text.lower()
+        duration_keywords = [
+            "how long", "duration", "length",
+            "is it 1 year", "is it one year", "1 year", "one year",
+            "is it 2 year", "is it two year", "2 year", "two year",
+            "semester", "half year", "6 month", "six month",
+            "months", "weeks", "years",
+            "1 semester", "one semester", "two semester"
+        ]
+        
+        return any(kw in text_lower for kw in duration_keywords)
+    
+    def _is_generic_program_query(self, text: str, major_query: Optional[str] = None) -> bool:
+        """
+        Check if the query is generic (not a specific major name).
+        Returns True for queries like "language program", "fees", "documents required", etc.
+        Does NOT return True for duration questions (handled separately).
+        """
+        if not text:
+            return False
+        
+        # Do NOT treat duration questions as generic/list queries
+        if self._is_duration_question(text):
+            return False
+        
+        text_lower = text.lower()
+        major_query_lower = (major_query or "").lower()
+        
+        # Explicit list patterns (required for list mode)
+        list_patterns = [
+            "program list", "programs list", "list programs", "list of programs",
+            "show programs", "show all programs", "available programs",
+            "what programs", "which programs", "all programs",
+            "english taught programs", "chinese taught programs"
+        ]
+        
+        # If it's an explicit list request, return True
+        if any(pattern in text_lower for pattern in list_patterns):
+            return True
+        
+        # Generic program keywords (but NOT just "program" alone)
+        generic_keywords = [
+            "language", "language program", "language course",
+            "fees", "tuition", "application fee", "cost", "price",
+            "documents required", "documents", "requirements",
+            "scholarship", "scholarships"
+        ]
+        
+        # Check if text contains generic keywords (but require explicit patterns, not just "program")
+        if any(kw in text_lower for kw in generic_keywords):
+            # If major_query is also generic or empty, it's a generic query
+            if not major_query or major_query_lower in ["language", "language program", "language course"]:
+                return True
+            # If major_query contains generic keywords, it's generic
+            if any(kw in major_query_lower for kw in ["language", "program", "fees", "tuition", "documents"]):
+                return True
+        
+        return False
+    
+    def _is_pagination_command(self, text: str) -> bool:
+        """
+        Check if the user message is a pagination command.
+        Returns True for: "show more", "more", "next", "next page", "page 2", "continue"
+        """
+        if not text:
+            return False
+        text_lower = text.lower().strip()
+        pagination_commands = [
+            "show more",
+            "more",
+            "next",
+            "next page",
+            "page 2",
+            "continue"
+        ]
+        return any(cmd == text_lower or text_lower.startswith(cmd + " ") for cmd in pagination_commands)
+    
+    def _get_pagination_cache_key(self, partner_id: Optional[int], conversation_history: List[Dict[str, str]], 
+                                 conversation_id: Optional[str] = None) -> Tuple[Optional[int], str]:
+        """
+        Generate stable cache key for pagination state.
+        Uses conversation_id if provided, else extracts from history, else uses stable session fallback.
+        """
+        # If conversation_id param is provided, use it directly
+        if conversation_id:
+            cache_key = (partner_id, conversation_id)
+            print(f"DEBUG: Pagination cache key (from param): {cache_key}")
+            return cache_key
+        
+        # Try to extract conversation_id from history if available
+        extracted_id = None
+        for msg in reversed(conversation_history):
+            if isinstance(msg, dict) and "conversation_id" in msg:
+                extracted_id = str(msg.get("conversation_id"))
+                break
+        
+        if extracted_id:
+            cache_key = (partner_id, extracted_id)
+            print(f"DEBUG: Pagination cache key (from history): {cache_key}")
+            return cache_key
+        
+        # Stable fallback: use session fallback ID (does NOT depend on last messages)
+        if partner_id not in self._session_fallback_id_by_partner:
+            import uuid
+            self._session_fallback_id_by_partner[partner_id] = str(uuid.uuid4())[:8]
+            print(f"DEBUG: Generated stable session fallback ID for partner_id={partner_id}: {self._session_fallback_id_by_partner[partner_id]}")
+        
+        fallback_id = self._session_fallback_id_by_partner[partner_id]
+        cache_key = (partner_id, fallback_id)
+        print(f"DEBUG: Pagination cache key (stable fallback): {cache_key}")
+        
+        # Store this key as last pagination key for this partner (for stable fallback)
+        self._last_pagination_key_by_partner[partner_id] = cache_key
+        
+        return cache_key
+    
+    def _get_pagination_state(self, partner_id: Optional[int], conversation_history: List[Dict[str, str]], 
+                             conversation_id: Optional[str] = None) -> Optional[PaginationState]:
+        """Get pagination state from cache"""
+        cache_key = self._get_pagination_cache_key(partner_id, conversation_history, conversation_id)
+        state = self._pagination_cache.get(cache_key)
+        if state:
+            print(f"DEBUG: Pagination cache HIT for key: {cache_key}")
+        else:
+            print(f"DEBUG: Pagination cache MISS for key: {cache_key}")
+            # Try partner_id fallback key if available
+            if partner_id in self._last_pagination_key_by_partner:
+                fallback_key = self._last_pagination_key_by_partner[partner_id]
+                state = self._pagination_cache.get(fallback_key)
+                if state:
+                    print(f"DEBUG: Pagination cache HIT for fallback key: {fallback_key}")
+                    # Update cache key mapping
+                    cache_key = fallback_key
+        # Check if state is expired (older than 1 hour)
+        if state and time.time() - state.timestamp > 3600:
+            del self._pagination_cache[cache_key]
+            print(f"DEBUG: Pagination state expired, removed from cache")
+            return None
+        return state
+    
+    def _set_pagination_state(self, partner_id: Optional[int], conversation_history: List[Dict[str, str]], 
+                             results: List[Dict[str, Any]], offset: int, total: int, 
+                             page_size: int, intent: str, last_displayed: Optional[List[Dict[str, Any]]] = None,
+                             conversation_id: Optional[str] = None):
+        """Store pagination state in cache"""
+        cache_key = self._get_pagination_cache_key(partner_id, conversation_history, conversation_id)
+        self._pagination_cache[cache_key] = PaginationState(
+            results=results,
+            offset=offset,
+            total=total,
+            page_size=page_size,
+            intent=intent,
+            timestamp=time.time(),
+            last_displayed=last_displayed
+        )
+        print(f"DEBUG: Stored pagination state for key: {cache_key}, offset={offset}, total={total}, page_size={page_size}, last_displayed_count={len(last_displayed) if last_displayed else 0}")
+    
+    def generate_response(self, user_message: str, conversation_history: List[Dict[str, str]], 
+                         partner_id: Optional[int] = None, conversation_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Generate response for partner query.
         Uses database as primary source, Tavily only when necessary.
@@ -1697,12 +2277,121 @@ Output ONLY valid JSON, no other text:"""
         print(f"\n{'='*80}")
         print(f"DEBUG: PartnerAgent.generate_response() called")
         print(f"DEBUG: User message: {user_message}")
+        
+        # Reset multi-track info for this query
+        self._multi_track_info = None
         print(f"DEBUG: Conversation history length: {len(conversation_history)}")
         print(f"{'='*80}\n")
         
         # Normalize Unicode punctuation BEFORE any processing
         user_message_normalized = self._normalize_unicode_text(user_message)
         print(f"DEBUG: Normalized user message: {user_message_normalized}")
+        
+        # Fix 1: Handle pagination commands BEFORE LLM extraction
+        if self._is_pagination_command(user_message):
+            print(f"DEBUG: Pagination command detected")
+            pagination_state = self._get_pagination_state(partner_id, conversation_history, conversation_id)
+            
+            if pagination_state:
+                # Compute next slice
+                next_offset = pagination_state.offset + pagination_state.page_size
+                next_batch = pagination_state.results[next_offset:next_offset + pagination_state.page_size]
+                
+                if next_batch:
+                    print(f"DEBUG: Returning list page offset={next_offset} size={len(next_batch)} total={pagination_state.total}")
+                    # Update pagination state in cache (including last_displayed)
+                    self._set_pagination_state(
+                        partner_id=partner_id,
+                        conversation_history=conversation_history,
+                        results=pagination_state.results,  # Keep all results
+                        offset=next_offset,
+                        total=pagination_state.total,
+                        page_size=pagination_state.page_size,
+                        intent=pagination_state.intent,
+                        last_displayed=next_batch,  # Update with what we're showing now
+                        conversation_id=conversation_id
+                    )
+                    return self._format_list_response_deterministic(
+                        next_batch, next_offset, pagination_state.total,
+                        duration_preference=None, user_message=user_message
+                    )
+                else:
+                    return {
+                        "response": "No more results. You've reached the end.",
+                        "used_db": True,
+                        "used_tavily": False,
+                        "sources": []
+                    }
+            else:
+                return {
+                    "response": "I can show more, but I need the list request again. Please repeat your last query (e.g., 'List language programs for March intake').",
+                    "used_db": False,
+                    "used_tavily": False,
+                    "sources": []
+                }
+        
+        # Fix B: Handle duration questions BEFORE generic/list detection
+        if self._is_duration_question(user_message_normalized):
+            print(f"DEBUG: Duration question detected: {user_message_normalized}")
+            pagination_state = self._get_pagination_state(partner_id, conversation_history, conversation_id)
+            
+            if pagination_state and pagination_state.last_displayed:
+                last_displayed = pagination_state.last_displayed
+                print(f"DEBUG: Found last_displayed with {len(last_displayed)} program(s)")
+                
+                if len(last_displayed) == 1:
+                    # Single program: answer directly
+                    intake = last_displayed[0]
+                    major_name = intake.get('major_name', 'N/A')
+                    tuition_per_year = intake.get('tuition_per_year')
+                    tuition_per_semester = intake.get('tuition_per_semester')
+                    
+                    # Try to infer duration from major name
+                    major_lower = major_name.lower()
+                    if any(term in major_lower for term in ["1 year", "one year", "1-year"]):
+                        duration_answer = "Yes, this is a 1-year program."
+                    elif any(term in major_lower for term in ["1 semester", "one semester", "half year", "6 month", "six month"]):
+                        duration_answer = "No, this is a 1-semester (6-month) program."
+                    elif tuition_per_year:
+                        duration_answer = "The database doesn't explicitly store duration; tuition is annual. This is typically a 1-year foundation/language track unless the university states otherwise."
+                    elif tuition_per_semester:
+                        duration_answer = "The database shows semester-based tuition. This is typically a 1-semester program, but some universities offer both 1-semester and 1-year options. Please check with the university for exact duration."
+                    else:
+                        duration_answer = "The database doesn't explicitly store program duration. Please check with the university or refer to the program details for exact duration information."
+                    
+                    return {
+                        "response": f"{duration_answer}",
+                        "used_db": True,
+                        "used_tavily": False,
+                        "sources": []
+                    }
+                else:
+                    # Multiple programs: ask which one, but try to infer
+                    response_parts = ["Which program are you asking about?"]
+                    for idx, intake in enumerate(last_displayed, 1):
+                        major_name = intake.get('major_name', 'N/A')
+                        major_lower = major_name.lower()
+                        duration_hint = ""
+                        
+                        if any(term in major_lower for term in ["1 year", "one year", "1-year"]):
+                            duration_hint = " (1-year program)"
+                        elif any(term in major_lower for term in ["1 semester", "one semester", "half year", "6 month", "six month"]):
+                            duration_hint = " (1-semester program)"
+                        elif intake.get('tuition_per_year'):
+                            duration_hint = " (typically 1-year, annual tuition)"
+                        elif intake.get('tuition_per_semester'):
+                            duration_hint = " (typically 1-semester, semester tuition)"
+                        
+                        response_parts.append(f"{idx}. {major_name}{duration_hint}")
+                    
+                    return {
+                        "response": "\n".join(response_parts),
+                        "used_db": True,
+                        "used_tavily": False,
+                        "sources": []
+                    }
+            else:
+                print(f"DEBUG: Duration question but no last_displayed found, continuing to normal flow")
         
         current_date = date.today()
         print(f"DEBUG: Current date: {current_date}")
@@ -1718,7 +2407,9 @@ Output ONLY valid JSON, no other text:"""
                 major_query=major_text.lower().strip() if major_text else None,
                 university=None,
                 intake_term=quick.get("intake_term"),
-                intake_year=quick.get("intake_year")
+                intake_year=quick.get("intake_year"),
+                duration_preference=quick.get("duration_preference"),
+                duration_years_target=quick.get("duration_years_target")
             )
             used_quick = True
         else:
@@ -1751,13 +2442,32 @@ Output ONLY valid JSON, no other text:"""
 
         # Normalize major_query if present
         if state.major_query:
+            original_major_query = state.major_query
             state.major_query = self._normalize_unicode_text(state.major_query)
+            # Strip degree phrases from major_query (e.g., "bachelor in chemistry" -> "chemistry")
+            # Also detect degree_level from the phrase if missing
+            text_lower = state.major_query.lower()
+            if not state.degree_level:
+                # Check for degree phrases and set degree_level accordingly
+                if any(phrase in text_lower for phrase in ["bachelor", "bsc", "b.sc"]):
+                    state.degree_level = "Bachelor"
+                elif any(phrase in text_lower for phrase in ["master", "msc", "m.sc"]):
+                    state.degree_level = "Master"
+                elif any(phrase in text_lower for phrase in ["phd", "doctorate"]):
+                    state.degree_level = "PhD"
+            
+            state.major_query = self._strip_degree_from_major_query(state.major_query)
+            # If cleaned value is empty, set to None
+            if not state.major_query or not state.major_query.strip():
+                state.major_query = None
 
         # Intent classifier (rule-based) - detect early for follow-up resolution
         # Use normalized text for intent detection
-        # IMPORTANT: documents_only must be checked BEFORE eligibility_only
+        # IMPORTANT: duration_question must be checked BEFORE other intents
         intent = "general"
-        if any(k in user_message_normalized for k in ["fee", "fees", "tuition", "cost", "price", "how much", "budget", "per year", "per month"]):
+        if self._is_duration_question(user_message_normalized):
+            intent = "duration_question"
+        elif any(k in user_message_normalized for k in ["fee", "fees", "tuition", "cost", "price", "how much", "budget", "per year", "per month"]):
             intent = "fees_only"
         elif any(k in user_message_normalized for k in ["document", "documents", "required documents", "doc list", "paper", "papers", "materials", "what doc", "what documents"]):
             intent = "documents_only"
@@ -1772,7 +2482,7 @@ Output ONLY valid JSON, no other text:"""
 
         # Defensive cleanup: if major_query contains fee/scholarship keywords, set to None
         # Do not put fee/scholarship questions into major_query
-        follow_up_intents = ["fees_only", "fees_compare", "scholarship_only", "documents_only", "eligibility_only"]
+        follow_up_intents = ["fees_only", "fees_compare", "scholarship_only", "documents_only", "eligibility_only", "duration_question"]
         if state.major_query and intent in follow_up_intents:
             major_query_normalized = state.major_query.lower()
             
@@ -1892,6 +2602,72 @@ Output ONLY valid JSON, no other text:"""
                 "sources": []
             }
 
+        # List guardrails: Ask for missing required fields before querying
+        if is_list_query:
+            missing_fields = []
+            if not state.intake_term:
+                missing_fields.append("intake term (March/September)")
+            if not state.degree_level:
+                missing_fields.append("degree level (Language/Bachelor/Master/PhD)")
+            
+            if missing_fields:
+                print(f"DEBUG: List guardrail triggered: missing {', '.join(missing_fields)}")
+                return {
+                    "response": f"To list and compare programs, please specify: {', '.join(missing_fields)}?",
+                    "used_db": False,
+                    "used_tavily": False,
+                    "sources": []
+                }
+            
+            # Fix 4: "Too broad" constraint - if both intake_term and major_query are missing for Language
+            if state.degree_level and "Language" in str(state.degree_level):
+                if not state.intake_term and not state.major_query:
+                    print(f"DEBUG: List guardrail triggered: too broad (missing both intake_term and major_query for Language)")
+                    # Provide a small preview: top 5 by soonest deadline or cheapest tuition
+                    # Query a small sample to show preview
+                    preview_intakes = self._get_upcoming_intakes(
+                        current_date=current_date,
+                        degree_level=state.degree_level,
+                        university_id=None,
+                        major_ids=None,
+                        intake_term=None,
+                        intake_year=None,
+                        teaching_language=None
+                    )[:5]  # Just get 5 for preview
+                    
+                    if preview_intakes:
+                        preview_parts = ["Here's a preview of available language programs:\n"]
+                        for intake in preview_intakes[:5]:
+                            uni_name = intake.get('university_name', 'N/A')
+                            major_name = intake.get('major_name', 'N/A')
+                            intake_term = intake.get('intake_term', 'N/A')
+                            deadline = intake.get('application_deadline', 'N/A')
+                            preview_parts.append(f"- {uni_name} - {major_name} ({intake_term} intake, deadline: {deadline})")
+                        preview_parts.append("\nWhich intake term (March/September) and which program type (one semester/one year)?")
+                        return {
+                            "response": "\n".join(preview_parts),
+                            "used_db": True,
+                            "used_tavily": False,
+                            "sources": []
+                        }
+                    else:
+                        return {
+                            "response": "Which intake term (March/September) and which program type (one semester/one year)?",
+                            "used_db": False,
+                            "used_tavily": False,
+                            "sources": []
+                        }
+            
+            # For non-Language degree levels, require major_query
+            if state.degree_level and "Language" not in str(state.degree_level) and not state.major_query:
+                print(f"DEBUG: List guardrail triggered: missing major_query for degree_level={state.degree_level}")
+                return {
+                    "response": "Which major/subject should I list and compare (e.g., Chemistry, Computer Science, MBBS)?",
+                    "used_db": False,
+                    "used_tavily": False,
+                    "sources": []
+                }
+        
         # Try to detect university from the current user message if absent
         if not state.university:
             detected_uni = self._detect_university_in_text(user_message)
@@ -1923,6 +2699,7 @@ Output ONLY valid JSON, no other text:"""
         print(f"DEBUG: Starting deterministic matching - state.university={state.university}, state.major_query={state.major_query}, state.degree_level={state.degree_level}, is_list_query={is_list_query}")
         
         # Step 1: Match university if specified
+        candidate_university_ids: Optional[List[int]] = None
         if state.university:
             matched_uni, uni_dict, uni_matches = self._fuzzy_match_university(state.university)
             if matched_uni and uni_dict:
@@ -1933,6 +2710,51 @@ Output ONLY valid JSON, no other text:"""
                 for uni_match, score in uni_matches[:3]:
                     match_notes.append(f"  - {uni_match['name']} (match score: {score:.2f})")
                 match_notes.append("Please ask which university they prefer.")
+        elif state.city or state.province:
+            # Location-based filtering: find universities by city/province
+            candidate_university_ids = self._find_university_ids_by_location(state.city, state.province)
+            if not candidate_university_ids:
+                # No universities found in requested location
+                location_str = ""
+                if state.city and state.province:
+                    location_str = f"in {state.city}, {state.province}"
+                elif state.city:
+                    location_str = f"in {state.city}"
+                elif state.province:
+                    location_str = f"in {state.province}"
+                
+                intake_term_str = (state.intake_term or "").title() if state.intake_term else ""
+                degree_str = state.degree_level or "programs"
+                
+                return {
+                    "response": f"I don't currently have {intake_term_str} {degree_str} {location_str} in our partner database. Would you like to search nearby cities, province-wide, or any city?",
+                    "used_db": True,
+                    "used_tavily": False,
+                    "sources": []
+                }
+            print(f"DEBUG: Location filter matched {len(candidate_university_ids)} universities: {candidate_university_ids}")
+        
+        # Check for generic program queries (treat as list queries when university is specified)
+        # This must happen after university_id is defined
+        if not is_list_query and university_id and self._is_generic_program_query(user_message_normalized, state.major_query):
+            print(f"DEBUG: Detected generic program query - treating as list query for university_id={university_id}")
+            is_list_query = True
+            state.major_query = None
+            show_catalog = True
+        
+        # Fix 2: Generic "language / language course / language program" must not match a single major
+        generic_language_phrases = ["language", "language course", "language program", "foundation program"]
+        if (university_id and 
+            state.intake_term and 
+            state.major_query and 
+            any(phrase in state.major_query.lower() for phrase in generic_language_phrases)):
+            print(f"DEBUG: Detected generic language query '{state.major_query}' - treating as list query, clearing major_query")
+            state.major_query = None
+            is_list_query = True
+            show_catalog = True
+            # Ensure degree_level is Language if not set
+            if not state.degree_level:
+                state.degree_level = "Language"
         
         # Normalize intake term early (needed for special handling blocks)
         norm_intake_term = self._normalize_intake_term_enum(state.intake_term)
@@ -1963,7 +2785,8 @@ Output ONLY valid JSON, no other text:"""
                 major_ids=None,  # Don't filter by major - get all Language programs
                 intake_term=norm_intake_term,
                 intake_year=state.intake_year,
-                teaching_language=teaching_language_filter  # Only filter if user explicitly requested it
+                teaching_language=teaching_language_filter,  # Only filter if user explicitly requested it
+                university_ids=candidate_university_ids if not university_id else None
             )
             
             if len(all_language_intakes) > 1:
@@ -2171,7 +2994,8 @@ Output ONLY valid JSON, no other text:"""
                         available_majors = self._get_majors_for_list_query(
                             university_id=university_id,
                             degree_level=state.degree_level,
-                            teaching_language=state.teaching_language
+                            teaching_language=state.teaching_language,
+                            university_ids=candidate_university_ids if not university_id else None
                         )
                         
                         if available_majors:
@@ -2226,7 +3050,8 @@ Output ONLY valid JSON, no other text:"""
             majors_for_university = self._get_majors_for_list_query(
                 university_id=university_id,
                 degree_level=state.degree_level,
-                teaching_language=state.teaching_language
+                teaching_language=state.teaching_language,
+                university_ids=candidate_university_ids if not university_id else None
             )
             
             if len(majors_for_university) > 1:
@@ -2389,7 +3214,8 @@ Output ONLY valid JSON, no other text:"""
             majors_list = self._get_majors_for_list_query(
                 university_id=university_id,
                 degree_level=state.degree_level,
-                teaching_language=state.teaching_language
+                teaching_language=state.teaching_language,
+                university_ids=candidate_university_ids if not university_id else None
             )
             
             if majors_list:
@@ -2405,7 +3231,8 @@ Output ONLY valid JSON, no other text:"""
                     major_ids=major_ids_from_list,  # Use majors from the list
                     intake_term=norm_intake_term,
                     intake_year=state.intake_year,
-                    teaching_language=state.teaching_language
+                    teaching_language=state.teaching_language,
+                    university_ids=candidate_university_ids if not university_id else None
                 )
                 t_db_end = time.perf_counter()
                 print(f"DEBUG: DB intakes load time: {(t_db_end - t_db_start):.3f}s, count={len(filtered_intakes)}")
@@ -2476,11 +3303,42 @@ Output ONLY valid JSON, no other text:"""
             major_ids=major_ids if major_ids else None,
             intake_term=norm_intake_term,
             intake_year=state.intake_year,
-            teaching_language=state.teaching_language
+            teaching_language=state.teaching_language,
+            university_ids=candidate_university_ids if not university_id else None
         )
         
-        # For fees_compare, if user asked "one year" vs "one semester", filter by major name AFTER retrieving intakes
-        if intent == "fees_compare" and filtered_intakes:
+        # Apply duration preference filtering if specified
+        if state.duration_years_target is not None and filtered_intakes:
+            print(f"DEBUG: Applying duration filter - target={state.duration_years_target} years")
+            filtered_by_duration = []
+            for intake in filtered_intakes:
+                major_name = intake.get('major_name', '')
+                major_info = next((m for m in self.all_majors if m["id"] == intake.get('major_id')), None)
+                
+                # Check duration_years from major if available
+                duration_years = None
+                if major_info and major_info.get('duration_years'):
+                    duration_years = major_info.get('duration_years')
+                else:
+                    # Infer from major name
+                    duration_years = self._infer_duration_from_major_name(major_name)
+                
+                # Match if duration matches target (with tolerance for 0.5 vs 1.0)
+                if duration_years is not None:
+                    if abs(duration_years - state.duration_years_target) < 0.1:  # Allow small tolerance
+                        filtered_by_duration.append(intake)
+                else:
+                    # If duration cannot be inferred, include it (user can decide)
+                    filtered_by_duration.append(intake)
+            
+            if filtered_by_duration:
+                print(f"DEBUG: Duration filter: {len(filtered_intakes)} -> {len(filtered_by_duration)} intakes")
+                filtered_intakes = filtered_by_duration
+            else:
+                print(f"DEBUG: Duration filter: No intakes match duration preference {state.duration_years_target} years")
+        
+        # For fees_compare, if user asked "one year" vs "one semester", filter by major name AFTER retrieving intakes (legacy support)
+        if intent == "fees_compare" and filtered_intakes and state.duration_years_target is None:
             if "one year" in user_message_normalized or "1 year" in user_message_normalized:
                 print(f"DEBUG: Filtering fees_compare results to 'One Year' programs")
                 filtered_intakes = [i for i in filtered_intakes if "one year" in i.get('major_name', '').lower() or "1 year" in i.get('major_name', '').lower()]
@@ -2492,6 +3350,58 @@ Output ONLY valid JSON, no other text:"""
         print(f"DEBUG: Programs matched before filters: {len(major_ids) if major_ids else 'all'} major(s)")
         print(f"DEBUG: Programs matched after filters (upcoming intakes): {len(filtered_intakes)} intake(s)")
         print(f"DEBUG: DB intakes load time: {(t_db_end - t_db_start):.3f}s, count={len(filtered_intakes)} (matched majors: {len(major_ids) if major_ids else 0}, intake_term_enum={norm_intake_term})")
+
+        # Fallback to latest intakes for fees/docs/scholarship intents if upcoming returns 0
+        using_latest_intakes = False
+        fallback_intents = ["fees_only", "fees_compare", "scholarship_only", "documents_only", "eligibility_only"]
+        if intent in fallback_intents and not filtered_intakes:
+            print(f"DEBUG: {intent} query returned 0 upcoming intakes - falling back to latest intakes (any deadline)...")
+            print(f"REGRESSION_TEST: Fallback triggered for intent={intent}, university_id={university_id}, major_ids={major_ids}")
+            filtered_intakes = self._get_latest_intakes_any_deadline(
+                degree_level=state.degree_level,
+                university_id=university_id,
+                major_ids=major_ids if major_ids else None,
+                intake_term=norm_intake_term,
+                intake_year=state.intake_year,
+                teaching_language=state.teaching_language,
+                limit_per_major=3,
+                university_ids=candidate_university_ids if not university_id else None
+            )
+            if filtered_intakes:
+                using_latest_intakes = True
+                print(f"DEBUG: Fallback to latest intakes returned {len(filtered_intakes)} intake(s)")
+                print(f"REGRESSION_TEST: Fallback successful - using_latest_intakes=True, intake_count={len(filtered_intakes)}")
+            else:
+                print(f"REGRESSION_TEST: Fallback returned 0 intakes - no matching programs in DB")
+        
+        # REGRESSION_TEST: Verify location filtering correctness
+        if state.city and filtered_intakes and candidate_university_ids:
+            # Check that all results are actually in the requested city
+            city_normalized = state.city.lower().strip()
+            mismatched_cities = []
+            for intake in filtered_intakes:
+                uni_id = intake.get('university_id')
+                uni_info = next((u for u in self.all_universities if u["id"] == uni_id), None)
+                if uni_info:
+                    uni_city = (uni_info.get("city") or "").lower().strip()
+                    if uni_city != city_normalized:
+                        mismatched_cities.append(f"university_id={uni_id} ({uni_info.get('name')}) in city='{uni_city}' (expected '{city_normalized}')")
+            
+            if mismatched_cities:
+                print(f"REGRESSION_TEST WARNING: Location filter mismatch! Requested city='{state.city}', but found intakes in different cities:")
+                for mismatch in mismatched_cities[:5]:  # Limit to first 5
+                    print(f"  - {mismatch}")
+                # Fall back to "no programs found in city" response
+                intake_term_str = norm_intake_term.value.title() if norm_intake_term else ""
+                degree_str = state.degree_level or "programs"
+                return {
+                    "response": f"I don't currently have {intake_term_str} {degree_str} in {state.city} in our partner database. Would you like to search nearby cities, province-wide, or any city?",
+                    "used_db": True,
+                    "used_tavily": False,
+                    "sources": []
+                }
+            else:
+                print(f"REGRESSION_TEST: Location filter verified - all {len(filtered_intakes)} intakes are in requested city '{state.city}'")
 
         # Handle fee queries when major_query is None but we have university+degree
         # For fee/scholarship queries, if no major_ids and we have university+degree, fetch majors and auto-select or list
@@ -2527,7 +3437,8 @@ Output ONLY valid JSON, no other text:"""
                         intake_term=norm_intake_term,
                         intake_year=state.intake_year,
                         teaching_language=state.teaching_language,
-                        limit_per_major=3
+                        limit_per_major=3,
+                        university_ids=candidate_university_ids if not university_id else None
                     )
                     if filtered_intakes:
                         using_latest_intakes = True
@@ -2542,7 +3453,8 @@ Output ONLY valid JSON, no other text:"""
                     intake_term=norm_intake_term,
                     intake_year=state.intake_year,
                     teaching_language=state.teaching_language,
-                    limit_per_major=1  # Just need one per major to compare
+                    limit_per_major=1,  # Just need one per major to compare
+                    university_ids=candidate_university_ids if not university_id else None
                 )
                 
                 if latest_intakes_all:
@@ -2631,7 +3543,8 @@ Output ONLY valid JSON, no other text:"""
                 intake_term=norm_intake_term,
                 intake_year=state.intake_year,
                 teaching_language=state.teaching_language,
-                limit_per_major=3
+                limit_per_major=3,
+                university_ids=candidate_university_ids if not university_id else None
             )
             
             if latest_intakes:
@@ -2773,11 +3686,12 @@ Output ONLY valid JSON, no other text:"""
             if should_skip_early_return:
                 print(f"DEBUG: {intent} query with no intakes after fallback - checking if majors exist...")
                 # Fallback should have already been tried, so if we still have no intakes, check majors
-                if university_id and state.degree_level:
+                if (university_id or candidate_university_ids) and state.degree_level:
                     majors_list = self._get_majors_for_list_query(
                         university_id=university_id,
                         degree_level=state.degree_level,
-                        teaching_language=state.teaching_language
+                        teaching_language=state.teaching_language,
+                        university_ids=candidate_university_ids if not university_id else None
                     )
                     if majors_list:
                         uni_name = next((u["name"] for u in self.all_universities if u["id"] == university_id), "this university")
@@ -2874,7 +3788,8 @@ Output ONLY valid JSON, no other text:"""
                     majors_list = self._get_majors_for_list_query(
                         university_id=university_id,
                         degree_level=state.degree_level,
-                        teaching_language=state.teaching_language
+                        teaching_language=state.teaching_language,
+                        university_ids=candidate_university_ids if not university_id else None
                     )
                     
                     if majors_list:
@@ -2997,16 +3912,133 @@ Output ONLY valid JSON, no other text:"""
             print(f"DEBUG: Ranked {len(filtered_intakes)} intakes by fees. Cheapest: {get_effective_tuition(filtered_intakes[0]) if filtered_intakes else 'N/A'}")
         
         # Hard cap to avoid sending huge lists to LLM
+        original_count = len(filtered_intakes)
         if is_list_query:
-            filtered_intakes = filtered_intakes[:300]
+            # Cap at MAX_LIST_INTAKES for list queries
+            filtered_intakes = filtered_intakes[:self.MAX_LIST_INTAKES]
+            # Store full results for pagination
+            self.last_list_results = filtered_intakes.copy()
+            self.last_list_offset = 0
+            uniq_unis = len({i['university_id'] for i in filtered_intakes})
+            print(f"DEBUG: List mode capped: universities_shown={uniq_unis} total={original_count} offset=0")
         elif intent == "fees_compare":
             # For fees_compare, load more intakes (up to 50) to compare
             filtered_intakes = filtered_intakes[:50]
         else:
             filtered_intakes = filtered_intakes[:40]
+        
         if is_list_query:
             uniq_unis = len({i['university_id'] for i in filtered_intakes})
             print(f"DEBUG: List query unique universities: {uniq_unis}, intake_count={len(filtered_intakes)}")
+            
+            # Fix 4: For list queries with Language degree_level OR fees_only/fees_compare, ALWAYS use deterministic formatter
+            # Never build DB context or call OpenAI for these
+            is_language_list = state.degree_level and "Language" in str(state.degree_level)
+            should_use_deterministic = (intent in ["fees_compare", "fees_only"]) or is_language_list
+            
+            if should_use_deterministic:
+                print(f"DEBUG: Using deterministic formatter for list query with intent={intent}, is_language={is_language_list}")
+                # Select best intake per university (up to MAX_LIST_UNIVERSITIES)
+                from collections import defaultdict
+                by_university = defaultdict(list)
+                for intake in filtered_intakes:
+                    by_university[intake.get('university_id')].append(intake)
+                
+                # Select best intake per university
+                selected_intakes = []
+                # Import datetime locally to avoid closure issues
+                from datetime import datetime as dt_func
+                current_dt = current_date
+                for uni_id, uni_intakes in list(by_university.items())[:self.MAX_LIST_UNIVERSITIES]:
+                    # Sort by: upcoming deadline first, then tuition (lowest), then deadline
+                    def sort_key(i, dt=dt_func, current=current_dt):
+                        deadline = i.get('application_deadline')
+                        tuition = i.get('tuition_per_year') or (i.get('tuition_per_semester', 0) * 2) or float('inf')
+                        is_upcoming = False
+                        if deadline:
+                            try:
+                                deadline_date = dt.fromisoformat(deadline).date()
+                                is_upcoming = deadline_date > current
+                            except:
+                                is_upcoming = False
+                        return (not is_upcoming, tuition, deadline or '')
+                    
+                    best = sorted(uni_intakes, key=sort_key)[0]
+                    selected_intakes.append(best)
+                
+                # Compute total unique universities for pagination
+                # Check if single-university case
+                unique_uni_ids = set(i.get('university_id') for i in filtered_intakes if i.get('university_id'))
+                if len(unique_uni_ids) == 1:
+                    # Single-university: total = total programs (intakes)
+                    total_for_formatter = len(filtered_intakes)
+                else:
+                    # Multi-university: total = unique universities (not intakes)
+                    total_for_formatter = len(unique_uni_ids)
+                
+                # Store pagination state in cache (including last_displayed for follow-up questions)
+                self._set_pagination_state(
+                    partner_id=partner_id,
+                    conversation_history=conversation_history,
+                    results=filtered_intakes,  # Store all results, not just selected
+                    offset=0,
+                    total=total_for_formatter,  # Use correct total (programs or universities)
+                    page_size=self.MAX_LIST_UNIVERSITIES,
+                    intent=intent,
+                    last_displayed=selected_intakes,  # Store what we're actually showing to the user
+                    conversation_id=conversation_id
+                )
+                
+                # Store last_selected_major_id for duration questions (use first intake's major_id if available)
+                if selected_intakes and selected_intakes[0].get('major_id'):
+                    self.last_selected_major_id = selected_intakes[0].get('major_id')
+                    print(f"DEBUG: Stored last_selected_major_id={self.last_selected_major_id} for duration questions")
+                
+                response = self._format_list_response_deterministic(
+                    selected_intakes, 0, total_for_formatter,
+                    duration_preference=state.duration_preference,
+                    user_message=user_message
+                )
+                print(f"DEBUG: Returning deterministic list response (early return, no LLM call)")
+                return response
+        
+        # Multi-track handling: Check for multiple teaching languages
+        # Group intakes by teaching language when same university+degree+term+year but different languages
+        if filtered_intakes and not is_list_query and not state.teaching_language:
+            from collections import defaultdict
+            by_track = defaultdict(list)
+            for intake in filtered_intakes:
+                eff_lang = intake.get('effective_teaching_language') or intake.get('teaching_language') or 'Unknown'
+                # Group by university_id + degree_level + intake_term + intake_year + teaching_language
+                track_key = (
+                    intake.get('university_id'),
+                    str(intake.get('degree_level', '')),
+                    intake.get('intake_term', ''),
+                    intake.get('intake_year'),
+                    eff_lang
+                )
+                by_track[track_key].append(intake)
+            
+            # Check if we have multiple distinct teaching languages for the same university+degree+term+year
+            if len(by_track) > 1:
+                # Check if tracks differ only by teaching language
+                track_keys_by_base = defaultdict(list)
+                for track_key, intakes in by_track.items():
+                    base_key = track_key[:4]  # university_id, degree_level, intake_term, intake_year
+                    track_keys_by_base[base_key].append((track_key[4], intakes))  # teaching_language, intakes
+                
+                # If we have multiple tracks for the same base (different languages), handle multi-track
+                for base_key, tracks in track_keys_by_base.items():
+                    if len(tracks) > 1:
+                        track_languages = [lang for lang, _ in tracks]
+                        print(f"DEBUG: Multi-track detected - {len(tracks)} teaching languages for same university+degree+term+year")
+                        print(f"REGRESSION_TEST: Multi-track detected - languages={track_languages}, track_count={len(tracks)}")
+                        # Store multi-track info for later use in response building
+                        self._multi_track_info = {
+                            'tracks': tracks,
+                            'base_key': base_key
+                        }
+                        break
         
         # Update conversation memory when a program is recommended (use first/best match)
         if filtered_intakes and not is_list_query:
@@ -3267,6 +4299,19 @@ IMPORTANT INSTRUCTIONS:
         
         fee_focus = bool(re.search(r'\b(fee|fees|tuition|cost|expense|charge|budget)\b', lower))
 
+        # Duration preference detection
+        duration_preference = None
+        duration_years_target = None
+        if re.search(r'\b(1\s+semester|one\s+semester|half\s+year|6\s+month|six\s+month)\b', lower):
+            duration_preference = "one_semester"
+            duration_years_target = 0.5
+        elif re.search(r'\b(2\s+semester|two\s+semester)\b', lower):
+            duration_preference = "two_semester"
+            duration_years_target = 1.0
+        elif re.search(r'\b(1\s+year|one\s+year)\b', lower):
+            duration_preference = "one_year"
+            duration_years_target = 1.0
+
         # Degree level quick mapping
         degree_level = None
         degree_map = {
@@ -3299,6 +4344,8 @@ IMPORTANT INSTRUCTIONS:
             "major_text": cleaned,
             "fee_focus": fee_focus,
             "degree_level": degree_level,
+            "duration_preference": duration_preference,
+            "duration_years_target": duration_years_target,
             "confident": confident
         }
 

@@ -86,7 +86,7 @@ CURRENT DATE AWARENESS:
 - For deadlines, calculate days remaining from CURRENT DATE to the deadline
 
 USER TYPES:
-- Stranger: no structured lead info collected yet (nationality + contact info + study interest not all provided). For strangers, answer using RAG and general knowledge. Do NOT pretend to know their exact fees and deadlines from the database. Use approximate values from RAG documents.
+- Stranger: no structured lead info collected yet (nationality + contact info + study interest not all provided). For strangers, you MAY use database to provide limited summaries (2–3 options + tuition range). Avoid overwhelming details. Ask for signup/contact for exact personalized guidance. Use RAG for general process / living cost / visa / CSCA explanations, not for tuition when DB has values.
 - Lead: user has provided nationality + contact info (phone/email/whatsapp/wechat) + study interest, and lead was automatically collected. For leads, use the database to give exact fees, deadlines, scholarship_info, and documents_required (if their major/university matches MalishaEdu supported options).
 
 PROFILE STATE PRIORITY:
@@ -249,44 +249,38 @@ MalishaEdu Services (mention when relevant, not all at once):
 - Airport pickup, accommodation, bank account, SIM card after arrival
 - Dedicated country-specific counsellors
 
-COST INFORMATION HANDLING (CRITICAL):
-- RAG DOCUMENTS CONTAIN STRUCTURED COST PROFILES:
-  * Ranking-based cost profiles: "reputed" (top tier, world ranking up to ~400), "average" (mid tier, ranking 401-1000), "below_average" (lower tier, ranking above 1000 or not ranked)
-  * Each ranking bucket has cost ranges for: chinese_language_or_other_non_degree, bachelor, masters, phd, accommodation, insurance_fee, medical_fee
-  * University-specific generic fees: Each university has structured data with generic_fees for non_degree_tuition_yearly, bachelor_tuition_yearly, masters_tuition_yearly, phd_tuition_yearly, accommodation_fees, insurance_fee, visa_extension_fee, medical_in_china_fee
-  * **MALISHAEDU SERVICE CHARGES** (from RAG documents - see detailed table below):
-    - Service charges vary by degree level, teaching language, and scholarship type
-    - Application deposit: 80 USD (required when sending documents, refundable if no admission due to MalishaEdu)
-    - Full service charges are paid after receiving admission notice and JW202 copy
-    - For detailed service charge table, search RAG for "MalishaEdu service charges" or "MalishaEdu service fee"
+COST INFORMATION HANDLING (CRITICAL - DB-FIRST APPROACH):
+- **CRITICAL: For cost/tuition questions, query DATABASE program_intakes FIRST (not RAG).**
+- If user asks about tuition/cost AND we can infer degree_level/program_type/intake_term from conversation:
+  * Query DB program_intakes for matching partner programs
+  * If DB returns matches: summarize from DB (show 2-3 cheapest options)
+  * If DB returns 0 matches: fall back to short "typical range" (no long breakdown)
+- **MalishaEdu Application Deposit: 80 USD** (required when sending documents, refundable if no admission due to MalishaEdu) - ALWAYS mention this when discussing costs
+- **DO NOT dump the whole 10-item cost list unless user explicitly asks for "full breakdown".**
+- Keep responses concise: show top 2-3 options with key info (University - Program - Tuition - Application fee - Deadline)
+- **MALISHAEDU SERVICE CHARGES** (from RAG documents ONLY when user explicitly asks "service fee / service charge"):
+  - Service charges vary by degree level, teaching language, and scholarship type
+  - Application deposit: 80 USD (required when sending documents, refundable if no admission due to MalishaEdu)
+  - Full service charges are paid after receiving admission notice and JW202 copy
+  - For detailed service charge table, search RAG for "MalishaEdu service charges" or "MalishaEdu service fee"
 
 - WHEN USER ASKS ABOUT COST/TUITION:
-  * ALWAYS search RAG documents first for structured cost profiles AND MalishaEdu service charges
-  * Identify ranking bucket from user query: "top/reputed/best" → reputed, "normal/average/regular" → average, "below average/cheap/affordable" → below_average
-  * Identify program type: bachelor, masters, phd, or chinese_language_or_other_non_degree
-  * Identify scholarship type: full scholarship (tuition+accommodation free, with/without stipend), partial scholarship, or self-paid
-  * Provide COMPREHENSIVE cost breakdown including:
-    1. Application fee/Registration fee (non-refundable) - from database if available, otherwise mention typical range
-    2. **MalishaEdu Application Deposit: 80 USD** (required when sending documents, refundable if no admission due to MalishaEdu) - ALWAYS mention this when discussing costs
-    3. Tuition (per year) - from RAG cost profiles based on ranking bucket and program type
-    4. Accommodation fee (per year) - from RAG cost profiles
-    5. Insurance fee (per year) - from RAG cost profiles (typically 800 CNY)
-    6. One-time China arrival medical fee - from RAG cost profiles (typically 400-600 CNY)
-    7. Living cost range (per month) - mention typical range: 1,500-3,000 RMB/month depending on city
-    8. Visa renewal/extension fee - from RAG or mention typical: 400-800 RMB/year
-    9. **MalishaEdu Service Charge** - from RAG documents based on degree level, teaching language, and scholarship type (see service charge table in RAG)
-  * Calculate and show TOTAL ESTIMATED COST for first year (including MalishaEdu service charge)
-  * IMPORTANT: Always mention that MalishaEdu service charges are for successful applications and include comprehensive admission support, scholarship guidance, and post-arrival services
+  * **DB-FIRST**: Query database program_intakes if degree_level/intake_term can be inferred
+  * **Only if DB returns 0 matches**: Use short "typical range" from RAG (do NOT provide long breakdown)
+  * **Never promise "more info" and then repeat the same generic text**
+  * If user later provides nationality + intake term, the next answer MUST include at least 2 concrete DB program examples (when available)
 
 - BEFORE LEAD COLLECTION:
-  * Use RAG cost profiles (ranking-based or university-specific)
-  * After providing generic cost breakdown, STRONGLY ENCOURAGE: "For precise cost information tailored to your specific profile and chosen programs, please sign up at /signup (or log in at /login). Once you sign up, I can give you exact fees from our database for programs that match your interests."
-  * Mention: "Creating a free MalishaEdu account will allow me to track your application and provide personalized cost estimates based on your selected programs."
+  * Query DB program_intakes if degree_level/intake_term are known
+  * Show 2-3 cheapest options from DB with: University - Program - Tuition - Application fee - Deadline
+  * Ask ONE question: "Do you prefer 1 semester or 1 year?" OR "Any preferred city?"
+  * CTA: "If you sign up (/signup), I can save these and give exact total cost + document checklist."
+  * If DB has no matches, provide short typical range, then encourage signup
 
 - AFTER LEAD COLLECTION:
-  * Use RAG cost profiles for general estimates
-  * ALSO check database for specific program costs (from program_intakes table)
-  * If database has specific fees, use EXACT values: tuition_per_year, tuition_per_semester, application_fee, accommodation_fee, service_fee, medical_insurance_fee, arrival_medical_checkup_fee, visa_extension_fee
+  * Query database program_intakes for specific program costs
+  * Use EXACT values from database: tuition_per_year, tuition_per_semester, application_fee, accommodation_fee, service_fee, medical_insurance_fee, arrival_medical_checkup_fee, visa_extension_fee
+  * Show 2-3 options from DB (sorted by cheapest if user asks "lowest/cheapest")
   * Calculate total cost including all fees from database
   * If database has scholarship_info, explain constraints and how to apply
   * STRONGLY ENCOURAGE signup/login: "To get the most accurate cost breakdown for your selected programs and track your application, please sign up or log in to your MalishaEdu account."
@@ -490,6 +484,14 @@ Style Guidelines:
         
         # Load all majors with university and degree level associations at startup
         self.all_majors = self._load_all_majors()
+        
+        # Pagination state for "show more" queries
+        self.last_list_results: List[ProgramIntake] = []
+        self.last_list_offset: int = 0
+        
+        # Follow-up resolver state
+        self.last_intent: Optional[str] = None
+        self.last_state: Optional[StudentProfileState] = None
     
     def _load_all_universities(self) -> List[Dict[str, Any]]:
         """Load all partner universities from database at startup"""
@@ -1397,6 +1399,482 @@ Return the JSON object:"""
             return matches[0][0]
         return None
     
+    def _is_pagination_command(self, text: str) -> bool:
+        """Check if the user message is a pagination command"""
+        if not text:
+            return False
+        text_lower = text.lower().strip()
+        pagination_commands = ["show more", "more", "next", "next page", "page 2", "continue"]
+        return any(cmd == text_lower or text_lower.startswith(cmd + " ") for cmd in pagination_commands)
+    
+    def _detect_cost_intent(self, user_message: str) -> str:
+        """
+        Detect lightweight intent for cost questions.
+        Returns: 'fees_only', 'fees_compare', 'deadlines_only', or 'general'
+        """
+        user_msg_lower = user_message.lower()
+        
+        if any(term in user_msg_lower for term in ['compare', 'comparison', 'lowest', 'cheapest', 'best cost', 'which is cheaper']):
+            return 'fees_compare'
+        elif any(term in user_msg_lower for term in ['deadline', 'when', 'application deadline', 'last date']):
+            return 'deadlines_only'
+        elif any(term in user_msg_lower for term in ['cost', 'tuition', 'fees', 'fee', 'how much', 'price', 'expense']):
+            return 'fees_only'
+        else:
+            return 'general'
+    
+    def infer_intake_year(self, intake_term: Optional[str], intake_year: Optional[int], current_date) -> Optional[int]:
+        """
+        Deterministic intake year inference helper.
+        If intake_year already set, keep it.
+        If intake_term is "March": if current_date is after March 31 -> use next year, else current year.
+        If intake_term is "September": if current_date after Sep 30 -> use next year else current year.
+        IMPORTANT: If user explicitly says "March 2027" don't override.
+        """
+        if intake_year:
+            return intake_year
+        
+        if not intake_term:
+            return None
+        
+        current_year = current_date.year
+        current_month = current_date.month
+        current_day = current_date.day
+        
+        intake_term_lower = intake_term.lower()
+        
+        if "march" in intake_term_lower:
+            # If after March 31, use next year
+            if current_month > 3 or (current_month == 3 and current_day > 31):
+                return current_year + 1
+            else:
+                return current_year
+        elif "september" in intake_term_lower:
+            # If after September 30, use next year
+            if current_month > 9 or (current_month == 9 and current_day > 30):
+                return current_year + 1
+            else:
+                return current_year
+        
+        return None
+    
+    def _detect_sales_intent(self, user_message: str) -> str:
+        """
+        Deterministic intent detector for SalesAgent.
+        Returns: 'list_programs', 'fees_only', 'fees_compare', 'earliest_intake', or 'general'
+        """
+        user_msg_lower = user_message.lower()
+        
+        # fees_compare triggers on: cheapest, lowest, compare, minimum
+        if any(term in user_msg_lower for term in ['cheapest', 'lowest', 'compare', 'comparison', 'minimum', 'min cost', 'best price']):
+            return 'fees_compare'
+        # fees_only triggers on: tuition, fee, cost, how much, price
+        elif any(term in user_msg_lower for term in ['tuition', 'fee', 'fees', 'cost', 'costing', 'how much', 'price', 'expense']):
+            return 'fees_only'
+        # earliest_intake triggers on: earliest, soonest, next intake
+        elif any(term in user_msg_lower for term in ['earliest', 'soonest', 'next intake', 'when can i start', 'earliest start']):
+            return 'earliest_intake'
+        # list_programs triggers on: list, universities, options, suggest, which university
+        elif any(term in user_msg_lower for term in ['list', 'universities', 'options', 'show me', 'suggest', 'which university', 'what programs', 'which programs', 'recommend']):
+            return 'list_programs'
+        else:
+            return 'general'
+    
+    def _get_major_ids_by_fuzzy_match(self, major_name: str, degree_level: Optional[str] = None) -> List[int]:
+        """
+        Helper to get major IDs by fuzzy matching major name.
+        Returns list of major IDs that match the query.
+        """
+        if not major_name:
+            return []
+        
+        # Use fuzzy matching
+        matched_name, similar_matches = self._fuzzy_match_major(major_name, degree_level=degree_level, threshold=0.4)
+        
+        # Collect all matching major IDs from all_majors array
+        major_ids = []
+        major_name_lower = major_name.lower()
+        
+        for major in self.all_majors:
+            if degree_level and major.get("degree_level"):
+                if degree_level.lower() not in major["degree_level"].lower():
+                    continue
+            
+            major_db_name = major["name"].lower()
+            # Check if it's in the matched list
+            if matched_name and major["name"] == matched_name:
+                major_ids.append(major["id"])
+            elif major["name"] in similar_matches:
+                major_ids.append(major["id"])
+            # Also check for substring match
+            elif major_name_lower in major_db_name or major_db_name in major_name_lower:
+                major_ids.append(major["id"])
+        
+        # Remove duplicates
+        return list(set(major_ids))
+    
+    def get_matching_intakes(self, student_state, limit=30):
+        """
+        DB-lite querying: get matching intakes using DBQueryService.
+        Filters: degree_level, major (fuzzy), intake_term + inferred intake_year, teaching_language, upcoming deadlines.
+        Fix 5: Improved major fuzzy matching for queries like "International trade bachelor earliest intake"
+        """
+        from datetime import datetime, timezone
+        from app.models import IntakeTerm, ProgramIntake, Major, University
+        
+        current_date = datetime.now(timezone.utc).date()
+        
+        # Infer intake_year if not set
+        inferred_year = self.infer_intake_year(
+            student_state.intake_term,
+            student_state.intake_year,
+            current_date
+        )
+        
+        # Convert intake_term to enum if available
+        intake_term_enum = None
+        if student_state.intake_term:
+            try:
+                intake_term_enum = IntakeTerm(student_state.intake_term)
+            except:
+                pass
+        
+        # Fix 5: Better major fuzzy matching - find matching majors first
+        major_ids = None
+        if student_state.major:
+            major_ids = self._get_major_ids_by_fuzzy_match(student_state.major, student_state.degree_level)
+            if major_ids:
+                print(f"DEBUG: Major fuzzy match - query='{student_state.major}', matched_ids={major_ids[:10]}")
+        
+        # Build query
+        query = self.db.query(ProgramIntake).join(Major).join(University).filter(
+            University.is_partner == True,
+            ProgramIntake.application_deadline > current_date
+        )
+        
+        if student_state.degree_level:
+            query = query.filter(Major.degree_level == student_state.degree_level)
+        if major_ids:
+            query = query.filter(Major.id.in_(major_ids))
+        if intake_term_enum:
+            query = query.filter(ProgramIntake.intake_term == intake_term_enum)
+        if inferred_year or student_state.intake_year:
+            query = query.filter(ProgramIntake.intake_year == (inferred_year or student_state.intake_year))
+        
+        intakes = query.limit(limit).all()
+        print(f"DEBUG: DB query filters - degree_level={student_state.degree_level}, intake_term={intake_term_enum}, intake_year={inferred_year or student_state.intake_year}, major_ids={major_ids[:5] if major_ids else None}, count={len(intakes)}")
+        
+        return intakes
+    
+    def summarize_tuition(self, intakes) -> str:
+        """
+        Summarize tuition from intakes into a range string.
+        Normalizes tuition_per_semester vs tuition_per_year into comparable display.
+        Returns: "6,000–12,000 CNY/semester" or mixed year/semester if needed.
+        """
+        if not intakes:
+            return "Tuition: Not available"
+        
+        tuitions = []
+        currencies = set()
+        periods = []
+        
+        for intake in intakes:
+            currency = getattr(intake, 'currency', 'CNY') or 'CNY'
+            currencies.add(currency)
+            
+            if intake.tuition_per_year:
+                tuitions.append(float(intake.tuition_per_year))
+                periods.append('year')
+            elif intake.tuition_per_semester:
+                tuitions.append(float(intake.tuition_per_semester))
+                periods.append('semester')
+        
+        if not tuitions:
+            return "Tuition: Not available"
+        
+        # Normalize to same period if mixed
+        if 'year' in periods and 'semester' in periods:
+            # Convert all to per-year for comparison
+            normalized = []
+            for i, intake in enumerate(intakes):
+                if intake.tuition_per_year:
+                    normalized.append(float(intake.tuition_per_year))
+                elif intake.tuition_per_semester:
+                    normalized.append(float(intake.tuition_per_semester) * 2)
+            tuitions = normalized
+            period = 'year'
+        else:
+            period = periods[0] if periods else 'year'
+        
+        min_tuition = min(tuitions)
+        max_tuition = max(tuitions)
+        currency = list(currencies)[0] if currencies else 'CNY'
+        
+        if min_tuition == max_tuition:
+            return f"Tuition: {int(min_tuition):,.0f} {currency}/{period}"
+        else:
+            return f"Tuition: {int(min_tuition):,.0f}–{int(max_tuition):,.0f} {currency}/{period}"
+    
+    def pick_top_options(self, intakes, k=3, sort_by_cheapest=False):
+        """
+        Pick top k options from intakes.
+        Sort by earliest deadlines (default) or cheapest tuition (if sort_by_cheapest=True).
+        Returns list of formatted strings: "University – Program – teaching language – tuition – deadline"
+        """
+        if not intakes:
+            return []
+        
+        from datetime import datetime, timezone
+        
+        current_date = datetime.now(timezone.utc).date()
+        
+        # Sort
+        if sort_by_cheapest:
+            def get_tuition(intake):
+                if intake.tuition_per_year:
+                    return float(intake.tuition_per_year)
+                elif intake.tuition_per_semester:
+                    return float(intake.tuition_per_semester) * 2
+                return float('inf')
+            sorted_intakes = sorted(intakes, key=get_tuition)
+        else:
+            def get_deadline_score(intake):
+                if intake.application_deadline:
+                    days_until = (intake.application_deadline.date() - current_date).days
+                    return days_until if days_until > 0 else float('inf')
+                return float('inf')
+            sorted_intakes = sorted(intakes, key=get_deadline_score)
+        
+        # Format top k
+        options = []
+        for intake in sorted_intakes[:k]:
+            uni = intake.university
+            major = intake.major
+            teaching_lang = intake.teaching_language or (major.teaching_language if major else 'N/A')
+            
+            # Format tuition
+            currency = getattr(intake, 'currency', 'CNY') or 'CNY'
+            tuition_str = "Not provided"
+            if intake.tuition_per_year:
+                tuition_str = f"{intake.tuition_per_year:,.0f} {currency}/year"
+            elif intake.tuition_per_semester:
+                tuition_str = f"{intake.tuition_per_semester:,.0f} {currency}/semester"
+            
+            # Format deadline
+            deadline = intake.application_deadline.strftime('%Y-%m-%d') if intake.application_deadline else 'N/A'
+            
+            options.append(
+                f"{uni.name} – {major.name if major else 'N/A'} ({teaching_lang}-taught) – "
+                f"{tuition_str} – Deadline: {deadline}"
+            )
+        
+        return options
+    
+    def _query_language_program_costs(self, student_state, intake_term_enum=None, intent='fees_only', limit=3):
+        """
+        Query DB for Language program costs.
+        Returns list of ProgramIntake objects sorted by intent (cheapest for fees_compare, nearest deadline for fees_only).
+        """
+        from datetime import datetime, timezone
+        from app.models import IntakeTerm
+        
+        current_date = datetime.now(timezone.utc).date()
+        
+        # Build query
+        query = self.db.query(ProgramIntake).join(Major).join(University).filter(
+            University.is_partner == True,
+            ProgramIntake.application_deadline > current_date
+        )
+        
+        # Filter by degree level (Language)
+        query = query.filter(
+            (Major.degree_level == 'Language') | (Major.degree_level == 'Language Program')
+        )
+        
+        # Filter by intake_term if provided
+        if intake_term_enum:
+            query = query.filter(ProgramIntake.intake_term == intake_term_enum)
+        
+        # Filter by intake_year if available
+        if student_state.intake_year:
+            query = query.filter(ProgramIntake.intake_year == student_state.intake_year)
+        
+        intakes = query.all()
+        
+        if not intakes:
+            return []
+        
+        # Sort based on intent
+        if intent == 'fees_compare':
+            # Sort by cheapest tuition
+            def get_tuition(intake):
+                if intake.tuition_per_year:
+                    return float(intake.tuition_per_year)
+                elif intake.tuition_per_semester:
+                    return float(intake.tuition_per_semester) * 2  # Normalize to per-year
+                return float('inf')
+            intakes = sorted(intakes, key=get_tuition)
+        else:
+            # Sort by nearest deadline
+            def get_deadline_score(intake):
+                if intake.application_deadline:
+                    days_until = (intake.application_deadline.date() - current_date).days
+                    return days_until if days_until > 0 else float('inf')
+                return float('inf')
+            intakes = sorted(intakes, key=get_deadline_score)
+        
+        return intakes[:limit]
+    
+    def _extract_last_list_ctx(self, conversation_history: List[Dict[str, str]]) -> Optional[Dict[str, Any]]:
+        """
+        Extract the most recent LIST_CTX marker from conversation history.
+        Returns dict with intent, filters, offset, limit, or None if not found.
+        """
+        import json
+        import re
+        
+        # Search backwards through conversation history
+        for msg in reversed(conversation_history):
+            content = msg.get('content', '')
+            # Look for LIST_CTX marker
+            pattern = r'<!--LIST_CTX:(\{.*?\})-->'
+            match = re.search(pattern, content)
+            if match:
+                try:
+                    ctx_data = json.loads(match.group(1))
+                    print(f"DEBUG: Extracted LIST_CTX: {ctx_data}")
+                    return ctx_data
+                except json.JSONDecodeError:
+                    continue
+        return None
+    
+    def _format_documents_and_requirements(self, program_intake) -> str:
+        """
+        Format documents and requirements deterministically from ProgramIntake.
+        Returns formatted string with both documents_required and structured fields.
+        """
+        parts = []
+        
+        # (A) Documents from documents_required field
+        if program_intake.documents_required:
+            parts.append(f"Documents Required: {program_intake.documents_required}")
+        
+        # (B) Requirements block from structured fields
+        req_parts = []
+        
+        # Bank statement
+        if hasattr(program_intake, 'bank_statement_required') and program_intake.bank_statement_required:
+            bank_amount = getattr(program_intake, 'bank_statement_amount', None)
+            bank_currency = getattr(program_intake, 'bank_statement_currency', 'CNY')
+            if bank_amount:
+                req_parts.append(f"Bank Statement: {bank_amount} {bank_currency}")
+            else:
+                req_parts.append("Bank Statement: Required")
+        
+        # HSK requirements
+        if hasattr(program_intake, 'hsk_required') and program_intake.hsk_required:
+            hsk_level = getattr(program_intake, 'hsk_level', None)
+            hsk_min_score = getattr(program_intake, 'hsk_min_score', None)
+            hsk_str = "HSK Required"
+            if hsk_level:
+                hsk_str += f" (Level {hsk_level})"
+            if hsk_min_score:
+                hsk_str += f", Min Score: {hsk_min_score}"
+            req_parts.append(hsk_str)
+        
+        # English test requirements
+        if hasattr(program_intake, 'english_test_required') and program_intake.english_test_required:
+            eng_note = getattr(program_intake, 'english_test_note', None)
+            if eng_note:
+                req_parts.append(f"English Test Required: {eng_note}")
+            else:
+                req_parts.append("English Test Required: Yes")
+        
+        if req_parts:
+            parts.append("Requirements: " + ", ".join(req_parts))
+        
+        return "\n".join(parts) if parts else "Documents/Requirements: Not specified in database"
+    
+    def _format_list_page(self, intakes: List[ProgramIntake], offset: int, limit: int, total: int, 
+                         sort_by_fees: bool = False) -> str:
+        """
+        Format a deterministic list page response for fee comparison queries.
+        Returns formatted string with LIST_CTX marker embedded.
+        """
+        import json
+        from datetime import datetime
+        
+        if not intakes:
+            return "No matching programs found."
+        
+        # Sort if needed
+        if sort_by_fees:
+            def get_tuition(intake):
+                if intake.tuition_per_year:
+                    return float(intake.tuition_per_year)
+                elif intake.tuition_per_semester:
+                    return float(intake.tuition_per_semester) * 2
+                return float('inf')
+            intakes = sorted(intakes, key=get_tuition)
+        
+        # Limit to page size
+        page_intakes = intakes[offset:offset + limit]
+        
+        response_parts = []
+        start_num = offset + 1
+        end_num = offset + len(page_intakes)
+        
+        if offset == 0:
+            response_parts.append(f"Here are the top {len(page_intakes)} universities with matching programs:\n")
+        else:
+            response_parts.append(f"Showing {start_num}–{end_num} of {total} universities:\n")
+        
+        for idx, intake in enumerate(page_intakes, 1):
+            uni = intake.university
+            major = intake.major
+            teaching_lang = intake.teaching_language or (major.teaching_language if major else 'N/A')
+            
+            # Format tuition
+            currency = getattr(intake, 'currency', 'CNY') or 'CNY'
+            tuition_str = "Not provided"
+            if intake.tuition_per_year:
+                tuition_str = f"{intake.tuition_per_year} {currency}/year"
+            elif intake.tuition_per_semester:
+                tuition_str = f"{intake.tuition_per_semester} {currency}/semester"
+            
+            # Format application fee
+            app_fee = intake.application_fee or 0
+            app_fee_str = f"{app_fee} {currency}" if app_fee else "Not provided"
+            
+            # Format deadline
+            deadline = intake.application_deadline.strftime('%Y-%m-%d') if intake.application_deadline else 'N/A'
+            
+            response_parts.append(
+                f"{idx}. {uni.name} – {major.name if major else 'N/A'} – {teaching_lang}-taught – "
+                f"Tuition: {tuition_str} – App Fee: {app_fee_str} – Deadline: {deadline}"
+            )
+        
+        if total > offset + len(page_intakes):
+            remaining = total - (offset + len(page_intakes))
+            response_parts.append(f"\nShowing {start_num}–{end_num} of {total}. Say 'show more' for next page ({remaining} more available).")
+        
+        # Embed LIST_CTX marker
+        list_ctx = {
+            "intent": "fees_compare",
+            "filters": {
+                "degree_level": page_intakes[0].major.degree_level if page_intakes and page_intakes[0].major else None,
+                "intake_term": page_intakes[0].intake_term.value if page_intakes and page_intakes[0].intake_term else None,
+                "intake_year": page_intakes[0].intake_year if page_intakes else None
+            },
+            "offset": offset,
+            "limit": limit
+        }
+        list_ctx_marker = f"<!--LIST_CTX:{json.dumps(list_ctx)}-->"
+        response_parts.append(f"\n{list_ctx_marker}")
+        
+        return "\n".join(response_parts)
+    
     def generate_response(
         self,
         user_message: str,
@@ -1430,6 +1908,144 @@ Return the JSON object:"""
         current_month = current_date.month
         current_date_str = current_date.strftime("%Y-%m-%d")
         
+        # Reset pagination state for new queries (not "show more")
+        user_msg_normalized = user_message.lower().strip()
+        is_pagination = self._is_pagination_command(user_message)
+        if not is_pagination:
+            # Only reset if this is clearly a new query (not a follow-up)
+            # Follow-up resolver will handle short follow-ups
+            is_short_followup = len(user_message.split()) <= 5
+            contains_only_fields = (
+                any(term in user_msg_normalized for term in ['march', 'september', '2026', '2027', '2028']) or
+                any(term in user_msg_normalized for term in ['bangladesh', 'pakistan', 'india', 'kazakhstan', 'uzbekistan']) or
+                any(term in user_msg_normalized for term in ['guangzhou', 'beijing', 'shanghai', 'harbin', 'wuhan'])
+            )
+            if not (is_short_followup and contains_only_fields):
+                # New query - reset state
+                self.last_list_results = []
+                self.last_list_offset = 0
+                self.last_intent = None
+                self.last_state = None
+        
+        # Fix 6: Handle "show more" pagination using instance variables (before LIST_CTX)
+        if is_pagination:
+            print(f"DEBUG: Pagination command detected")
+            
+            # First try instance variables (simpler, for cost queries)
+            if self.last_list_results:
+                self.last_list_offset += 5  # Next batch of 5
+                next_batch = self.last_list_results[self.last_list_offset:self.last_list_offset + 5]
+                
+                if next_batch:
+                    print(f"DEBUG: Returning next batch from instance variables: offset={self.last_list_offset}, size={len(next_batch)}")
+                    # Format response
+                    response_parts = []
+                    for idx, intake in enumerate(next_batch, 1):
+                        uni = intake.university
+                        major = intake.major
+                        teaching_lang = intake.teaching_language or (major.teaching_language if major else 'N/A')
+                        currency = getattr(intake, 'currency', 'CNY') or 'CNY'
+                        tuition_str = "Not provided"
+                        if intake.tuition_per_year:
+                            tuition_str = f"{intake.tuition_per_year} {currency}/year"
+                        elif intake.tuition_per_semester:
+                            tuition_str = f"{intake.tuition_per_semester} {currency}/semester"
+                        app_fee = intake.application_fee or 0
+                        app_fee_str = f"{app_fee} {currency}" if app_fee else "Not provided"
+                        deadline = intake.application_deadline.strftime('%Y-%m-%d') if intake.application_deadline else 'N/A'
+                        response_parts.append(
+                            f"{idx}. {uni.name} – {major.name if major else 'N/A'} – {teaching_lang}-taught – "
+                            f"Tuition: {tuition_str} – App Fee: {app_fee_str} – Deadline: {deadline}"
+                        )
+                    
+                    if self.last_list_offset + 5 < len(self.last_list_results):
+                        response_parts.append(f"\nSay 'show more' for next page ({len(self.last_list_results) - self.last_list_offset - 5} more available).")
+                    response_parts.append("\nIf you sign up (/signup), I can save these and give exact total cost + document checklist.")
+                    
+                    return {
+                        'response': "\n".join(response_parts),
+                        'db_context': '',
+                        'rag_context': None,
+                        'tavily_context': None,
+                        'lead_collected': use_db,
+                        'show_lead_form': False,
+                        'lead_form_prefill': {}
+                    }
+                else:
+                    return {
+                        'response': "No more results. You've reached the end. If you sign up (/signup), I can save these and give exact total cost + document checklist.",
+                        'db_context': '',
+                        'rag_context': None,
+                        'tavily_context': None,
+                        'lead_collected': use_db,
+                        'show_lead_form': False,
+                        'lead_form_prefill': {}
+                    }
+            
+            # Fallback to LIST_CTX handler
+            list_ctx = self._extract_last_list_ctx(conversation_history)
+            
+            if list_ctx:
+                # Rerun the same DB query with offset += limit
+                filters = list_ctx.get('filters', {})
+                old_offset = list_ctx.get('offset', 0)
+                limit = list_ctx.get('limit', 12)
+                offset = old_offset + limit
+                print(f"DEBUG: Pagination offset change: {old_offset} -> {offset} (limit={limit})")
+                
+                # Query program intakes with filters
+                query = self.db.query(ProgramIntake).join(Major).join(University).filter(
+                    University.is_partner == True
+                )
+                
+                if filters.get('degree_level'):
+                    query = query.filter(Major.degree_level == filters['degree_level'])
+                if filters.get('intake_term'):
+                    from app.models import IntakeTerm
+                    intake_term_enum = IntakeTerm(filters['intake_term'])
+                    query = query.filter(ProgramIntake.intake_term == intake_term_enum)
+                if filters.get('intake_year'):
+                    query = query.filter(ProgramIntake.intake_year == filters['intake_year'])
+                
+                # Filter by upcoming deadlines
+                query = query.filter(ProgramIntake.application_deadline > current_date.date())
+                
+                total = query.count()
+                intakes = query.offset(offset).limit(limit).all()
+                
+                if intakes:
+                    print(f"DEBUG: Returning list page offset={offset} size={len(intakes)} total={total}")
+                    response_text = self._format_list_page(intakes, offset, limit, total, sort_by_fees=True)
+                    return {
+                        'response': response_text,
+                        'db_context': '',
+                        'rag_context': None,
+                        'tavily_context': None,
+                        'lead_collected': use_db,
+                        'show_lead_form': False,
+                        'lead_form_prefill': {}
+                    }
+                else:
+                    return {
+                        'response': "No more results. You've reached the end.",
+                        'db_context': '',
+                        'rag_context': None,
+                        'tavily_context': None,
+                        'lead_collected': use_db,
+                        'show_lead_form': False,
+                        'lead_form_prefill': {}
+                    }
+            else:
+                return {
+                    'response': "Sure — which intake and degree level should I list?",
+                    'db_context': '',
+                    'rag_context': None,
+                    'tavily_context': None,
+                    'lead_collected': use_db,
+                    'show_lead_form': False,
+                    'lead_form_prefill': {}
+                }
+        
         # TEMPORARY LOGGING: Print conversation history to verify it's being passed correctly
         print(f"\n{'='*80}")
         print(f"SalesAgent.generate_response called")
@@ -1448,25 +2064,98 @@ Return the JSON object:"""
         conversation_slice = conversation_history[-12:] if conversation_history else []
         student_state = self.extract_student_profile_state(conversation_slice)
         
+        # Step 0.1: Apply deterministic intake year inference (A)
+        if not student_state.intake_year and student_state.intake_term:
+            inferred_year = self.infer_intake_year(
+                student_state.intake_term,
+                student_state.intake_year,
+                current_date
+            )
+            if inferred_year:
+                student_state.intake_year = inferred_year
+                print(f"DEBUG: Inferred intake_year={inferred_year} from intake_term={student_state.intake_term} (current_date={current_date_str})")
+        
         # Step 0.25: Compute known and missing fields from StudentProfileState
         profile_info = self._compute_known_and_missing_fields(student_state)
         known_fields = profile_info["known_fields"]
         missing_fields = profile_info["missing_fields"]
         
-        # Step 0.5: Determine if we can use DB
-        # use_db parameter takes precedence, but also check legacy device_fingerprint if use_db not explicitly set
-        if not use_db:
+        # Step 0.5: Split DB access - always allow reads, only check Lead for writes
+        # Fix 1: allow_db_read = True (always), allow_lead_write = (lead exists or user provided contact info)
+        allow_db_read = True  # Always allow DB reads for partner universities/majors/intakes
+        
+        # Check if lead exists for write operations (creating/updating Lead rows)
+        allow_lead_write = False
+        if use_db:
+            allow_lead_write = True
+        else:
             # Check if lead exists for chat_session_id (new way) or device_fingerprint (legacy)
             if chat_session_id:
                 lead = self.db.query(Lead).filter(Lead.chat_session_id == chat_session_id).first()
-                use_db = lead is not None
+                allow_lead_write = lead is not None
             elif device_fingerprint:
                 lead = self.db.query(Lead).filter(Lead.device_fingerprint == device_fingerprint).first()
-                use_db = lead is not None
+                allow_lead_write = lead is not None
         
-        lead_collected = use_db  # Alias for backward compatibility
+        # Also check if user provided contact info (for lead creation)
+        has_contact_info = (
+            student_state.phone or 
+            student_state.email or 
+            student_state.whatsapp or 
+            student_state.wechat
+        )
+        if has_contact_info and student_state.nationality and (student_state.degree_level or student_state.major):
+            allow_lead_write = True
         
-        # Step 0.6: Detect if this is a simple informational query (listing majors, basic info) vs personalized recommendation
+        lead_collected = allow_lead_write  # Alias for backward compatibility
+        print(f"DEBUG: DB access - allow_db_read={allow_db_read}, allow_lead_write={allow_lead_write}")
+        
+        # Step 0.6: Follow-up resolver (Fix 3)
+        # Check if user_message is short and only provides missing fields
+        user_msg_lower = user_message.lower().strip()
+        is_short_followup = len(user_message.split()) <= 5  # Short message
+        
+        # Check if message only contains: intake term, year, nationality, city
+        contains_only_fields = (
+            any(term in user_msg_lower for term in ['march', 'september', '2026', '2027', '2028']) or
+            any(term in user_msg_lower for term in ['bangladesh', 'pakistan', 'india', 'kazakhstan', 'uzbekistan']) or
+            any(term in user_msg_lower for term in ['guangzhou', 'beijing', 'shanghai', 'harbin', 'wuhan'])
+        )
+        
+        # Check if prior assistant turn asked for missing field
+        prior_asked_for_missing = False
+        if conversation_slice:
+            for msg in reversed(conversation_slice[-3:]):  # Check last 3 messages
+                if msg.get('role') == 'assistant':
+                    content = msg.get('content', '').lower()
+                    # Check if assistant asked for intake/nationality/city
+                    if any(phrase in content for phrase in ['intake', 'nationality', 'city', 'which city', 'where', 'when']):
+                        prior_asked_for_missing = True
+                        break
+        
+        # Reuse last intent and state if conditions met
+        if is_short_followup and contains_only_fields and prior_asked_for_missing and self.last_intent:
+            print(f"DEBUG: Follow-up resolver triggered - reusing last_intent={self.last_intent}")
+            sales_intent = self.last_intent
+            # Merge new info into last_state
+            if self.last_state:
+                # Update last_state with new info from current student_state
+                if student_state.intake_term and not self.last_state.intake_term:
+                    self.last_state.intake_term = student_state.intake_term
+                if student_state.intake_year and not self.last_state.intake_year:
+                    self.last_state.intake_year = student_state.intake_year
+                if student_state.nationality and not self.last_state.nationality:
+                    self.last_state.nationality = student_state.nationality
+                if student_state.city and not self.last_state.city:
+                    self.last_state.city = student_state.city
+                # Use merged state
+                student_state = self.last_state
+        else:
+            # Detect intent normally
+            sales_intent = self._detect_sales_intent(user_message)
+            print(f"DEBUG: Sales intent detected: {sales_intent}")
+        
+        # Step 0.6.1: Detect if this is a simple informational query (listing majors, basic info) vs personalized recommendation
         user_msg_lower = user_message.lower()
         is_simple_info_query = any(phrase in user_msg_lower for phrase in [
             'what majors', 'which majors', 'list majors', 'show majors', 'available majors',
@@ -1558,15 +2247,18 @@ Return the JSON object:"""
             'which university', 'what university', 'best university', 'lowest cost', 'good university'
         ])
         
-        if not use_db and not (has_all_info_for_comparison and asks_for_specific_info):
-            # Stranger (no lead) and doesn't have all info: Don't query database, use RAG/Web only
-            # For general questions (scholarships, CSCA, costs), use RAG/Tavily
-            # Only avoid program_intakes queries for exact user-specific data
-            db_context = "ANONYMOUS USER (NO LEAD): User has not provided structured lead information. DO NOT use database program/intake information for personalized recommendations. Answer only using RAG knowledge base and, if needed, web search context. Do NOT invent exact tuition or deadlines: use approximate values from RAG documents."
-            matched_programs = ""
-        else:
-            # use_db=True OR has all info for comparison: Query database for exact fees, deadlines, documents
-            db_context, matched_programs = self._query_database_with_state(user_message, student_state, conversation_slice, lead_collected, is_simple_info_query)
+        # Fix 1: Always allow DB reads (allow_db_read = True)
+        # Query database for partner universities/majors/intakes
+        db_context, matched_programs = self._query_database_with_state(
+            user_message, 
+            student_state, 
+            conversation_slice, 
+            lead_collected, 
+            is_simple_info_query,
+            sales_intent=sales_intent,
+            current_date=current_date
+        )
+        print(f"DEBUG: DB query executed - context_length={len(db_context)}, matched_programs_count={len(matched_programs.split('MATCHED_PROGRAMS')) if matched_programs else 0}")
         
         # Step 2: Detect CSCA/scholarship questions - prioritize RAG for these topics
         user_msg_lower = user_message.lower()
@@ -1625,12 +2317,13 @@ Return the JSON object:"""
             except Exception as e:
                 print(f"Database major matching failed: {e}")
         
-        # Step 2.3: If not CSCA/scholarship question, use standard RAG search
-        # For strangers (use_db=False): Always prioritize RAG first
-        # For lead collected (use_db=True): Use RAG if DB context is weak
-        if not rag_context:
-            if not use_db:
-                # Stranger: Always try RAG first
+        # Step 2.3: RAG search (skip for program/fee listing - use DB only)
+        # Fix: Do NOT use RAG for program/fee listing - only for marketing copy or generic questions
+        skip_rag_for_programs = sales_intent in ['fees_only', 'fees_compare', 'list_programs', 'earliest_intake']
+        
+        if not rag_context and not skip_rag_for_programs:
+            # Only use RAG for non-program queries (CSCA, scholarships, general questions)
+            if not allow_lead_write:  # Stranger: Use RAG for general questions
                 try:
                     rag_results = self.rag_service.search_similar(self.db, user_message, top_k=5)
                     if rag_results:
@@ -1642,7 +2335,7 @@ Return the JSON object:"""
                     print(f"RAG search failed: {e}")
                     rag_context = None
             elif not db_context or len(db_context) < 100:  # DB context is weak
-                # Lead collected but DB context weak: try RAG
+                # Lead collected but DB context weak: try RAG (only for non-program queries)
                 try:
                     rag_results = self.rag_service.search_similar(self.db, user_message, top_k=3)
                     if rag_results:
@@ -1650,6 +2343,8 @@ Return the JSON object:"""
                 except Exception as e:
                     print(f"RAG search failed: {e}")
                     rag_context = None
+        elif skip_rag_for_programs:
+            print(f"DEBUG: Skipping RAG for program/fee listing (intent={sales_intent}) - using DB only")
         
         # Step 2.4: If non-partner university mentioned, use database arrays to find partner alternatives
         if non_partner_university_mentioned and student_state.major and student_state.degree_level:
@@ -1689,90 +2384,161 @@ Return the JSON object:"""
             except Exception as e:
                 print(f"Database search for partner alternatives failed: {e}")
         
-        # Step 2.5: If user asks about cost, search RAG for structured cost profiles
-        user_msg_lower = user_message.lower()
-        asks_about_cost = any(term in user_msg_lower for term in [
-            'cost', 'fee', 'tuition', 'price', 'how much', 'expense', 'costing',
-            'typical cost', 'average cost', 'normal cost', 'top university cost',
-            'reputed university cost', 'below average cost', 'bachelor cost',
-            'masters cost', 'phd cost', 'engineering cost', 'medical cost',
-            'accommodation cost', 'living cost', 'total cost', 'all cost'
-        ])
+        # Step 2.4.5: DB-lite querying (Fix 5) - improved query behavior
+        # Query DB for fees_only, fees_compare, list_programs, earliest_intake intents
+        db_lite_context = None
+        can_query_db_lite = (
+            student_state.degree_level and 
+            (student_state.intake_term or sales_intent == 'earliest_intake') and
+            (student_state.intake_year or (student_state.intake_term and self.infer_intake_year(student_state.intake_term, None, current_date)))
+        )
         
-        if asks_about_cost:
+        if can_query_db_lite and (sales_intent in ['fees_only', 'fees_compare', 'list_programs', 'earliest_intake']):
             try:
-                # Search for ranking-based cost profiles (reputed/average/below_average)
-                ranking_cost_terms = []
-                if any(term in user_msg_lower for term in ['top', 'reputed', 'reputation', 'best', 'high ranking', 'world ranking']):
-                    ranking_cost_terms.append('reputed')
-                if any(term in user_msg_lower for term in ['normal', 'average', 'mid', 'regular', 'standard']):
-                    ranking_cost_terms.append('average')
-                if any(term in user_msg_lower for term in ['below average', 'lower', 'cheap', 'affordable']):
-                    ranking_cost_terms.append('below_average')
+                # Infer intake year if missing
+                inferred_year = self.infer_intake_year(
+                    student_state.intake_term,
+                    student_state.intake_year,
+                    current_date
+                )
+                if inferred_year and not student_state.intake_year:
+                    student_state.intake_year = inferred_year
+                    print(f"DEBUG: Inferred intake_year={inferred_year} for DB-lite query")
                 
-                # Search for program type
-                program_type = None
-                if any(term in user_msg_lower for term in ['bachelor', 'bsc', 'undergraduate', 'bachelor\'s']):
-                    program_type = 'bachelor'
-                elif any(term in user_msg_lower for term in ['master', 'masters', 'msc', 'graduate', 'master\'s']):
-                    program_type = 'masters'
-                elif any(term in user_msg_lower for term in ['phd', 'doctorate', 'doctoral', 'ph.d']):
-                    program_type = 'phd'
-                elif any(term in user_msg_lower for term in ['language', 'foundation', 'non-degree', 'chinese language']):
-                    program_type = 'chinese_language_or_other_non_degree'
+                print(f"DEBUG: DB-lite querying for intent={sales_intent}, degree_level={student_state.degree_level}, intake_term={student_state.intake_term}, intake_year={student_state.intake_year}, city={student_state.city}")
                 
-                # Build search query
-                cost_search_query = "MalishaEdu typical cost profiles ranking buckets reputed average below_average"
-                if ranking_cost_terms:
-                    cost_search_query += f" {' '.join(ranking_cost_terms)}"
-                if program_type:
-                    cost_search_query += f" {program_type}"
-                cost_search_query += " tuition accommodation insurance medical fee living cost"
+                # Query matching intakes
+                matching_intakes = self.get_matching_intakes(student_state, limit=30)
                 
+                # Filter by city if provided (fuzzy match)
+                if student_state.city and matching_intakes:
+                    from difflib import SequenceMatcher
+                    city_lower = student_state.city.lower()
+                    filtered_by_city = []
+                    for intake in matching_intakes:
+                        uni_city = (intake.university.city or '').lower()
+                        if uni_city:
+                            similarity = SequenceMatcher(None, city_lower, uni_city).ratio()
+                            if similarity >= 0.6 or city_lower in uni_city or uni_city in city_lower:
+                                filtered_by_city.append(intake)
+                    if filtered_by_city:
+                        matching_intakes = filtered_by_city
+                        print(f"DEBUG: Filtered by city '{student_state.city}': {len(matching_intakes)} intakes")
+                
+                if matching_intakes:
+                    print(f"DEBUG: DB-lite returned {len(matching_intakes)} intakes")
+                    
+                    # For earliest_intake, find the earliest deadline
+                    if sales_intent == 'earliest_intake':
+                        current_dt = current_date.date()
+                        earliest = min(matching_intakes, key=lambda i: i.application_deadline.date() if i.application_deadline else current_dt)
+                        matching_intakes = [earliest]
+                    
+                    # Sort based on intent
+                    sort_by_cheapest = (sales_intent == 'fees_compare')
+                    
+                    # Store for pagination and follow-up resolver (Fix 3)
+                    self.last_list_results = matching_intakes
+                    self.last_list_offset = 0
+                    self.last_intent = sales_intent
+                    # Create a snapshot of student_state
+                    import copy
+                    self.last_state = copy.deepcopy(student_state)
+                    print(f"DEBUG: Stored pagination state - intent={sales_intent}, results_count={len(matching_intakes)}")
+                    
+                    # Build DB-lite context
+                    db_lite_parts = []
+                    db_lite_parts.append("=== DATABASE PROGRAM INFORMATION (DB-LITE) ===")
+                    
+                    # Summarize tuition range
+                    tuition_summary = self.summarize_tuition(matching_intakes)
+                    db_lite_parts.append(tuition_summary)
+                    
+                    # Pick top 2-3 options
+                    top_options = self.pick_top_options(matching_intakes, k=3, sort_by_cheapest=sort_by_cheapest)
+                    
+                    if top_options:
+                        db_lite_parts.append("\nTop options:")
+                        for opt in top_options:
+                            db_lite_parts.append(f"- {opt}")
+                    
+                    db_lite_parts.append("\n=== END DATABASE PROGRAM INFORMATION ===")
+                    
+                    # Add instruction based on intent
+                    if sales_intent in ['fees_only', 'fees_compare']:
+                        db_lite_parts.append("\nINSTRUCTION: Show the tuition range and top 2-3 options. Keep response concise (max 8-12 lines). Ask ONE follow-up: preferred city OR WhatsApp number for fast processing. CTA: 'If you sign up (/signup), I can save these and give exact total cost + document checklist.' Mention MalishaEdu Application Deposit: 80 USD.")
+                    elif sales_intent == 'list_programs':
+                        db_lite_parts.append("\nINSTRUCTION: List the top 2-3 options with key info. Keep response concise. Ask ONE follow-up: preferred city OR WhatsApp number. CTA: 'Sign up (/signup) for exact personalized guidance.'")
+                    elif sales_intent == 'earliest_intake':
+                        db_lite_parts.append("\nINSTRUCTION: Show the earliest intake option. Keep response concise. Ask ONE follow-up: preferred city OR WhatsApp number. CTA: 'Sign up (/signup) for exact personalized guidance.'")
+                    
+                    db_lite_context = "\n".join(db_lite_parts)
+                    
+                    # Add to db_context if it exists, otherwise create it
+                    if db_context and "ANONYMOUS USER" not in db_context:
+                        db_context = f"{db_context}\n\n{db_lite_context}"
+                    else:
+                        db_context = db_lite_context
+                else:
+                    print(f"DEBUG: DB-lite returned 0 matches")
+                    # Check if September exists when March doesn't (E)
+                    if student_state.intake_term and "march" in student_state.intake_term.lower():
+                        # Try September of same year
+                        from app.models import IntakeTerm
+                        try:
+                            # Create a temporary StudentProfileState for September query
+                            sept_state = StudentProfileState(
+                                degree_level=student_state.degree_level,
+                                major=student_state.major,
+                                intake_term='September',
+                                intake_year=student_state.intake_year or self.infer_intake_year('September', None, current_date),
+                                nationality=student_state.nationality
+                            )
+                            sept_intakes = self.get_matching_intakes(sept_state, limit=30)
+                            if sept_intakes:
+                                inferred_year = student_state.intake_year or self.infer_intake_year('March', None, current_date)
+                                sept_year = sept_state.intake_year or self.infer_intake_year('September', None, current_date)
+                                db_context = f"{db_context}\n\n=== ALTERNATIVE INTAKE AVAILABLE ===\nWe don't have March {inferred_year} {student_state.degree_level or ''} intakes for that major in partner DB, but September {sept_year} options are available. Would you like to see September options?\n=== END ALTERNATIVE ==="
+                        except Exception as e:
+                            print(f"DEBUG: September alternative check failed: {e}")
+                            pass
+            except Exception as e:
+                print(f"DEBUG: DB-lite querying failed: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Step 2.5: Service charge RAG search (only when explicitly asked)
+        # Fix 6: Remove embeddings-based cost intent detection - DB-lite handles cost queries
+        # Only use RAG for service charges when explicitly requested
+        user_msg_lower = user_message.lower()
+        if any(term in user_msg_lower for term in ['service fee', 'service charge']):
+            try:
                 cost_rag_results = self.rag_service.search_similar(
                     self.db,
-                    cost_search_query,
-                    top_k=5
+                    "MalishaEdu service charges service fee table",
+                    top_k=3
                 )
-                
-                # Also search for university-specific generic fees
-                university_specific_query = None
-                if student_state.preferred_universities:
-                    university_specific_query = f"MalishaEdu {student_state.preferred_universities[0]} generic fees tuition accommodation"
-                elif any(uni_term in user_msg_lower for uni_term in ['university', 'college', 'institute']):
-                    # Extract potential university name from message
-                    university_specific_query = f"MalishaEdu university generic fees tuition accommodation"
-                
-                if university_specific_query:
-                    uni_cost_results = self.rag_service.search_similar(
-                        self.db,
-                        university_specific_query,
-                        top_k=3
-                    )
-                    if uni_cost_results:
-                        cost_rag_results = (cost_rag_results or []) + uni_cost_results
-                
                 if cost_rag_results:
                     cost_rag_context = self.rag_service.format_rag_context(cost_rag_results)
                     if rag_context:
-                        rag_context = f"{rag_context}\n\nCOST INFORMATION FROM RAG (Structured Cost Profiles):\n{cost_rag_context}"
+                        rag_context = f"{rag_context}\n\nMALISHAEDU SERVICE CHARGES:\n{cost_rag_context}"
                     else:
-                        rag_context = f"COST INFORMATION FROM RAG (Structured Cost Profiles):\n{cost_rag_context}"
-                    
-                    # Add instruction for comprehensive cost breakdown
-                    if not lead_collected:
-                        rag_context += "\n\nIMPORTANT: Provide comprehensive cost breakdown including: application fee (non-refundable), MalishaEdu application deposit (80 USD, refundable if no admission due to MalishaEdu), tuition, accommodation fee, insurance fee, one-time China arrival medical fee, living cost range, visa renewal fee, and MalishaEdu service charge (based on degree level, teaching language, and scholarship type - search RAG for 'MalishaEdu service charges' table). Calculate total first-year cost. After providing generic cost info, ENCOURAGE user to sign up at /signup (or /login) for more precise information based on their specific profile."
-                    else:
-                        rag_context += "\n\nIMPORTANT: Provide comprehensive cost breakdown including: application fee (non-refundable), MalishaEdu application deposit (80 USD, refundable if no admission due to MalishaEdu), tuition, accommodation fee, insurance fee, one-time China arrival medical fee, living cost range, visa renewal fee, and MalishaEdu service charge (based on degree level, teaching language, and scholarship type - search RAG for 'MalishaEdu service charges' table). Calculate total first-year cost. Since lead is collected, also check database for specific program costs and ENCOURAGE signup/login for precise information."
+                        rag_context = f"MALISHAEDU SERVICE CHARGES:\n{cost_rag_context}"
             except Exception as e:
-                print(f"RAG cost search failed: {e}")
+                print(f"RAG service charge search failed: {e}")
         
-        # Step 3: If still weak, use Tavily (for current policies, CSCA updates, etc.)
+        # Step 3: Tavily (skip for program/fee listing - use DB only)
+        # Fix: Do NOT use Tavily for program/fee listing - only for visa/policy/lifestyle questions
         tavily_context = None
-        if not db_context and not rag_context:
+        skip_tavily_for_programs = sales_intent in ['fees_only', 'fees_compare', 'list_programs', 'earliest_intake']
+        
+        if not skip_tavily_for_programs and not db_context and not rag_context:
+            # Only use Tavily for visa/policy/lifestyle questions, not for program/fee queries
             tavily_results = self.tavily_service.search(user_message, max_results=2)
             if tavily_results:
                 tavily_context = self.tavily_service.format_search_results(tavily_results)
+        elif skip_tavily_for_programs:
+            print(f"DEBUG: Skipping Tavily for program/fee listing (intent={sales_intent}) - using DB only")
         
         # Step 3.5: Detect if user shows interest (should show lead form)
         # Show lead form for: specific university/major questions, scholarship questions, application questions
@@ -2235,7 +3001,7 @@ REMEMBER: Base all concrete fees, deadlines, and program details ONLY on DATABAS
                     context_instruction += "\n\nLEAD NOT COLLECTED: For personalized recommendations, encourage user to sign up at /signup (or /login) to get personalized recommendations."
             
             # Add cost-specific instructions if user asks about cost
-            if asks_about_cost:
+            if sales_intent in ['fees_only', 'fees_compare']:
                 if lead_collected:
                     context_instruction += "\n\nCOST QUESTION - LEAD COLLECTED: Use RAG cost profiles for general estimates AND check database for specific program costs. Provide comprehensive breakdown: application fee (non-refundable), MalishaEdu application deposit (80 USD, refundable if no admission due to MalishaEdu), tuition, accommodation, insurance, medical checkup, living cost, visa renewal, and MalishaEdu service charge (based on degree level, teaching language, and scholarship type - search RAG for 'MalishaEdu service charges' table). Calculate total first-year cost including service charge. STRONGLY encourage signup/login for precise information."
                 else:
@@ -2918,7 +3684,9 @@ IMPORTANT:
         student_state: StudentProfileState,
         conversation_history: List[Dict[str, str]] = None,
         lead_collected: bool = False,
-        is_simple_info_query: bool = False
+        is_simple_info_query: bool = False,
+        sales_intent: str = 'general',
+        current_date = None
     ) -> Tuple[str, str]:
         """
         Query database using StudentProfileState to build query parameters.
@@ -2926,6 +3694,10 @@ IMPORTANT:
         - db_context: General database information
         - matched_programs: Formatted list of matched programs with exact values
         """
+        from datetime import datetime, timezone
+        if current_date is None:
+            current_date = datetime.now(timezone.utc)
+        
         context_parts = []
         matched_programs_parts = []
         
@@ -3213,10 +3985,26 @@ IMPORTANT:
                     Major.degree_level == db_degree_level,
                     ProgramIntake.intake_term == intake_term_enum,
                     ProgramIntake.intake_year == student_state.intake_year,
-                    University.is_partner == True
+                    University.is_partner == True,
+                    ProgramIntake.application_deadline > current_date.date()  # Only upcoming
                 ).all()
                 
                 if comparison_intakes:
+                    # Fix 3: Use deterministic formatter for list queries (>3 results)
+                    if len(comparison_intakes) > 3:
+                        print(f"DEBUG: Using deterministic formatter for list query ({len(comparison_intakes)} intakes)")
+                        response_text = self._format_list_page(comparison_intakes, 0, 12, len(comparison_intakes), sort_by_fees=True)
+                        return {
+                            'response': response_text,
+                            'db_context': '',
+                            'rag_context': rag_context,
+                            'tavily_context': None,
+                            'lead_collected': use_db,
+                            'show_lead_form': False,
+                            'lead_form_prefill': {}
+                        }
+                    
+                    # For <=3 results, use LLM with compact context
                     # Format as comparative chart
                     context_parts.append("=== COMPARATIVE CHART: ALL MALISHAEDU PARTNER UNIVERSITIES ===")
                     context_parts.append(f"Major: {major_name}")
@@ -3242,8 +4030,9 @@ IMPORTANT:
                             context_parts.append(f"Scholarship Info: {intake.scholarship_info}")
                         if intake.notes:
                             context_parts.append(f"Notes: {intake.notes}")
-                        if intake.documents_required:
-                            context_parts.append(f"Documents Required: {intake.documents_required}")
+                        # Fix 2: Use deterministic documents/requirements formatting
+                        docs_reqs = self._format_documents_and_requirements(intake)
+                        context_parts.append(docs_reqs)
                         context_parts.append(f"Application Deadline: {intake.application_deadline.strftime('%Y-%m-%d') if intake.application_deadline else 'Not in database'}")
                     
                     context_parts.append("\n=== END COMPARATIVE CHART ===")
@@ -3311,6 +4100,9 @@ IMPORTANT:
                                 if intake.application_deadline > now:
                                     days_to_deadline = (intake.application_deadline - now).days
                             
+                            # Fix 2: Format documents/requirements deterministically
+                            docs_reqs = self._format_documents_and_requirements(intake)
+                            
                             matched_programs_parts.append(f"""
 {program_count}) University: {uni.name} ({uni.city or 'China'}) {'[MALISHAEDU PARTNER]' if uni.is_partner else ''}
    Major: {major.name}
@@ -3323,7 +4115,7 @@ IMPORTANT:
    Accommodation Fee (per year): {intake.accommodation_fee or 'Not in database'} RMB
    Service Fee: {intake.service_fee or 'Not in database'} RMB (only for successful application)
    Medical Insurance Fee: {intake.medical_insurance_fee or 'Not in database'} RMB (per year)
-   Documents Required: {intake.documents_required or 'Not in database'}
+   {docs_reqs}
    Scholarship Info: {intake.scholarship_info or 'No scholarship information'}
 """)
         elif majors:
@@ -3361,6 +4153,9 @@ IMPORTANT:
                                 if intake.application_deadline > now:
                                     days_to_deadline = (intake.application_deadline - now).days
                             
+                            # Fix 2: Format documents/requirements deterministically
+                            docs_reqs = self._format_documents_and_requirements(intake)
+                            
                             matched_programs_parts.append(f"""
 {program_count}) University: {uni.name} ({uni.city or 'China'}) {'[MALISHAEDU PARTNER]' if uni.is_partner else ''}
    Major: {major.name}
@@ -3373,7 +4168,7 @@ IMPORTANT:
    Accommodation Fee (per year): {intake.accommodation_fee or 'Not in database'} RMB
    Service Fee: {intake.service_fee or 'Not in database'} RMB (only for successful application)
    Medical Insurance Fee: {intake.medical_insurance_fee or 'Not in database'} RMB (per year)
-   Documents Required: {intake.documents_required or 'Not in database'}
+   {docs_reqs}
    Scholarship Info: {intake.scholarship_info or 'No scholarship information'}
 """)
         
@@ -3557,6 +4352,42 @@ IMPORTANT:
             }
         return None
     
-    # NOTE: Lead collection is automatic (no popup). Leads are created when nationality + contact + study interest are present.
+    # NOTE: Lead collection is automatic (no popup). Leads are created when nationality + contact + study interest are present.                                 
     # Use _check_lead_collected() to check if lead exists for device fingerprint or chat_session_id
+
+
+# ============================================================================
+# REGRESSION TEST EXAMPLES
+# ============================================================================
+"""
+Regression test examples for DB-lite program suggestions and time-aware intake inference:
+
+1) Bangladesh + next March + language program costing
+   Input: "I'm from Bangladesh and plan to start next March. What's the cost for language program?"
+   Expected:
+   - infer_intake_year("March", None, Dec 2025) -> 2026
+   - Query DB for Language programs, March 2026, partner universities
+   - Show tuition range (e.g., "6,000–12,000 CNY/semester")
+   - List 2-3 options: University – Program – teaching language – tuition – deadline
+   - Ask ONE follow-up: "Do you prefer 1 semester or 1 year?" OR "Any preferred city?"
+   - CTA: "If you sign up (/signup), I can save these and give exact total cost + document checklist."
+   - Do NOT ask intake year (already inferred)
+
+2) Bachelor International Trade + March + Bangladesh
+   Input: "I want to study Bachelor in International Trade, March intake. I am from Bangladesh."
+   Expected:
+   - infer_intake_year("March", None, Dec 2025) -> 2026
+   - Query DB for Bachelor + (International Economics and Trade / International Trade) + March 2026
+   - If matches exist: show 2-3 options + deadline
+   - If none exist: "We don't have March 2026 Bachelor intakes for that major in partner DB, but September 2026 options are available. Would you like to see September options?"
+   - Do NOT ask intake year (already inferred)
+
+3) Show behavior when no DB matches for March but September exists
+   Input: "Bachelor in International Trade, March intake"
+   Expected:
+   - Query DB for March intake -> 0 matches
+   - Automatically check September of same year
+   - If September exists: "We don't have March 2026 Bachelor intakes for that major in partner DB, but September 2026 options are available. Would you like to see September options?"
+   - If September also doesn't exist: "We don't have March or September 2026 Bachelor intakes for that major in partner DB. Would you like to see other degree levels or majors?"
+"""
 
