@@ -16,6 +16,7 @@ from datetime import datetime, date
 import time
 import json
 import re
+import hashlib
 
 
 @dataclass
@@ -29,6 +30,15 @@ class PaginationState:
     intent: str
     timestamp: float
     last_displayed: Optional[List[Dict[str, Any]]] = None  # Last displayed intakes for follow-up questions (full objects for duration questions)
+
+
+@dataclass
+class PendingState:
+    """State for pending clarification questions"""
+    intent: str
+    missing_slots: List[str]
+    created_at: float
+    partial_state: Dict[str, Any]  # Store partial state (degree_level, intake_term, etc.) that was already extracted
 
 
 class PartnerAgent:
@@ -82,10 +92,14 @@ CRITICAL RULES:
         
         # Last pagination key by partner (for stable fallback)
         self._last_pagination_key_by_partner: Dict[Optional[int], Tuple[Optional[int], str]] = {}
-        
+    
         # Pending slot cache: keyed by (partner_id, conversation_id) -> {"slot": str, "timestamp": float, "intent": str}
         self._pending_slot_cache: Dict[Tuple[Optional[int], str], Dict[str, Any]] = {}
         self._pending_slot_ttl: float = 600.0  # 10 minutes TTL
+        
+        # Pending clarification state: keyed by conv_key -> PendingState
+        self._pending: Dict[str, PendingState] = {}
+        self._pending_ttl: float = 600.0  # 10 minutes TTL
     
     def _get_universities_cached(self, force_reload: bool = False) -> List[Dict[str, Any]]:
         """Lazy load university cache with TTL (only loads when needed for fuzzy matching)"""
@@ -217,6 +231,51 @@ CRITICAL RULES:
         if key in self._pending_slot_cache:
             del self._pending_slot_cache[key]
     
+    def _get_conv_key(self, partner_id: Optional[int], conversation_id: Optional[str], 
+                      conversation_history: List[Dict[str, str]], user_message: str) -> str:
+        """
+        Generate stable conversation key for pending state.
+        Prefer conversation_id if provided, else derive from history + messages.
+        """
+        if conversation_id:
+            return f"{partner_id}_{conversation_id}"
+        
+        # Derive key from history
+        first_msg = conversation_history[0].get("content", "") if conversation_history else ""
+        last_msg = conversation_history[-1].get("content", "") if conversation_history else ""
+        history_len = len(conversation_history)
+        
+        key_str = f"{partner_id}_{first_msg[:50]}_{last_msg[:50]}_{history_len}_{user_message[:50]}"
+        return hashlib.sha1(key_str.encode()).hexdigest()[:16]
+    
+    def _get_pending_state(self, conv_key: str) -> Optional[PendingState]:
+        """Get pending state for conversation, checking TTL"""
+        pending = self._pending.get(conv_key)
+        if not pending:
+            return None
+        
+        now = time.time()
+        if (now - pending.created_at) > self._pending_ttl:
+            del self._pending[conv_key]
+            return None
+        
+        return pending
+    
+    def _set_pending_state(self, conv_key: str, intent: str, missing_slots: List[str], 
+                           partial_state: Dict[str, Any]):
+        """Set pending state for conversation"""
+        self._pending[conv_key] = PendingState(
+            intent=intent,
+            missing_slots=missing_slots,
+            created_at=time.time(),
+            partial_state=partial_state
+        )
+    
+    def _clear_pending_state(self, conv_key: str):
+        """Clear pending state for conversation"""
+        if conv_key in self._pending:
+            del self._pending[conv_key]
+    
     def _get_university_name_by_id(self, university_id: int) -> str:
         """Get university name by ID using DBQueryService (lazy, no eager load)"""
         uni = self.db.query(University).filter(University.id == university_id).first()
@@ -278,6 +337,208 @@ CRITICAL RULES:
                     break  # Only expand first match
         
         return text
+    
+    # ========== DETERMINISTIC PARSING HELPERS ==========
+    
+    def normalize_text(self, s: str) -> str:
+        """Normalize text: lowercase, remove punctuation, collapse spaces"""
+        if not s:
+            return ""
+        s = s.lower().strip()
+        s = re.sub(r'[^\w\s]', '', s)  # Remove punctuation
+        s = re.sub(r'\s+', ' ', s)  # Collapse spaces
+        return s
+    
+    def fuzzy_pick(self, token: str, choices: List[str], cutoff: float = 0.75) -> Optional[str]:
+        """
+        Pick best matching choice using fuzzy similarity.
+        Returns None if no match above cutoff.
+        """
+        if not token or not choices:
+            return None
+        
+        token_norm = self.normalize_text(token)
+        best_match = None
+        best_score = 0.0
+        
+        for choice in choices:
+            choice_norm = self.normalize_text(choice)
+            ratio = SequenceMatcher(None, token_norm, choice_norm).ratio()
+            if ratio > best_score:
+                best_score = ratio
+                best_match = choice
+        
+        if best_score >= cutoff:
+            return best_match
+        return None
+    
+    def parse_degree_level(self, text: str) -> Optional[str]:
+        """
+        Parse degree level with fuzzy mapping for synonyms/typos.
+        Returns: "Bachelor", "Master", "PhD", "Language", or None
+        """
+        if not text:
+            return None
+        
+        text_norm = self.normalize_text(text)
+        
+        # Exact/fuzzy matches for Bachelor
+        bachelor_patterns = ["bachelor", "bsc", "b.sc", "undergraduate", "bachelov", "bacheller", "bachelar"]
+        if any(pat in text_norm for pat in bachelor_patterns):
+            return "Bachelor"
+        
+        # Fuzzy match for Bachelor (typos)
+        bachelor_choices = ["bachelor", "bsc", "undergraduate"]
+        if self.fuzzy_pick(text_norm, bachelor_choices, cutoff=0.75):
+            return "Bachelor"
+        
+        # Exact/fuzzy matches for Master
+        master_patterns = ["master", "msc", "m.sc", "ms", "masters"]
+        if any(pat in text_norm for pat in master_patterns):
+            return "Master"
+        
+        # Fuzzy match for Master
+        master_choices = ["master", "msc", "masters"]
+        if self.fuzzy_pick(text_norm, master_choices, cutoff=0.75):
+            return "Master"
+        
+        # Exact/fuzzy matches for PhD
+        phd_patterns = ["phd", "ph.d", "doctorate", "doctoral", "d.phil"]
+        if any(pat in text_norm for pat in phd_patterns):
+            return "PhD"
+        
+        # Exact/fuzzy matches for Language
+        language_patterns = ["language", "non-degree", "foundation", "preparatory"]
+        if any(pat in text_norm for pat in language_patterns):
+            return "Language"
+        
+        return None
+    
+    def parse_intake_term(self, text: str) -> Optional[str]:
+        """
+        Parse intake term mapping: march/spring, sept/september/fall.
+        Returns: "March" or "September" or None
+        """
+        if not text:
+            return None
+        
+        text_norm = self.normalize_text(text)
+        
+        # March/Spring patterns
+        if re.search(r'\b(mar(ch)?|spring|mar)\b', text_norm):
+            return "March"
+        
+        # September/Fall patterns
+        if re.search(r'\b(sep(t|tember)?|fall|autumn|sept)\b', text_norm):
+            return "September"
+        
+        return None
+    
+    def parse_teaching_language(self, text: str) -> Optional[str]:
+        """
+        Parse teaching language mapping: english/english-taught, chinese/mandarin/中文.
+        Returns: "English" or "Chinese" or None
+        """
+        if not text:
+            return None
+        
+        text_norm = self.normalize_text(text)
+        
+        # English patterns
+        if re.search(r'\b(english|english-?taught|english\s+program|en)\b', text_norm):
+            return "English"
+        
+        # Chinese patterns
+        if re.search(r'\b(chinese|chinese-?taught|chinese\s+program|mandarin|中文|cn)\b', text_norm):
+            return "Chinese"
+        
+        return None
+    
+    def parse_major_query(self, text: str) -> Optional[str]:
+        """
+        Parse major query, keeping short acronyms (cs,cse,ce,eee,mbbs,bba,mba) 
+        and don't drop them as stopwords.
+        Returns cleaned major query string or None.
+        """
+        if not text:
+            return None
+        
+        # Semantic stopwords to remove
+        stopwords = {"scholarship", "info", "information", "fees", "tuition", "cost", 
+                     "requirement", "requirements", "admission", "program", "course"}
+        
+        text_norm = self.normalize_text(text)
+        
+        # Check if it's a stopword
+        if text_norm in stopwords:
+            return None
+        
+        # Check if it's a degree word (should not be a major)
+        if self.parse_degree_level(text):
+            return None
+        
+        # Keep acronyms and short terms (they might be valid majors)
+        # Remove common query words but keep acronyms
+        words = text_norm.split()
+        filtered_words = [w for w in words if w not in stopwords]
+        
+        if not filtered_words:
+            return None
+        
+        return ' '.join(filtered_words).strip()
+    
+    def parse_university_query(self, text: str) -> Optional[str]:
+        """
+        Parse university query: match exact name, then aliases JSON, then fuzzy to name.
+        Must handle "HIT" => Harbin Institute of Technology via aliases.
+        Returns university name or None.
+        """
+        if not text:
+            return None
+        
+        text_norm = self.normalize_text(text)
+        
+        # Load universities cache for matching (lazy - only when needed)
+        uni_cache = self._get_universities_cached()
+        
+        for uni in uni_cache:
+            # Exact name match
+            if text_norm == self.normalize_text(uni.get("name", "")):
+                return uni.get("name")
+            
+            # Check aliases
+            aliases = uni.get("aliases", [])
+            if aliases:
+                for alias in aliases:
+                    if text_norm == self.normalize_text(str(alias)):
+                        return uni.get("name")
+            
+            # Check Chinese name
+            name_cn = uni.get("name_cn")
+            if name_cn and text_norm == self.normalize_text(str(name_cn)):
+                return uni.get("name")
+        
+        # Fuzzy match
+        best_match = None
+        best_score = 0.0
+        
+        for uni in uni_cache:
+            # Match against name
+            name_score = SequenceMatcher(None, text_norm, self.normalize_text(uni.get("name", ""))).ratio()
+            if name_score > best_score and name_score >= 0.8:
+                best_score = name_score
+                best_match = uni.get("name")
+            
+            # Match against aliases
+            aliases = uni.get("aliases", [])
+            if aliases:
+                for alias in aliases:
+                    alias_score = SequenceMatcher(None, text_norm, self.normalize_text(str(alias))).ratio()
+                    if alias_score > best_score and alias_score >= 0.8:
+                        best_score = alias_score
+                        best_match = uni.get("name")
+        
+        return best_match if best_score >= 0.8 else None
     
     def parse_query_rules(self, text: str) -> Dict[str, Any]:
         """
@@ -422,7 +683,7 @@ CRITICAL RULES:
         """
         Extract and consolidate PartnerQueryState from conversation history using router.
         Uses two-stage routing: rules first, then LLM only if confidence < 0.75.
-        Handles clarification mode and intent locking.
+        Handles clarification mode and intent locking with pending state system.
         """
         if not conversation_history:
             return PartnerQueryState()
@@ -433,6 +694,100 @@ CRITICAL RULES:
             if msg.get('role') == 'user':
                 latest_user_message = msg.get('content', '')
                 break
+        
+        # Check for pending state using conversation key
+        conv_key = self._get_conv_key(partner_id, conversation_id, conversation_history, latest_user_message)
+        pending_state = self._get_pending_state(conv_key)
+        
+        # Check if user is clearly changing intent (e.g., "now change to", "instead", "admission requirements")
+        intent_change_keywords = ["now change to", "instead", "admission requirements", "fee calculation", "calculate fees"]
+        is_intent_change = any(kw in latest_user_message.lower() for kw in intent_change_keywords)
+        
+        # If pending state exists and user is not changing intent, handle clarification
+        if pending_state and not is_intent_change:
+            # DO NOT call router.route() - parse deterministically
+            state = PartnerQueryState()
+            
+            # Restore partial state
+            partial = pending_state.partial_state
+            state.intent = pending_state.intent  # Lock intent
+            state.degree_level = partial.get("degree_level")
+            state.intake_term = partial.get("intake_term")
+            state.university_query = partial.get("university_query")
+            state.major_query = partial.get("major_query")
+            state.teaching_language = partial.get("teaching_language")
+            state.wants_scholarship = partial.get("wants_scholarship", False)
+            state.wants_fees = partial.get("wants_fees", False)
+            state.wants_requirements = partial.get("wants_requirements", False)
+            state.wants_list = partial.get("wants_list", False)
+            
+            # Parse user reply to fill missing slots
+            parsed = self.parse_query_rules(latest_user_message)
+            
+            # Fill missing slots using deterministic parsing
+            for slot in pending_state.missing_slots:
+                if slot == "degree_level" and not state.degree_level:
+                    degree = self.parse_degree_level(latest_user_message)
+                    if degree:
+                        state.degree_level = degree
+                elif slot == "intake_term" and not state.intake_term:
+                    term = self.parse_intake_term(latest_user_message)
+                    if term:
+                        state.intake_term = term
+                elif slot == "major_query" and not state.major_query:
+                    major = self.parse_major_query(latest_user_message)
+                    if major:
+                        state.major_query = major
+                elif slot == "teaching_language" and not state.teaching_language:
+                    lang = self.parse_teaching_language(latest_user_message)
+                    if lang:
+                        state.teaching_language = lang
+                elif slot == "scholarship_bundle":
+                    # Parse all fields from bundle
+                    degree = self.parse_degree_level(latest_user_message)
+                    if degree:
+                        state.degree_level = degree
+                    term = self.parse_intake_term(latest_user_message)
+                    if term:
+                        state.intake_term = term
+                    major = self.parse_major_query(latest_user_message)
+                    if major:
+                        state.major_query = major
+                    lang = self.parse_teaching_language(latest_user_message)
+                    if lang:
+                        state.teaching_language = lang
+            
+            # Check if all missing slots are now filled
+            still_missing = []
+            if "degree_level" in pending_state.missing_slots and not state.degree_level:
+                still_missing.append("degree_level")
+            if "intake_term" in pending_state.missing_slots and not state.intake_term and not state.wants_earliest:
+                still_missing.append("intake_term")
+            if "major_query" in pending_state.missing_slots and not state.major_query:
+                still_missing.append("major_query")
+            if "teaching_language" in pending_state.missing_slots and not state.teaching_language:
+                still_missing.append("teaching_language")
+            
+            # If all slots filled, clear pending state
+            if not still_missing:
+                self._clear_pending_state(conv_key)
+                state.is_clarifying = False
+            else:
+                # Still missing slots - keep pending
+                state.is_clarifying = True
+            
+            # Force intent and flags for SCHOLARSHIP
+            if state.intent == self.router.INTENT_SCHOLARSHIP:
+                state.wants_scholarship = True
+                if not state.scholarship_focus:
+                    from app.services.slot_schema import ScholarshipFocus
+                    state.scholarship_focus = ScholarshipFocus()
+            
+            return state
+        
+        # If pending state exists but user changed intent, clear it
+        if pending_state and is_intent_change:
+            self._clear_pending_state(conv_key)
         
         # Check pending_slot cache first (if prev_state not provided or doesn't have pending_slot)
         pending_slot_info = None
@@ -645,12 +1000,30 @@ CRITICAL RULES:
             needs_clar = False
             clarifying_question = None
         
-        # Set pending_slot in cache if clarification needed
+        # Set pending state if clarification needed
         if needs_clar and clarifying_question and missing_slots:
-            slot = missing_slots[0]  # Ask for the first missing slot
-            state.pending_slot = slot
+            state.pending_slot = missing_slots[0] if len(missing_slots) == 1 else "bundle"
             state.is_clarifying = True
+            
+            # Store in both caches for backward compatibility
+            slot = missing_slots[0]  # Ask for the first missing slot
             self._set_pending_slot(partner_id, conversation_id, slot, state.intent)
+            
+            # Also store in new pending state system
+            conv_key = self._get_conv_key(partner_id, conversation_id, conversation_history, 
+                                         conversation_history[-1].get("content", "") if conversation_history else "")
+            partial_state = {
+                "degree_level": state.degree_level,
+                "intake_term": state.intake_term,
+                "university_query": state.university_query,
+                "major_query": state.major_query,
+                "teaching_language": state.teaching_language,
+                "wants_scholarship": state.wants_scholarship,
+                "wants_fees": state.wants_fees,
+                "wants_requirements": state.wants_requirements,
+                "wants_list": state.wants_list,
+            }
+            self._set_pending_state(conv_key, state.intent, missing_slots, partial_state)
         
         # Build SQL plan (only if no clarification needed)
         sql_plan = None
@@ -710,11 +1083,30 @@ CRITICAL RULES:
                     question_parts.append("subject/major")
         
         elif intent == self.router.INTENT_SCHOLARSHIP:
-            # If generic "scholarship info", ask for bundle (degree_level + major + intake_term)
+            # SCHOLARSHIP clarification rules (upgraded)
+            # ALWAYS require degree_level
+            if not state.degree_level:
+                missing_slots.append("degree_level")
+                question_parts.append("degree level (Language/Bachelor/Master/PhD)")
+            
+            # If generic "scholarship info" with nothing else: ask for bundle
             if not state.degree_level and not state.major_query and not state.university_query:
-                # Use bundle slot to prevent rerouting on next message
                 missing_slots.append("scholarship_bundle")
-                return missing_slots, "Which level and intake? (1) Language (March) (2) Bachelor (March/Sept) (3) Master (Sept) (4) PhD (Sept). You can answer like: 'Bachelor, CSE, March'"
+                return missing_slots, "Which level and intake? (1) Language (March) (2) Bachelor (March/Sept) (3) Master (Sept) (4) PhD (Sept). Reply like: 'Bachelor, CSE, March, English'"
+            
+            # If degree_level present but major missing and university missing: ask for major/subject
+            if state.degree_level and not state.major_query and not state.university_query:
+                if "degree_level" not in missing_slots:
+                    missing_slots.append("major_query")
+                    question_parts.append("major/subject (e.g., CSE, Computer Science)")
+            
+            # If intake_term missing: ask March or September
+            if not state.intake_term and not state.wants_earliest:
+                if "degree_level" not in missing_slots and "major_query" not in missing_slots:
+                    missing_slots.append("intake_term")
+                    question_parts.append("intake term (March/September or earliest)")
+            
+            # teaching_language: will be asked AFTER DB check if both exist (handled separately)
             # If we have some info, proceed and only ask if result set too broad
         
         elif intent == self.router.INTENT_ADMISSION_REQUIREMENTS:
@@ -929,30 +1321,95 @@ CRITICAL RULES:
                     order_by=order_by
                 )
                 print(f"DEBUG: run_db() - find_program_intakes returned {len(intakes)} intakes")
+                
+                # ========== 0 RESULTS FALLBACK LOGIC ==========
+                if len(intakes) == 0:
+                    print(f"DEBUG: 0 results found, applying fallback logic...")
+                    fallback_filters = filters.copy()
+                    fallback_applied = False
+                    
+                    # Fallback 1: If major_query is acronym (cs/cse/ce), expand and retry
+                    if state and state.major_query and not filters.get("major_ids"):
+                        major_lower = state.major_query.lower().strip()
+                        if major_lower in ["cs", "cse", "ce", "eee", "it", "ai", "ds", "se"]:
+                            # Expand acronym to multiple variations
+                            expansions = {
+                                "cs": ["computer science", "computer science and technology"],
+                                "cse": ["computer science", "computer science and technology", "computer science engineering"],
+                                "ce": ["computer engineering", "computer science engineering"],
+                                "eee": ["electrical engineering", "electrical and electronic engineering"],
+                                "it": ["information technology", "information science"],
+                                "ai": ["artificial intelligence"],
+                                "ds": ["data science"],
+                                "se": ["software engineering"]
+                            }
+                            
+                            expanded_names = expansions.get(major_lower, [])
+                            for exp_name in expanded_names:
+                                majors = self.db_service.search_majors(name=exp_name, degree_level=filters.get("degree_level"), limit=20)
+                                if majors:
+                                    fallback_filters["major_ids"] = [m.id for m in majors]
+                                    fallback_applied = True
+                                    print(f"DEBUG: Expanded {major_lower} to {exp_name}, found {len(majors)} majors")
+                                    break
+                    
+                    # Fallback 2: If intake_term causes 0 results and user didn't explicitly demand it, retry without term
+                    if not fallback_applied and filters.get("intake_term") and state:
+                        # Check if user explicitly mentioned the term in original query
+                        # (This is a heuristic - in practice you'd track if term was explicit)
+                        fallback_filters.pop("intake_term", None)
+                        fallback_intakes, _ = self.db_service.find_program_intakes(
+                            filters=fallback_filters, limit=limit, offset=offset, order_by=order_by
+                        )
+                        if len(fallback_intakes) > 0:
+                            # Get distinct intake terms from results
+                            available_terms = set()
+                            for intake in fallback_intakes:
+                                if hasattr(intake, 'intake_term') and intake.intake_term:
+                                    available_terms.add(str(intake.intake_term))
+                            return {
+                                "_fallback": True,
+                                "_fallback_type": "intake_term",
+                                "_available_terms": list(available_terms),
+                                "_intakes": fallback_intakes
+                            }
+                    
+                    # Fallback 3: If teaching_language causes 0, retry without it
+                    if not fallback_applied and filters.get("teaching_language"):
+                        fallback_filters.pop("teaching_language", None)
+                        fallback_intakes, _ = self.db_service.find_program_intakes(
+                            filters=fallback_filters, limit=limit, offset=offset, order_by=order_by
+                        )
+                        if len(fallback_intakes) > 0:
+                            # Check distinct languages
+                            available_languages = set()
+                            for intake in fallback_intakes:
+                                if hasattr(intake, 'teaching_language') and intake.teaching_language:
+                                    available_languages.add(str(intake.teaching_language))
+                                elif hasattr(intake, 'major') and intake.major and intake.major.teaching_language:
+                                    available_languages.add(str(intake.major.teaching_language))
+                            return {
+                                "_fallback": True,
+                                "_fallback_type": "teaching_language",
+                                "_available_languages": list(available_languages),
+                                "_intakes": fallback_intakes
+                            }
+                    
+                    # If still 0, return empty but mark for fallback message
+                    return {
+                        "_fallback": True,
+                        "_fallback_type": "no_results",
+                        "_intakes": []
+                    }
+                
                 return intakes
             except Exception as e:
                 import traceback
                 print(f"ERROR: find_program_intakes failed: {e}")
                 traceback.print_exc()
                 return []
-            # Use search_program_intakes
-            results = self.db_service.search_program_intakes(
-                university_id=sql_params.get("university_id"),
-                university_ids=sql_params.get("university_ids"),
-                major_id=sql_params.get("major_id"),
-                major_ids=sql_params.get("major_ids"),
-                intake_term=sql_params.get("intake_term"),
-                intake_year=sql_params.get("intake_year"),
-                upcoming_only=sql_params.get("upcoming_only", True),
-                limit=sql_params.get("limit", 10),
-                duration_years_target=sql_params.get("duration_years_target"),
-                duration_constraint=sql_params.get("duration_constraint"),
-                budget_max=sql_params.get("budget_max"),
-                teaching_language=sql_params.get("teaching_language"),
-                degree_level=sql_params.get("degree_level")
-            )
-            return results
         
+        # Default return if intent doesn't match
         return []
     
     def build_db_context(self, results: List[Any], req_focus: Dict[str, bool], list_mode: bool = False) -> str:
@@ -1189,10 +1646,10 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
             if degree_level:
                 candidates = [m for m in candidates if str(m.get("degree_level", "")).lower() == str(degree_level).lower()]
             
-            # Convert cache format to match DB format
+            # Convert cache format - already in dict format
             all_majors = candidates[:500]  # Limit for performance
         else:
-            # Convert to dict format for compatibility
+            # Convert DB objects to dict format for compatibility
             all_majors = [
                 {
                     "id": m.id,
@@ -3208,20 +3665,20 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
                     # Strip degree phrases from major_query (e.g., "bachelor in chemistry" -> "chemistry")
                     # Also detect degree_level from the phrase if missing
                     text_lower = state.major_query.lower()
-                    if not state.degree_level:
-                        # Check for degree phrases and set degree_level accordingly
-                        if any(phrase in text_lower for phrase in ["bachelor", "bsc", "b.sc"]):
-                            state.degree_level = "Bachelor"
-                        elif any(phrase in text_lower for phrase in ["master", "msc", "m.sc"]):
-                            state.degree_level = "Master"
-                        elif any(phrase in text_lower for phrase in ["phd", "doctorate"]):
-                            state.degree_level = "PhD"
-                    
-                    state.major_query = self._strip_degree_from_major_query(state.major_query)
-                    # If cleaned value is empty, set to None
-                    if not state.major_query or not state.major_query.strip():
-                        state.major_query = None
-        
+            if not state.degree_level:
+                # Check for degree phrases and set degree_level accordingly
+                if any(phrase in text_lower for phrase in ["bachelor", "bsc", "b.sc"]):
+                    state.degree_level = "Bachelor"
+                elif any(phrase in text_lower for phrase in ["master", "msc", "m.sc"]):
+                    state.degree_level = "Master"
+                elif any(phrase in text_lower for phrase in ["phd", "doctorate"]):
+                    state.degree_level = "PhD"
+            
+            state.major_query = self._strip_degree_from_major_query(state.major_query)
+            # If cleaned value is empty, set to None
+            if not state.major_query or not state.major_query.strip():
+                state.major_query = None
+
         print(f"DEBUG: Final state after normalization: {state.to_dict() if state else 'None'}")
         
         # ========== STAGE B: Run DB Query ==========
@@ -3236,31 +3693,151 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
         
         # Run DB query using route_plan
         db_results = self.run_db(route_plan)
+        
+        # Check if result is a fallback dict
+        fallback_result = None
+        if isinstance(db_results, dict) and db_results.get("_fallback"):
+            fallback_result = db_results
+            db_results = fallback_result.get("_intakes", [])
+            print(f"DEBUG: Fallback triggered: type={fallback_result.get('_fallback_type')}, results={len(db_results)}")
+        
         print(f"DEBUG: DB query returned {len(db_results)} results")
         
-        # ========== POST-QUERY: Check for mixed teaching languages ==========
-        # If DB results have both English + Chinese taught and user didn't specify, ask once
-        if db_results and not state.teaching_language and not state.is_clarifying:
-            teaching_languages = set()
-            for result in db_results:
-                if hasattr(result, 'teaching_language') and result.teaching_language:
-                    teaching_languages.add(str(result.teaching_language))
-                elif hasattr(result, 'major') and result.major and result.major.teaching_language:
-                    teaching_languages.add(str(result.major.teaching_language))
+        # ========== HANDLE FALLBACK RESULTS ==========
+        if fallback_result:
+            fallback_type = fallback_result.get("_fallback_type")
             
-            if len(teaching_languages) > 1:
-                # Mixed teaching languages - ask clarification
-                print(f"DEBUG: Mixed teaching languages detected: {teaching_languages}, asking clarification")
-                state.pending_slot = "teaching_language"
-                state.is_clarifying = True
-                self._set_pending_slot(partner_id, conversation_id, "teaching_language", state.intent)
-                
+            if fallback_type == "intake_term" and len(db_results) > 0:
+                # Intake term removal yielded results - ask user to choose term
+                available_terms = fallback_result.get("_available_terms", [])
+                terms_str = " or ".join(available_terms) if available_terms else "March or September"
                 return {
-                    "response": "I found programs available in both English-taught and Chinese-taught. Which do you prefer? (English or Chinese)",
+                    "response": f"I found programs, but not for the intake term you specified. Available terms: {terms_str}. Which term would you like?",
                     "used_db": True,
                     "used_tavily": False,
                     "sources": []
                 }
+            
+            elif fallback_type == "teaching_language" and len(db_results) > 0:
+                # Teaching language removal yielded results - ask which language
+                available_languages = fallback_result.get("_available_languages", [])
+                langs_str = " or ".join(available_languages) if available_languages else "English or Chinese"
+                return {
+                    "response": f"I found programs available in {langs_str}. Which do you prefer?",
+                    "used_db": True,
+                    "used_tavily": False,
+                    "sources": []
+                }
+            
+            elif fallback_type == "no_results" and len(db_results) == 0:
+                # Still no results after fallbacks - intelligent message
+                # Check if major is missing and offer suggestions
+                if not state.major_query:
+                    # Offer top majors for degree/intake
+                    major_cache = self._get_majors_cached()
+                    filtered_majors = [m for m in major_cache[:100] if 
+                                     (not state.degree_level or str(m.get("degree_level", "")).lower() == str(state.degree_level).lower())]
+                    if filtered_majors:
+                        top_majors = [m.get("name") for m in filtered_majors[:5]]
+                        return {
+                            "response": f"I couldn't find an upcoming intake matching those filters. Available majors for {state.degree_level or 'your criteria'}: {', '.join(top_majors)}. Tell me a major name or say 'show available majors'.",
+                            "used_db": True,
+                            "used_tavily": False,
+                            "sources": []
+                        }
+                
+                return {
+                    "response": "I couldn't find an upcoming intake matching those filters. Tell me a nearby major name (or say 'show available majors').",
+                    "used_db": True,
+                    "used_tavily": False,
+                    "sources": []
+                }
+        
+        # ========== POST-QUERY: Check for mixed teaching languages ==========
+        # Use DBQueryService to check distinct languages before asking
+        if db_results and not state.teaching_language and not state.is_clarifying:
+            # Check if we have enough info to query distinct languages
+            if state.degree_level or state.major_query or state.university_query or state.intake_term:
+                filters_for_lang_check = {}
+                if state.degree_level:
+                    filters_for_lang_check["degree_level"] = state.degree_level
+                if state.intake_term:
+                    filters_for_lang_check["intake_term"] = state.intake_term
+                if state.university_query:
+                    matched, uni_dict, _ = self._fuzzy_match_university(state.university_query)
+                    if matched and uni_dict:
+                        filters_for_lang_check["university_id"] = uni_dict.get("id")
+                
+                # Get distinct teaching languages
+                try:
+                    distinct_languages = self.db_service.get_distinct_teaching_languages(filters_for_lang_check)
+                    
+                    if len(distinct_languages) >= 2:
+                        # Mixed teaching languages - ask clarification
+                        langs_str = " or ".join(sorted(distinct_languages))
+                        print(f"DEBUG: Mixed teaching languages detected: {distinct_languages}, asking clarification")
+                        
+                        # Set pending state for teaching language
+                        conv_key = self._get_conv_key(partner_id, conversation_id, conversation_history, 
+                                                     conversation_history[-1].get("content", "") if conversation_history else "")
+                        partial_state = {
+                            "degree_level": state.degree_level,
+                            "intake_term": state.intake_term,
+                            "university_query": state.university_query,
+                            "major_query": state.major_query,
+                            "teaching_language": None,
+                            "wants_scholarship": state.wants_scholarship,
+                            "wants_fees": state.wants_fees,
+                            "wants_requirements": state.wants_requirements,
+                            "wants_list": state.wants_list,
+                        }
+                        self._set_pending_state(conv_key, state.intent, ["teaching_language"], partial_state)
+                        self._set_pending_slot(partner_id, conversation_id, "teaching_language", state.intent)
+                        
+                        return {
+                            "response": f"I found programs available in {langs_str}. Which do you prefer?",
+                            "used_db": True,
+                            "used_tavily": False,
+                            "sources": []
+                        }
+                    elif len(distinct_languages) == 1:
+                        # Auto-fill teaching language
+                        state.teaching_language = list(distinct_languages)[0]
+                        print(f"DEBUG: Auto-filled teaching_language: {state.teaching_language}")
+                except Exception as e:
+                    print(f"DEBUG: Error checking distinct languages: {e}, using fallback method")
+                    # Fallback to checking results directly
+                    teaching_languages = set()
+                    for result in db_results:
+                        if hasattr(result, 'teaching_language') and result.teaching_language:
+                            teaching_languages.add(str(result.teaching_language))
+                        elif hasattr(result, 'major') and result.major and result.major.teaching_language:
+                            teaching_languages.add(str(result.major.teaching_language))
+                    
+                    if len(teaching_languages) > 1:
+                        langs_str = " or ".join(sorted(teaching_languages))
+                        conv_key = self._get_conv_key(partner_id, conversation_id, conversation_history, 
+                                                     conversation_history[-1].get("content", "") if conversation_history else "")
+                        partial_state = {
+                            "degree_level": state.degree_level,
+                            "intake_term": state.intake_term,
+                            "university_query": state.university_query,
+                            "major_query": state.major_query,
+                            "teaching_language": None,
+                            "wants_scholarship": state.wants_scholarship,
+                            "wants_fees": state.wants_fees,
+                            "wants_requirements": state.wants_requirements,
+                            "wants_list": state.wants_list,
+                        }
+                        self._set_pending_state(conv_key, state.intent, ["teaching_language"], partial_state)
+                        self._set_pending_slot(partner_id, conversation_id, "teaching_language", state.intent)
+                        
+                        return {
+                            "response": f"I found programs available in {langs_str}. Which do you prefer?",
+                            "used_db": True,
+                            "used_tavily": False,
+                            "sources": []
+                        }
         
         # ========== STAGE C: Format Response ==========
         # Build DB context (small, field-aware)

@@ -1056,5 +1056,63 @@ class DBQueryService:
             "university_scholarships": university_count,
             "example_scholarship_names": example_scholarships
         }
+    
+    def get_distinct_teaching_languages(self, filters: Dict[str, Any]) -> set:
+        """
+        Get distinct teaching languages for programs matching the given filters.
+        Uses ProgramIntake.teaching_language OR Major.teaching_language as fallback.
+        Returns set of effective language strings (normalized to "English"/"Chinese").
+        """
+        query = self.db.query(ProgramIntake).join(Major, ProgramIntake.major_id == Major.id).join(
+            University, ProgramIntake.university_id == University.id
+        )
+        
+        # Apply same filters as find_program_intakes
+        if filters.get("university_id"):
+            query = query.filter(ProgramIntake.university_id == filters["university_id"])
+        if filters.get("university_ids"):
+            query = query.filter(ProgramIntake.university_id.in_(filters["university_ids"]))
+        if filters.get("major_id"):
+            query = query.filter(ProgramIntake.major_id == filters["major_id"])
+        if filters.get("major_ids"):
+            query = query.filter(ProgramIntake.major_id.in_(filters["major_ids"]))
+        if filters.get("degree_level"):
+            query = query.filter(Major.degree_level.ilike(f"%{filters['degree_level']}%"))
+        if filters.get("intake_term"):
+            query = query.filter(ProgramIntake.intake_term == filters["intake_term"])
+        if filters.get("intake_year"):
+            query = query.filter(ProgramIntake.intake_year == filters["intake_year"])
+        if filters.get("city"):
+            query = query.filter(University.city.ilike(f"%{filters['city']}%"))
+        if filters.get("province"):
+            query = query.filter(University.province.ilike(f"%{filters['province']}%"))
+        if filters.get("upcoming_only", True):
+            now = datetime.now(timezone.utc)
+            query = query.filter(
+                or_(
+                    ProgramIntake.application_deadline >= now,
+                    ProgramIntake.application_deadline.is_(None)
+                )
+            )
+        
+        # Get distinct teaching languages (use ProgramIntake.teaching_language first, fallback to Major.teaching_language)
+        results = query.with_entities(
+            func.coalesce(ProgramIntake.teaching_language, Major.teaching_language).label("teaching_language")
+        ).distinct().all()
+        
+        languages = set()
+        for (lang,) in results:
+            if lang:
+                lang_str = str(lang).strip()
+                # Normalize to "English" or "Chinese"
+                if lang_str.lower() in ["english", "en", "english-taught"]:
+                    languages.add("English")
+                elif lang_str.lower() in ["chinese", "cn", "chinese-taught", "mandarin", "中文"]:
+                    languages.add("Chinese")
+                else:
+                    # Keep as-is if unknown
+                    languages.add(lang_str)
+        
+        return languages
 
 
