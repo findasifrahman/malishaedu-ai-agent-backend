@@ -93,17 +93,18 @@ CRITICAL RULES:
         # Last pagination key by partner (for stable fallback)
         self._last_pagination_key_by_partner: Dict[Optional[int], Tuple[Optional[int], str]] = {}
     
-        # Pending slot cache: keyed by (partner_id, conversation_id) -> {"slot": str, "timestamp": float, "intent": str}
+        # Unified state cache: keyed by (partner_id, conversation_id) -> {"state": PartnerQueryState, "pending": PendingInfo, "ts": float}
+        # PendingInfo = {"slot": str, "snapshot": dict}
+        self._state_cache: Dict[Tuple[Optional[int], str], Dict[str, Any]] = {}
+        self._state_cache_ttl: float = 1800.0  # 30 minutes TTL
+        
+        # Legacy pending slot cache (for backward compatibility during migration)
         self._pending_slot_cache: Dict[Tuple[Optional[int], str], Dict[str, Any]] = {}
         self._pending_slot_ttl: float = 600.0  # 10 minutes TTL
         
-        # Pending clarification state: keyed by conv_key -> PendingState
+        # Legacy pending clarification state (for backward compatibility)
         self._pending: Dict[str, PendingState] = {}
         self._pending_ttl: float = 600.0  # 10 minutes TTL
-        
-        # Per-conversation state cache: keyed by (partner_id, conversation_id) -> (PartnerQueryState, timestamp)
-        self._state_cache: Dict[Tuple[Optional[int], str], Tuple[PartnerQueryState, float]] = {}
-        self._state_cache_ttl: float = 1800.0  # 30 minutes TTL
     
     def _get_universities_cached(self, force_reload: bool = False) -> List[Dict[str, Any]]:
         """Lazy load university cache with TTL (only loads when needed for fuzzy matching)"""
@@ -239,24 +240,31 @@ CRITICAL RULES:
             del self._pending_slot_cache[key]
     
     def _get_conv_key(self, partner_id: Optional[int], conversation_id: Optional[str], 
-                      conversation_history: List[Dict[str, str]], user_message: str) -> str:
+                      conversation_history: List[Dict[str, str]], user_message: str = None) -> str:
         """
-        Generate stable conversation key for pending state.
-        Prefer conversation_id if provided, else derive from first user message only (stable across turns).
-        DO NOT include latest_user_message or history_len as they change every turn.
+        Generate STABLE conversation key for pending state.
+        CRITICAL: Must NOT include latest_user_message or any changing content.
+        Use partner_id + conversation_id when both exist.
+        If conversation_id is None, derive stable fallback from all user messages (not just latest).
         """
+        # Primary: Use partner_id + conversation_id (most stable)
         if conversation_id:
-            return f"{partner_id}_{conversation_id}"
+            return f"partner:{partner_id}|conv:{conversation_id}"
         
-        # Derive key from first user message only (stable across clarification turns)
-        first_user_msg = ""
+        # Fallback: Hash all user messages concatenated (stable across clarification turns)
+        all_user_messages = []
         for msg in conversation_history:
             if msg.get('role') == 'user':
-                first_user_msg = msg.get('content', "")[:100]  # First 100 chars
-                break
+                all_user_messages.append(msg.get('content', ""))
         
-        # Use partner_id + first message only (no latest message, no history_len)
-        key_str = f"{partner_id}_{first_user_msg}"
+        if all_user_messages:
+            # Use first user message as stable identifier (doesn't change on clarification replies)
+            first_user_msg = all_user_messages[0][:200]  # First 200 chars
+            key_str = f"partner:{partner_id}|first_msg:{first_user_msg}"
+        else:
+            # Last resort: use partner_id only
+            key_str = f"partner:{partner_id}"
+        
         return hashlib.sha1(key_str.encode()).hexdigest()[:16]
     
     def _get_pending_state(self, conv_key: str) -> Optional[PendingState]:
@@ -303,39 +311,107 @@ CRITICAL RULES:
             partial_state=partial_state_dict
         )
     
-    def _get_state_cache(self, partner_id: Optional[int], conversation_id: Optional[str]) -> Optional[PartnerQueryState]:
-        """Get cached state for conversation"""
+    def _get_cached_state(self, partner_id: Optional[int], conversation_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Get unified cached state for conversation (state + pending info)"""
         if not conversation_id:
             return None
         key = (partner_id, conversation_id)
-        if key not in self._state_cache:
-            return None
-        state, timestamp = self._state_cache[key]
-        now = time.time()
-        if (now - timestamp) > self._state_cache_ttl:
-            del self._state_cache[key]
-            return None
-        return state
+        if key in self._state_cache:
+            cached = self._state_cache[key]
+            if (time.time() - cached.get("ts", 0)) < self._state_cache_ttl:
+                return cached
+            else:
+                del self._state_cache[key]
+        return None
     
-    def _set_state_cache(self, partner_id: Optional[int], conversation_id: Optional[str], state: PartnerQueryState):
-        """Cache state for conversation"""
+    def _set_cached_state(self, partner_id: Optional[int], conversation_id: Optional[str], 
+                         state: PartnerQueryState, pending: Optional[Dict[str, Any]] = None):
+        """Cache unified state for conversation (state + pending info)"""
         if not conversation_id:
             return
         key = (partner_id, conversation_id)
-        self._state_cache[key] = (state, time.time())
+        self._state_cache[key] = {
+            "state": state,
+            "pending": pending,
+            "ts": time.time()
+        }
     
-    def llm_extract_state(self, conversation_history: List[Dict[str, str]], today_date: date) -> Dict[str, Any]:
+    def _get_pending(self, partner_id: Optional[int], conversation_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Get pending slot info from unified cache"""
+        cached = self._get_cached_state(partner_id, conversation_id)
+        return cached.get("pending") if cached else None
+    
+    def _set_pending(self, partner_id: Optional[int], conversation_id: Optional[str], 
+                    slot: str, snapshot: PartnerQueryState):
+        """Set pending slot with full state snapshot"""
+        if not conversation_id:
+            return
+        cached = self._get_cached_state(partner_id, conversation_id)
+        state = cached.get("state") if cached else snapshot
+        
+        pending_info = {
+            "slot": slot,
+            "snapshot": {
+                "intent": snapshot.intent,
+                "degree_level": snapshot.degree_level,
+                "major_query": snapshot.major_query,
+                "university_query": snapshot.university_query,
+                "intake_term": snapshot.intake_term,
+                "intake_year": snapshot.intake_year,
+                "wants_earliest": snapshot.wants_earliest,
+                "teaching_language": snapshot.teaching_language,
+                "wants_scholarship": snapshot.wants_scholarship,
+                "wants_fees": snapshot.wants_fees,
+                "wants_requirements": snapshot.wants_requirements,
+                "city": snapshot.city,
+                "province": snapshot.province,
+                "country": snapshot.country,
+                "budget_max": snapshot.budget_max,
+                "duration_years_target": snapshot.duration_years_target,
+                "duration_constraint": snapshot.duration_constraint,
+                "req_focus": snapshot.req_focus.__dict__ if hasattr(snapshot.req_focus, '__dict__') else snapshot.req_focus,
+                "scholarship_focus": snapshot.scholarship_focus.__dict__ if hasattr(snapshot.scholarship_focus, '__dict__') else snapshot.scholarship_focus,
+            }
+        }
+        self._set_cached_state(partner_id, conversation_id, state, pending_info)
+    
+    def _consume_pending(self, partner_id: Optional[int], conversation_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Consume and clear pending slot, return snapshot"""
+        cached = self._get_cached_state(partner_id, conversation_id)
+        if not cached or not cached.get("pending"):
+            return None
+        pending = cached["pending"]
+        cached["pending"] = None
+        self._set_cached_state(partner_id, conversation_id, cached.get("state"), None)
+        return pending.get("snapshot")
+    
+    # Legacy methods for backward compatibility
+    def _get_state_cache(self, partner_id: Optional[int], conversation_id: Optional[str]) -> Optional[PartnerQueryState]:
+        """Get cached state for conversation (legacy)"""
+        cached = self._get_cached_state(partner_id, conversation_id)
+        return cached.get("state") if cached else None
+    
+    def _set_state_cache(self, partner_id: Optional[int], conversation_id: Optional[str], state: PartnerQueryState):
+        """Cache state for conversation (legacy)"""
+        self._set_cached_state(partner_id, conversation_id, state, None)
+    
+    def llm_extract_state(self, conversation_history: List[Dict[str, str]], today_date: date, prev_state: Optional[PartnerQueryState] = None) -> Dict[str, Any]:
         """
         ALWAYS-LLM extraction for intent/slots.
         Returns JSON dict with intent, slots, and confidence.
         DO NOT inject university/major lists - keep prompt small.
         """
-        # Build conversation text (last <=16 messages)
+        # Build conversation text (6 most recent turns ONLY - not whole history)
         conversation_text = ""
-        for msg in conversation_history[-16:]:
+        for msg in conversation_history[-6:]:
             role = msg.get('role', '')
             content = msg.get('content', '')
             conversation_text += f"{role}: {content}\n"
+        
+        # Add prev_state summary if exists
+        prev_state_summary = ""
+        if prev_state:
+            prev_state_summary = f"\nPrevious context: intent={prev_state.intent}, degree={prev_state.degree_level}, major={prev_state.major_query}, intake={prev_state.intake_term}"
         
         # Small LLM prompt for JSON extraction
         extraction_prompt = f"""Extract information from this conversation. Today's date: {today_date.strftime('%Y-%m-%d')}.
@@ -366,7 +442,7 @@ RULES:
 - For "next March intake", set intake_term="March" and wants_earliest=true, NOT page_action="next".
 
 Conversation:
-{conversation_text}
+{conversation_text}{prev_state_summary}
 
 Output ONLY valid JSON, no other text:"""
         
@@ -376,21 +452,57 @@ Output ONLY valid JSON, no other text:"""
                     {"role": "system", "content": "You are a JSON extractor. Output only valid JSON matching the exact schema."},
                     {"role": "user", "content": extraction_prompt}
                 ],
-                temperature=0.0,
-                model="gpt-4o-mini"
+                temperature=0.0
             )
             
-            # Parse JSON response
-            import json
-            content = response.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+            # Parse JSON response - OpenAI response is an object, not a dict
+            if hasattr(response, 'choices') and len(response.choices) > 0:
+                content = response.choices[0].message.content
+            else:
+                # Fallback to dict access if response is a dict
+                content = response.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+            
             # Remove markdown code blocks if present
             content = re.sub(r'```json\s*', '', content)
             content = re.sub(r'```\s*', '', content)
             content = content.strip()
             
             extracted = json.loads(content)
+            
+            # POST-PROCESSING RULES (deterministic)
+            # 1. If intent == PAGINATION, map to LIST_PROGRAMS or GENERAL
+            if extracted.get("intent") == "PAGINATION":
+                if extracted.get("page_action") in ["next", "prev"]:
+                    extracted["intent"] = "LIST_PROGRAMS"
+                else:
+                    extracted["intent"] = "GENERAL"
+            
+            # 2. Remove stopwords from major_raw
+            if extracted.get("major_raw"):
+                major_clean = extracted["major_raw"].lower().strip()
+                stopwords = {"scholarship", "info", "information", "fees", "tuition", "cost", 
+                           "requirement", "requirements", "admission", "program", "course", "list", "all"}
+                if major_clean in stopwords:
+                    extracted["major_raw"] = None
+                else:
+                    # Clean stopwords from multi-word majors
+                    words = major_clean.split()
+                    filtered_words = [w for w in words if w not in stopwords]
+                    if filtered_words:
+                        extracted["major_raw"] = " ".join(filtered_words)
+                    else:
+                        extracted["major_raw"] = None
+            
+            # 3. If university_raw is "china", set country="China" instead
+            if extracted.get("university_raw") and extracted["university_raw"].lower() in ["china", "chinese"]:
+                extracted["country"] = "China"
+                extracted["university_raw"] = None
+            
+            # 4. If message is ONLY language ("english/chinese/英文/中文/englsih/ingreji"), treat as slot fill
+            # (This is handled in clarification logic, but ensure it doesn't break extraction)
+            
             return extracted
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
+        except (json.JSONDecodeError, KeyError, ValueError, AttributeError) as e:
             print(f"ERROR: llm_extract_state failed: {e}")
             # Return default dict
             return {
@@ -438,12 +550,13 @@ Output ONLY valid JSON, no other text:"""
         
         text_lower = text.lower()
         
-        # Acronym expansion map
+        # Acronym expansion map (includes ECE, BBA, LLB, etc.)
         acronym_map = {
             "cse": "computer science",
             "cs": "computer science",
             "ce": "computer engineering",
             "se": "software engineering",
+            "ece": "electronics and communication engineering",
             "eee": "electrical engineering",
             "it": "information technology",
             "ai": "artificial intelligence",
@@ -459,7 +572,9 @@ Output ONLY valid JSON, no other text:"""
             "math": "mathematics",
             "econ": "economics",
             "fin": "finance",
+            "bba": "bachelor of business administration",
             "mba": "master of business administration",
+            "llb": "bachelor of laws",
         }
         
         # Check if text is short (<=6 chars) or all-caps-like (mostly uppercase)
@@ -576,6 +691,7 @@ Output ONLY valid JSON, no other text:"""
     def parse_teaching_language(self, text: str) -> Optional[str]:
         """
         Parse teaching language mapping: english/english-taught, chinese/mandarin/中文.
+        Handles typos (englsih, englsh) and Banglish (ingreji, english e).
         Returns: "English" or "Chinese" or None
         """
         if not text:
@@ -583,13 +699,23 @@ Output ONLY valid JSON, no other text:"""
         
         text_norm = self.normalize_text(text)
         
-        # English patterns
-        if re.search(r'\b(english|english-?taught|english\s+program|en)\b', text_norm):
-            return "English"
+        # English patterns (including typos and Banglish)
+        english_patterns = [
+            r'\b(english|englsih|englsh|inglish|ingreji|english\s+e|english-?taught|english\s+program|en)\b',
+            r'\b(英文)\b',  # Chinese word for English
+        ]
+        for pattern in english_patterns:
+            if re.search(pattern, text_norm):
+                return "English"
         
-        # Chinese patterns
-        if re.search(r'\b(chinese|chinese-?taught|chinese\s+program|mandarin|中文|cn)\b', text_norm):
-            return "Chinese"
+        # Chinese patterns (including Chinese characters)
+        chinese_patterns = [
+            r'\b(chinese|chinay|chinese-?taught|chinese\s+program|mandarin|cn)\b',
+            r'\b(中文|汉语)\b',  # Chinese words for Chinese
+        ]
+        for pattern in chinese_patterns:
+            if re.search(pattern, text_norm):
+                return "Chinese"
         
         return None
     
@@ -849,15 +975,129 @@ Output ONLY valid JSON, no other text:"""
                 latest_user_message = msg.get('content', '')
                 break
         
-        # Check for pending state using conversation key
-        conv_key = self._get_conv_key(partner_id, conversation_id, conversation_history, latest_user_message)
-        pending_state = self._get_pending_state(conv_key)
+        # Check if user is accepting a suggested major (e.g., "applied physics is ok", "that's fine", "sounds good")
+        acceptance_patterns = [
+            r'\b(is\s+ok|is\s+okay|that\'?s\s+fine|that\'?s\s+good|sounds\s+good|works\s+for\s+me|i\'?ll\s+take|yes|ok|okay)\b',
+            r'\b(applied\s+physics|physics|computer\s+science|business|engineering)\s+(is\s+ok|is\s+okay|that\'?s\s+fine|sounds\s+good)\b'
+        ]
+        is_accepting_suggestion = any(re.search(pattern, latest_user_message.lower()) for pattern in acceptance_patterns)
+        
+        # If user is accepting a suggestion, extract the major name from the message
+        accepted_major = None
+        if is_accepting_suggestion:
+            # Try to extract major name from the message
+            major_match = re.search(r'\b(applied\s+physics|physics|computer\s+science|business\s+administration|engineering|artificial\s+intelligence)\b', latest_user_message.lower())
+            if major_match:
+                accepted_major = major_match.group(1)
+                print(f"DEBUG: User accepted suggested major: '{accepted_major}'")
+        
+        # Check for pending slot using unified state cache
+        pending_info = self._get_pending(partner_id, conversation_id)
+        print(f"DEBUG: Pending check - pending_info={pending_info is not None}, slot={pending_info.get('slot') if pending_info else None}")
         
         # Check if user is clearly changing intent (e.g., "now change to", "instead", "admission requirements")
-        intent_change_keywords = ["now change to", "instead", "admission requirements", "fee calculation", "calculate fees"]
+        intent_change_keywords = ["now change to", "instead", "admission requirements", "fee calculation", "calculate fees", "actually i want", "not scholarship"]
         is_intent_change = any(kw in latest_user_message.lower() for kw in intent_change_keywords)
         
-        # If pending state exists and user is not changing intent, handle clarification
+        # If pending slot exists and user is not changing intent, handle clarification (SLOT FILL ONLY)
+        if pending_info and not is_intent_change:
+            print(f"DEBUG: Using pending state - slot={pending_info.get('slot')}, restoring snapshot")
+            # CRITICAL: DO NOT re-run extraction - treat message as slot fill only
+            snapshot = pending_info.get("snapshot", {})
+            pending_slot = pending_info.get("slot")
+            
+            # Restore state from snapshot
+            state = PartnerQueryState()
+            state.intent = snapshot.get("intent", "GENERAL")
+            state.degree_level = snapshot.get("degree_level")
+            state.intake_term = snapshot.get("intake_term")
+            state.university_query = snapshot.get("university_query")
+            state.major_query = snapshot.get("major_query")
+            state.teaching_language = snapshot.get("teaching_language")
+            state.wants_scholarship = snapshot.get("wants_scholarship", False)
+            state.wants_fees = snapshot.get("wants_fees", False)
+            state.wants_requirements = snapshot.get("wants_requirements", False)
+            state.wants_list = snapshot.get("wants_list", False)
+            state.wants_earliest = snapshot.get("wants_earliest", False)
+            state.city = snapshot.get("city")
+            state.province = snapshot.get("province")
+            state.country = snapshot.get("country")
+            state.intake_year = snapshot.get("intake_year")
+            state.duration_years_target = snapshot.get("duration_years_target")
+            state.duration_constraint = snapshot.get("duration_constraint")
+            state.budget_max = snapshot.get("budget_max")
+            
+            # Restore focus objects
+            req_focus_dict = snapshot.get("req_focus")
+            if req_focus_dict:
+                from app.services.slot_schema import RequirementFocus
+                state.req_focus = RequirementFocus(**req_focus_dict) if isinstance(req_focus_dict, dict) else req_focus_dict
+            scholarship_focus_dict = snapshot.get("scholarship_focus")
+            if scholarship_focus_dict:
+                from app.services.slot_schema import ScholarshipFocus
+                state.scholarship_focus = ScholarshipFocus(**scholarship_focus_dict) if isinstance(scholarship_focus_dict, dict) else scholarship_focus_dict
+            
+            # Fill the pending slot deterministically
+            if pending_slot == "teaching_language":
+                lang = self.parse_teaching_language(latest_user_message)
+                if lang:
+                    state.teaching_language = lang
+                    self._consume_pending(partner_id, conversation_id)  # Clear pending
+                else:
+                    # Keep pending if can't parse
+                    return state
+            elif pending_slot == "degree_level":
+                degree = self.parse_degree_level(latest_user_message)
+                if degree:
+                    state.degree_level = degree
+                    self._consume_pending(partner_id, conversation_id)
+                else:
+                    return state
+            elif pending_slot == "intake_term":
+                term = self.parse_intake_term(latest_user_message)
+                if term:
+                    state.intake_term = term
+                    self._consume_pending(partner_id, conversation_id)
+                else:
+                    return state
+            elif pending_slot == "major_choice":
+                # User selected from numbered list (1/2/3)
+                num_match = re.match(r'^(\d+)$', latest_user_message.strip())
+                if num_match:
+                    # This would need to be stored in pending_info for disambiguation
+                    # For now, treat as major_query
+                    self._consume_pending(partner_id, conversation_id)
+                else:
+                    return state
+            elif pending_slot == "major_or_university":
+                # Parse multiple values from the same message (e.g., "mARCH, Physics")
+                major = self.parse_major_query(latest_user_message)
+                uni = self.parse_university_query(latest_user_message)
+                # Also check for intake_term in the same message
+                term = self.parse_intake_term(latest_user_message)
+                if term:
+                    state.intake_term = term
+                
+                if major:
+                    state.major_query = major
+                    self._consume_pending(partner_id, conversation_id)
+                elif uni:
+                    state.university_query = uni
+                    self._consume_pending(partner_id, conversation_id)
+                elif term:
+                    # If only intake_term was found, still clear pending and continue
+                    self._consume_pending(partner_id, conversation_id)
+                else:
+                    return state
+            
+            # Update cache with restored state
+            self._set_cached_state(partner_id, conversation_id, state, None)
+            return state
+        
+        # Legacy pending_state check (for backward compatibility)
+        conv_key = self._get_conv_key(partner_id, conversation_id, conversation_history)
+        pending_state = self._get_pending_state(conv_key)
+        
         if pending_state and not is_intent_change:
             # DO NOT call router.route() - parse deterministically
             state = PartnerQueryState()
@@ -1044,9 +1284,14 @@ Output ONLY valid JSON, no other text:"""
             
             # Handle pending_slot
             if prev_state.pending_slot == "major_or_university":
-                # Parse major or university from reply
+                # Parse multiple values from the same message (e.g., "mARCH, Physics")
                 major = self.parse_major_query(latest_user_message)
                 uni = self.parse_university_query(latest_user_message)
+                # Also check for intake_term in the same message
+                term = self.parse_intake_term(latest_user_message)
+                if term:
+                    state.intake_term = term
+                
                 if major:
                     state.major_query = major
                 elif uni:
@@ -1056,8 +1301,8 @@ Output ONLY valid JSON, no other text:"""
                 if city_match:
                     state.city = city_match.group(1).title()
                 
-                # Clear slot if we got at least one
-                if state.major_query or state.university_query or state.city:
+                # Clear slot if we got at least one (major, university, city, or intake_term)
+                if state.major_query or state.university_query or state.city or state.intake_term:
                     state.pending_slot = None
                     state.is_clarifying = False
                     self._clear_pending_slot(partner_id, conversation_id)
@@ -1176,10 +1421,50 @@ Output ONLY valid JSON, no other text:"""
         # CLARIFICATION LOCKING: If pending_slot exists, DO NOT call LLM - parse deterministically
         # (Already handled above in pending_state check)
         
+        # Check if user is accepting a suggested major from previous response
+        if is_accepting_suggestion and accepted_major:
+            # User accepted a suggestion - use the accepted major and continue with previous context
+            print(f"DEBUG: User accepted major suggestion: '{accepted_major}' - continuing with previous query")
+            # Get previous assistant message to extract context
+            prev_assistant_msg = ""
+            for msg in reversed(conversation_history):
+                if msg.get('role') == 'assistant':
+                    prev_assistant_msg = msg.get('content', '')
+                    break
+            
+            # Check if previous message suggested majors
+            if "closest available majors" in prev_assistant_msg.lower() or "couldn't find" in prev_assistant_msg.lower():
+                # This is a follow-up to a "couldn't find" message - restore previous state and use accepted major
+                # Try to get previous state from cache
+                cached = self._get_cached_state(partner_id, conversation_id)
+                if cached and cached.get("state"):
+                    prev_state_obj = cached.get("state")
+                    # Create new state with accepted major
+                    state = PartnerQueryState()
+                    state.intent = prev_state_obj.intent if hasattr(prev_state_obj, 'intent') else "SCHOLARSHIP"
+                    state.degree_level = prev_state_obj.degree_level if hasattr(prev_state_obj, 'degree_level') else None
+                    state.intake_term = prev_state_obj.intake_term if hasattr(prev_state_obj, 'intake_term') else None
+                    state.teaching_language = prev_state_obj.teaching_language if hasattr(prev_state_obj, 'teaching_language') else None
+                    state.wants_scholarship = prev_state_obj.wants_scholarship if hasattr(prev_state_obj, 'wants_scholarship') else False
+                    state.major_query = accepted_major  # Use accepted major
+                    state.wants_earliest = prev_state_obj.wants_earliest if hasattr(prev_state_obj, 'wants_earliest') else False
+                    state.intake_year = prev_state_obj.intake_year if hasattr(prev_state_obj, 'intake_year') else None
+                    
+                    # Restore focus objects
+                    if hasattr(prev_state_obj, 'req_focus'):
+                        state.req_focus = prev_state_obj.req_focus
+                    if hasattr(prev_state_obj, 'scholarship_focus'):
+                        state.scholarship_focus = prev_state_obj.scholarship_focus
+                    
+                    print(f"DEBUG: Restored state with accepted major: {state.major_query}, intent={state.intent}")
+                    # Cache the updated state
+                    self._set_cached_state(partner_id, conversation_id, state, None)
+                    return state
+        
         # FRESH QUERY: Use ALWAYS-LLM extraction
         try:
             print(f"DEBUG: Calling llm_extract_state() for fresh query...")
-            extracted = self.llm_extract_state(conversation_history, date.today())
+            extracted = self.llm_extract_state(conversation_history, date.today(), prev_state)
             print(f"DEBUG: LLM extracted: intent={extracted.get('intent')}, confidence={extracted.get('confidence')}")
             
             # Convert extracted dict to PartnerQueryState
@@ -1226,25 +1511,38 @@ Output ONLY valid JSON, no other text:"""
                     state._resolved_university_id = uni_dict.get("id")  # Store ID for SQL
             
             if state.major_query:
-                # Resolve major_query to major_ids
+                # Resolve major_query to major_ids (max 3, confidence >= 0.78)
                 major_ids = self.resolve_major_ids(
                     major_query=state.major_query,
                     degree_level=state.degree_level,
-                    teaching_language=state.teaching_language
+                    teaching_language=state.teaching_language,
+                    limit=3,
+                    confidence_threshold=0.78
                 )
                 if major_ids:
                     state._resolved_major_ids = major_ids  # Store IDs for SQL
                     # Keep major_query as text for reference
                 else:
-                    # If no match, keep major_query as text for ILIKE search
-                    state.major_query = self._expand_major_acronym(state.major_query)
+                    # No high-confidence match - will trigger clarification or major disambiguation
+                    print(f"DEBUG: Major '{state.major_query}' has no high-confidence matches")
+                    # Don't expand - let clarification handle it
                     
         except Exception as e:
             import traceback
             print(f"ERROR: llm_extract_state failed: {e}")
             traceback.print_exc()
-            # Return default state on error
+            # Return default state on error, but preserve extracted fields if available
             state = PartnerQueryState()
+            # Try to preserve what was extracted before the error
+            if 'extracted' in locals() and extracted:
+                state.intent = extracted.get("intent", "GENERAL")
+                state.major_query = extracted.get("major_raw")
+                state.university_query = extracted.get("university_raw")
+                state.intake_term = extracted.get("intake_term")
+                state.degree_level = extracted.get("degree_level")
+                state.wants_scholarship = extracted.get("wants_scholarship", False)
+                state.wants_earliest = extracted.get("wants_earliest", False)
+                print(f"DEBUG: Preserved extracted fields: major_query={state.major_query}, intake_term={state.intake_term}, degree_level={state.degree_level}")
         
         # Handle earliest intake: infer intake_term from current month if wants_earliest=True
         if state.wants_earliest and not state.intake_term:
@@ -1254,8 +1552,8 @@ Output ONLY valid JSON, no other text:"""
         if state.university_query and not state.university:
             state.university = state.university_query
         
-        # Cache the final state for persistence across turns
-        self._set_state_cache(partner_id, conversation_id, state)
+        # Cache the final state for persistence across turns (use unified cache)
+        self._set_cached_state(partner_id, conversation_id, state, None)
         
         return state
         
@@ -1308,27 +1606,67 @@ Output ONLY valid JSON, no other text:"""
             needs_clar = False
             clarifying_question = None
         
+        # Check if major resolution is ambiguous (low confidence or too many candidates)
+        if state.major_query and not hasattr(state, '_resolved_major_ids') and not needs_clar:
+            # Try to resolve with lower threshold to see all candidates
+            major_ids = self.resolve_major_ids(
+                major_query=state.major_query,
+                degree_level=state.degree_level,
+                teaching_language=state.teaching_language,
+                limit=6,  # Get more candidates for disambiguation
+                confidence_threshold=0.6  # Lower threshold to see all candidates
+            )
+            if len(major_ids) > 3:
+                # Too many candidates - ask user to pick
+                candidates = []
+                for mid in major_ids[:6]:
+                    major_name = self._get_major_name_by_id(mid)
+                    candidates.append(major_name)
+                
+                if candidates:
+                    needs_clar = True
+                    missing_slots = ["major_choice"]
+                    clarifying_question = f"Which major did you mean? " + " ".join([f"{i+1}) {c}" for i, c in enumerate(candidates)])
+                    # Store candidates in state for later retrieval
+                    state._major_candidates = candidates
+                    state._major_candidate_ids = major_ids[:6]
+        
         # Set pending state if clarification needed
         if needs_clar and clarifying_question and missing_slots:
             state.pending_slot = missing_slots[0] if len(missing_slots) == 1 else "bundle"
             state.is_clarifying = True
             
-            # Store in both caches for backward compatibility
+            # Store in unified state cache with full snapshot
             slot = missing_slots[0]  # Ask for the first missing slot
+            self._set_pending(partner_id, conversation_id, slot, state)
+            
+            # Also store in legacy caches for backward compatibility
             self._set_pending_slot(partner_id, conversation_id, slot, state.intent)
+            conv_key = self._get_conv_key(partner_id, conversation_id, conversation_history)
+            self._set_pending_state(conv_key, state.intent, missing_slots, state)
             
-            # Also store in new pending state system (store FULL state snapshot)
-            conv_key = self._get_conv_key(partner_id, conversation_id, conversation_history, 
-                                         conversation_history[-1].get("content", "") if conversation_history else "")
-            self._set_pending_state(conv_key, state.intent, missing_slots, state)  # Pass full state
-            
-            # Also cache the current state
-            self._set_state_cache(partner_id, conversation_id, state)
+            # Cache the current state
+            self._set_cached_state(partner_id, conversation_id, state, None)
         
         # Build SQL plan (only if no clarification needed)
         sql_plan = None
         if not needs_clar:
             sql_plan = self.build_sql_params(state)
+            # CRITICAL: Validate SQL params - never query with only teaching_language or degree_level
+            if sql_plan:
+                has_substantive_filter = (
+                    sql_plan.get("major_ids") or sql_plan.get("major_text") or
+                    sql_plan.get("university_id") or sql_plan.get("university_ids") or
+                    sql_plan.get("city") or sql_plan.get("province") or
+                    sql_plan.get("intake_term") or state.wants_earliest
+                )
+                if not has_substantive_filter:
+                    # Only teaching_language or degree_level - not enough, need clarification
+                    print(f"DEBUG: SQL params lack substantive filter, requesting clarification")
+                    needs_clar = True
+                    missing_slots = ["major_or_university"] if not state.major_query and not state.university_query else ["intake_term"]
+                    clarifying_question = "Please specify: major/subject, university name, or intake term (March/September)."
+                    sql_plan = None
         
         # Build req_focus dict
         req_focus = {
@@ -1558,9 +1896,8 @@ Output ONLY valid JSON, no other text:"""
             if sql_params.get("university_ids"):
                 filters["university_ids"] = sql_params["university_ids"]
             if sql_params.get("major_ids"):
-                filters["major_id"] = sql_params["major_ids"][0] if len(sql_params["major_ids"]) == 1 else None
-                if len(sql_params["major_ids"]) > 1:
-                    filters["major_ids"] = sql_params["major_ids"]
+                # Always use major_ids list for IN clause (more efficient than multiple OR conditions)
+                filters["major_ids"] = sql_params["major_ids"]
             if sql_params.get("major_text"):
                 filters["major_text"] = sql_params["major_text"]
             if sql_params.get("degree_level"):
@@ -1767,6 +2104,7 @@ Output ONLY valid JSON, no other text:"""
         """
         Stage B: Format final answer using LLM with small DB_CONTEXT.
         Temperature=0 for deterministic output.
+        FORMATTER SAFETY: Enforces that LLM only uses provided db_results.
         """
         system_prompt = self.PARTNER_SYSTEM_PROMPT
         
@@ -1777,7 +2115,14 @@ User question: {user_question}
 Intent: {intent}
 Focus areas: {', '.join([k for k, v in req_focus.items() if v])}
 
-Provide a concise answer using ONLY the DATABASE CONTEXT above. If information is missing, say "Not provided in our partner database."
+CRITICAL RULES:
+- Use ONLY the information provided in DATABASE CONTEXT above.
+- Never mention a major/university that is NOT in the DATABASE CONTEXT.
+- If scholarship fields are missing, say "Not provided in our partner database."
+- If information is missing, say "Not provided in our partner database."
+- Do NOT invent or hallucinate any information.
+
+Provide a concise answer using ONLY the DATABASE CONTEXT above.
 """
         
         try:
@@ -1934,9 +2279,8 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
                 candidates = [m for m in candidates if m.get("university_id") == university_id]
             if degree_level:
                 candidates = [m for m in candidates if str(m.get("degree_level", "")).lower() == str(degree_level).lower()]
-            
             # Convert cache format - already in dict format
-            all_majors = candidates[:500]  # Limit for performance
+            all_majors = candidates[:100]  # Limit for performance
         else:
             # Convert DB objects to dict format for compatibility
             all_majors = [
@@ -2047,28 +2391,65 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
     
     def resolve_major_ids(self, major_query: str, degree_level: Optional[str] = None, 
                          teaching_language: Optional[str] = None, university_id: Optional[int] = None,
-                         limit: int = 50) -> List[int]:
+                         limit: int = 3, confidence_threshold: float = 0.78) -> List[int]:
         """
         Deterministic resolution: match major_query against majors.name/name_cn/keywords using fuzzy.
-        Returns list of major_ids (up to limit) if matches found, empty list otherwise.
-        Supports acronym expansion (ECE/CSE/EEE/CS).
+        CRITICAL: Returns max 3 IDs with confidence >= 0.78 to prevent wrong matches.
+        Supports acronym expansion (ECE/CSE/EEE/CS/BBA/LLB).
+        Special handling for "language program" -> category="Non-degree/Language Program".
         """
         if not major_query:
             return []
         
+        # Expand major acronyms first
+        expanded_query = self._expand_major_acronym(major_query)
+        
+        # Special handling for language programs
+        if re.search(r'\b(language\s+program|chinese\s+language|foundation|foundation\s+program)\b', expanded_query.lower()):
+            # Search by category/keywords for language programs
+            majors = self.db_service.search_majors(
+                university_id=university_id,
+                degree_level=degree_level or "Language",
+                teaching_language=teaching_language,
+                limit=10
+            )
+            # Filter by category or keywords containing "language"
+            language_majors = [
+                m for m in majors 
+                if (hasattr(m, 'category') and m.category and 'language' in str(m.category).lower()) or
+                   (hasattr(m, 'keywords') and m.keywords and 'language' in str(m.keywords).lower())
+            ]
+            if language_majors:
+                return [m.id for m in language_majors[:limit]]
+        
         # Use _fuzzy_match_major for resolution
         matched, best_match, all_matches = self._fuzzy_match_major(
-            major_query,
+            expanded_query,
             university_id=university_id,
             degree_level=degree_level,
-            top_k=limit
+            top_k=10  # Get more candidates, then filter by confidence
         )
         
         if not matched or not all_matches:
             return []
         
-        # Return list of major IDs (up to limit)
-        major_ids = [m[0]["id"] for m in all_matches[:limit]]
+        # Filter by confidence threshold and limit to top 3
+        high_confidence_matches = [
+            m for m in all_matches 
+            if m[1] >= confidence_threshold  # m[1] is the score
+        ]
+        
+        if not high_confidence_matches:
+            # No high-confidence matches - return empty to trigger fallback or clarification
+            best_score = all_matches[0][1] if all_matches else 0.0
+            print(f"DEBUG: resolve_major_ids('{major_query}') - no matches >= {confidence_threshold} threshold (best was {best_score:.2f})")
+            return []
+        
+        # Return top 3 IDs only
+        major_ids = [m[0]["id"] for m in high_confidence_matches[:limit]]
+        major_names = [m[0].get("name", "Unknown") for m in high_confidence_matches[:limit]]
+        scores = [f"{m[1]:.2f}" for m in high_confidence_matches[:limit]]
+        print(f"DEBUG: resolve_major_ids('{major_query}') - returning {len(major_ids)} IDs: {major_ids} ({major_names}) with scores: {scores}")
         return major_ids
     
     def _get_upcoming_intakes(
@@ -3993,10 +4374,10 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
                     # Preserve major_query - it's a valid major
                     state.major_query = self._normalize_unicode_text(state.major_query)
                     # Strip degree phrases if present
-                    state.major_query = self._strip_degree_from_major_query(state.major_query)
-                    # If cleaned value is empty, set to None
-                    if not state.major_query or not state.major_query.strip():
-                        state.major_query = None
+            state.major_query = self._strip_degree_from_major_query(state.major_query)
+            # If cleaned value is empty, set to None
+            if not state.major_query or not state.major_query.strip():
+                state.major_query = None
 
         print(f"DEBUG: Final state after normalization: {state.to_dict() if state else 'None'}")
         
@@ -4022,6 +4403,81 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
         
         print(f"DEBUG: DB query returned {len(db_results)} results")
         
+        # ========== MAJOR VALIDATION: Check if returned majors match user's major_query ==========
+        if state and state.major_query and db_results and len(db_results) > 0:
+            # Check if any returned intake has a major that matches the user's query
+            user_major_lower = state.major_query.lower().strip()
+            matched_majors = []
+            unmatched_count = 0
+            
+            # Import re at function level to avoid scoping issues
+            import re as re_module
+            
+            for result in db_results:
+                if hasattr(result, 'major') and result.major:
+                    major_name = result.major.name.lower() if result.major.name else ""
+                    major_name_cn = result.major.name_cn.lower() if result.major.name_cn else ""
+                    
+                    # Use fuzzy matching to check similarity (more robust than substring)
+                    major_name_clean = re_module.sub(r'[^\w\s&]', '', major_name)
+                    major_name_cn_clean = re_module.sub(r'[^\w\s&]', '', major_name_cn) if major_name_cn else ""
+                    user_major_clean = re_module.sub(r'[^\w\s&]', '', user_major_lower)
+                    
+                    # Check exact match or high similarity (>= 0.7)
+                    similarity_name = SequenceMatcher(None, user_major_clean, major_name_clean).ratio()
+                    similarity_cn = SequenceMatcher(None, user_major_clean, major_name_cn_clean).ratio() if major_name_cn_clean else 0.0
+                    
+                    # Also check if user query is a significant word in the major name (not just a substring)
+                    major_words = set(major_name_clean.split())
+                    user_words = set(user_major_clean.split())
+                    word_overlap = len(user_words.intersection(major_words)) / max(len(user_words), 1)
+                    
+                    is_match = (
+                        similarity_name >= 0.7 or similarity_cn >= 0.7 or
+                        word_overlap >= 0.5 or
+                        (user_major_clean in major_name_clean and len(user_major_clean) >= 4)  # Only if query is substantial
+                    )
+                    
+                    print(f"DEBUG: Major validation - user='{user_major_lower}', major='{major_name}', similarity={similarity_name:.2f}, word_overlap={word_overlap:.2f}, is_match={is_match}")
+                    
+                    if is_match:
+                        matched_majors.append(result.major.name)
+                    else:
+                        unmatched_count += 1
+            
+            # If NO results match the user's major query, provide helpful message
+            if len(matched_majors) == 0 and len(db_results) > 0:
+                print(f"DEBUG: Major validation failed - user asked for '{state.major_query}' but results don't match")
+                # Get closest majors for suggestion (deduplicate by name)
+                major_cache = self._get_majors_cached()
+                _, _, closest_matches = self._fuzzy_match_major(
+                    state.major_query,
+                    degree_level=state.degree_level,
+                    top_k=10  # Get more to deduplicate
+                )
+                # Deduplicate by major name to avoid showing "Applied Physics" 5 times
+                seen_names = set()
+                closest_major_names = []
+                for m in closest_matches:
+                    if m[1] >= 0.6:  # Confidence threshold
+                        major_name = m[0].get("name", "")
+                        if major_name and major_name not in seen_names:
+                            seen_names.add(major_name)
+                            closest_major_names.append(major_name)
+                            if len(closest_major_names) >= 5:  # Limit to 5 unique majors
+                                break
+                
+                response_msg = f"I couldn't find an {state.teaching_language or 'English'}-taught {state.intake_term or 'March'} intake for {state.major_query} in our partner database."
+                if closest_major_names:
+                    response_msg += f" Here are the closest available majors: {', '.join(closest_major_names)}."
+                
+                return {
+                    "response": response_msg,
+                    "used_db": True,
+                    "used_tavily": False,
+                    "sources": []
+                }
+        
         # ========== HANDLE FALLBACK RESULTS ==========
         if fallback_result:
             fallback_type = fallback_result.get("_fallback_type")
@@ -4040,7 +4496,19 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
             elif fallback_type == "teaching_language" and len(db_results) > 0:
                 # Teaching language removal yielded results - ask which language
                 available_languages = fallback_result.get("_available_languages", [])
-                langs_str = " or ".join(available_languages) if available_languages else "English or Chinese"
+                langs_str = " or ".join(sorted(available_languages)) if available_languages else "English or Chinese"
+                
+                # Set pending state for teaching language clarification
+                state_snapshot = PartnerQueryState()
+                state_snapshot.__dict__.update(state.__dict__)
+                state_snapshot.teaching_language = None  # Clear only this slot
+                self._set_pending(partner_id, conversation_id, "teaching_language", state_snapshot)
+                
+                # Cache the state
+                self._set_state_cache(partner_id, conversation_id, state)
+                
+                print(f"DEBUG: Fallback teaching_language - available_languages={available_languages}, setting pending")
+                
                 return {
                     "response": f"I found programs available in {langs_str}. Which do you prefer?",
                     "used_db": True,
@@ -4096,18 +4564,15 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
                         langs_str = " or ".join(sorted(distinct_languages))
                         print(f"DEBUG: Mixed teaching languages detected: {distinct_languages}, asking clarification")
                         
-                        # Set pending state for teaching language
-                        conv_key = self._get_conv_key(partner_id, conversation_id, conversation_history, 
-                                                     conversation_history[-1].get("content", "") if conversation_history else "")
+                        # Set pending state for teaching language (use unified cache)
                         # Create a copy of state with teaching_language=None for the snapshot
                         state_snapshot = PartnerQueryState()
                         state_snapshot.__dict__.update(state.__dict__)
                         state_snapshot.teaching_language = None  # Clear only this slot
-                        self._set_pending_state(conv_key, state.intent, ["teaching_language"], state_snapshot)
+                        self._set_pending(partner_id, conversation_id, "teaching_language", state_snapshot)
                         
                         # Cache the state
                         self._set_state_cache(partner_id, conversation_id, state)
-                        self._set_pending_slot(partner_id, conversation_id, "teaching_language", state.intent)
                         
                         return {
                             "response": f"I found programs available in {langs_str}. Which do you prefer?",
@@ -4131,14 +4596,11 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
                     
                     if len(teaching_languages) > 1:
                         langs_str = " or ".join(sorted(teaching_languages))
-                        conv_key = self._get_conv_key(partner_id, conversation_id, conversation_history, 
-                                                     conversation_history[-1].get("content", "") if conversation_history else "")
                         # Create a copy of state with teaching_language=None for the snapshot
                         state_snapshot = PartnerQueryState()
                         state_snapshot.__dict__.update(state.__dict__)
                         state_snapshot.teaching_language = None  # Clear only this slot
-                        self._set_pending_state(conv_key, state.intent, ["teaching_language"], state_snapshot)
-                        self._set_pending_slot(partner_id, conversation_id, "teaching_language", state.intent)
+                        self._set_pending(partner_id, conversation_id, "teaching_language", state_snapshot)
                         
                         # Cache the state
                         self._set_state_cache(partner_id, conversation_id, state)

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta, timezone
+import json
 from app.models import (
     University, Major, ProgramIntake, Student, 
     DegreeLevel, TeachingLanguage, IntakeTerm,
@@ -42,6 +43,90 @@ class DBQueryService:
         query = query.order_by(University.is_partner.desc(), University.name)
         
         return query.limit(limit).all()
+    
+    def find_university_candidates(self, partner_id: Optional[int], query: str, limit: int = 8) -> List[Dict[str, Any]]:
+        """
+        Find university candidates using DB query with LIMIT (no full table load).
+        Searches name, name_cn, and aliases JSON.
+        Returns list of dicts: [{id, name, city, province, aliases}]
+        """
+        if not query:
+            return []
+        
+        # Build query with ILIKE search
+        db_query = self.db.query(University).filter(University.is_partner == True)
+        
+        # Search in name, name_cn, and aliases JSON
+        search_term = f"%{query}%"
+        db_query = db_query.filter(
+            or_(
+                University.name.ilike(search_term),
+                University.name_cn.ilike(search_term),
+                University.aliases.ilike(search_term) if hasattr(University, 'aliases') else False
+            )
+        )
+        
+        results = db_query.limit(limit).all()
+        
+        candidates = []
+        for uni in results:
+            candidates.append({
+                "id": uni.id,
+                "name": uni.name,
+                "city": uni.city,
+                "province": uni.province,
+                "aliases": json.loads(uni.aliases) if hasattr(uni, 'aliases') and isinstance(uni.aliases, str) else (uni.aliases if isinstance(uni.aliases, list) else [])
+            })
+        
+        return candidates
+    
+    def find_major_candidates(self, partner_id: Optional[int], query: str, 
+                             degree_level: Optional[str] = None,
+                             teaching_language: Optional[str] = None,
+                             limit: int = 8) -> List[Dict[str, Any]]:
+        """
+        Find major candidates using DB query with LIMIT (no full table load).
+        Searches name, name_cn, keywords JSON, and category.
+        Returns list of dicts: [{id, name, degree_level, teaching_language, university_id}]
+        """
+        if not query:
+            return []
+        
+        # Join with University to filter by partner
+        db_query = self.db.query(Major).join(University).filter(University.is_partner == True)
+        
+        # Search in name, name_cn, and keywords JSON
+        search_term = f"%{query}%"
+        conditions = [
+            Major.name.ilike(search_term),
+            Major.name_cn.ilike(search_term),
+        ]
+        
+        # Also search in keywords JSON (if stored as JSON string)
+        if hasattr(Major, 'keywords'):
+            conditions.append(Major.keywords.ilike(search_term))
+        
+        db_query = db_query.filter(or_(*conditions))
+        
+        # Apply filters
+        if degree_level:
+            db_query = db_query.filter(Major.degree_level == degree_level)
+        if teaching_language:
+            db_query = db_query.filter(Major.teaching_language == teaching_language)
+        
+        results = db_query.limit(limit).all()
+        
+        candidates = []
+        for major in results:
+            candidates.append({
+                "id": major.id,
+                "name": major.name,
+                "degree_level": major.degree_level,
+                "teaching_language": major.teaching_language,
+                "university_id": major.university_id
+            })
+        
+        return candidates
     
     def search_majors(
         self,
@@ -907,7 +992,10 @@ class DBQueryService:
         if filters:
             if filters.get("university_id"):
                 query = query.filter(ProgramIntake.university_id == filters["university_id"])
-            if filters.get("major_id"):
+            if filters.get("major_ids"):
+                # Filter by list of major IDs (IN clause)
+                query = query.filter(ProgramIntake.major_id.in_(filters["major_ids"]))
+            elif filters.get("major_id"):
                 query = query.filter(ProgramIntake.major_id == filters["major_id"])
             if filters.get("major_text"):
                 # Search in major name
