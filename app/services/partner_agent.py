@@ -242,17 +242,21 @@ CRITICAL RULES:
                       conversation_history: List[Dict[str, str]], user_message: str) -> str:
         """
         Generate stable conversation key for pending state.
-        Prefer conversation_id if provided, else derive from history + messages.
+        Prefer conversation_id if provided, else derive from first user message only (stable across turns).
+        DO NOT include latest_user_message or history_len as they change every turn.
         """
         if conversation_id:
             return f"{partner_id}_{conversation_id}"
         
-        # Derive key from history
-        first_msg = conversation_history[0].get("content", "") if conversation_history else ""
-        last_msg = conversation_history[-1].get("content", "") if conversation_history else ""
-        history_len = len(conversation_history)
+        # Derive key from first user message only (stable across clarification turns)
+        first_user_msg = ""
+        for msg in conversation_history:
+            if msg.get('role') == 'user':
+                first_user_msg = msg.get('content', "")[:100]  # First 100 chars
+                break
         
-        key_str = f"{partner_id}_{first_msg[:50]}_{last_msg[:50]}_{history_len}_{user_message[:50]}"
+        # Use partner_id + first message only (no latest message, no history_len)
+        key_str = f"{partner_id}_{first_user_msg}"
         return hashlib.sha1(key_str.encode()).hexdigest()[:16]
     
     def _get_pending_state(self, conv_key: str) -> Optional[PendingState]:
@@ -319,6 +323,92 @@ CRITICAL RULES:
             return
         key = (partner_id, conversation_id)
         self._state_cache[key] = (state, time.time())
+    
+    def llm_extract_state(self, conversation_history: List[Dict[str, str]], today_date: date) -> Dict[str, Any]:
+        """
+        ALWAYS-LLM extraction for intent/slots.
+        Returns JSON dict with intent, slots, and confidence.
+        DO NOT inject university/major lists - keep prompt small.
+        """
+        # Build conversation text (last <=16 messages)
+        conversation_text = ""
+        for msg in conversation_history[-16:]:
+            role = msg.get('role', '')
+            content = msg.get('content', '')
+            conversation_text += f"{role}: {content}\n"
+        
+        # Small LLM prompt for JSON extraction
+        extraction_prompt = f"""Extract information from this conversation. Today's date: {today_date.strftime('%Y-%m-%d')}.
+
+Output ONLY valid JSON with these exact fields:
+{{
+  "intent": "SCHOLARSHIP" | "FEES" | "REQUIREMENTS" | "LIST_PROGRAMS" | "LIST_UNIVERSITIES" | "GENERAL" | "PAGINATION",
+  "degree_level": "Language" | "Bachelor" | "Master" | "PhD" | null,
+  "major_raw": string or null,
+  "university_raw": string or null,
+  "intake_term": "March" | "September" | null,
+  "intake_year": number or null,
+  "teaching_language": "English" | "Chinese" | null,
+  "duration_years": number or null,
+  "wants_earliest": boolean,
+  "wants_scholarship": boolean,
+  "wants_requirements": boolean,
+  "wants_fees": boolean,
+  "page_action": "next" | "prev" | "none",
+  "confidence": number
+}}
+
+RULES:
+- Use today's date ({today_date.strftime('%Y-%m-%d')}) to interpret "next intake", "earliest intake", "asap".
+- Do NOT output major_raw = "scholarship info" / "fees" / "information". If unsure, null.
+- Do NOT output university_raw = "list" / "all" / "database". If unsure, null.
+- Output confidence in [0,1] based on how clear the user's intent is.
+- For "next March intake", set intake_term="March" and wants_earliest=true, NOT page_action="next".
+
+Conversation:
+{conversation_text}
+
+Output ONLY valid JSON, no other text:"""
+        
+        try:
+            response = self.openai_service.chat_completion(
+                messages=[
+                    {"role": "system", "content": "You are a JSON extractor. Output only valid JSON matching the exact schema."},
+                    {"role": "user", "content": extraction_prompt}
+                ],
+                temperature=0.0,
+                model="gpt-4o-mini"
+            )
+            
+            # Parse JSON response
+            import json
+            content = response.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+            # Remove markdown code blocks if present
+            content = re.sub(r'```json\s*', '', content)
+            content = re.sub(r'```\s*', '', content)
+            content = content.strip()
+            
+            extracted = json.loads(content)
+            return extracted
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            print(f"ERROR: llm_extract_state failed: {e}")
+            # Return default dict
+            return {
+                "intent": "GENERAL",
+                "degree_level": None,
+                "major_raw": None,
+                "university_raw": None,
+                "intake_term": None,
+                "intake_year": None,
+                "teaching_language": None,
+                "duration_years": None,
+                "wants_earliest": False,
+                "wants_scholarship": False,
+                "wants_requirements": False,
+                "wants_fees": False,
+                "page_action": "none",
+                "confidence": 0.0
+            }
     
     def _clear_pending_state(self, conv_key: str):
         """Clear pending state for conversation"""
@@ -708,22 +798,37 @@ CRITICAL RULES:
                     result["university_raw"] = uni_candidate.strip()
                     break
         
-        # Major extraction (remove common words and extract subject)
-        # Remove intake terms, years, fees, etc. to get major
-        cleaned = re.sub(r'\b(20[2-9]\d)\b', '', normalized, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\b(mar(ch)?|sep(t|tember)?|spring|fall|autumn)\b', '', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\b(fee|fees|tuition|cost|price|application\s+fee|deadline|scholarship|document|documents?)\b', '', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\b(list|show|all|available|what|which|programs?|majors?|courses?)\b', '', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\b(bachelor|master|phd|language|diploma|degree|program|course)\b', '', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\b(english|chinese|taught|in|at|for|the|a|an|and|or|of|to)\b', '', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        # Major extraction (CRITICAL: Extract before semantic stopword clearing)
+        # Pattern 1: "BSC in physics" or "masters in pharmacy" -> extract after "in"
+        in_pattern = re.search(r'\b(in|for|studying|study)\s+([a-z]+(?:\s+[a-z]+)*)\b', normalized, re.IGNORECASE)
+        if in_pattern:
+            major_candidate = in_pattern.group(2).strip()
+            # Check it's not a stopword
+            if major_candidate and major_candidate.lower() not in ["scholarship", "info", "information", "fees", "tuition", "cost", "requirement", "requirements", "admission", "program", "course", "china", "chinese"]:
+                result["major_raw"] = major_candidate
+        else:
+            # Pattern 2: Extract discipline words (physics, pharmacy, computer science, etc.)
+            # Remove intake terms, years, fees, etc. to get major
+            cleaned = re.sub(r'\b(20[2-9]\d)\b', '', normalized, flags=re.IGNORECASE)
+            cleaned = re.sub(r'\b(mar(ch)?|sep(t|tember)?|spring|fall|autumn)\b', '', cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r'\b(fee|fees|tuition|cost|price|application\s+fee|deadline|scholarship|document|documents?)\b', '', cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r'\b(list|show|all|available|what|which|programs?|majors?|courses?)\b', '', cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r'\b(bachelor|master|masters|phd|language|diploma|degree|program|course|bsc|msc|bs|ms)\b', '', cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r'\b(english|chinese|taught|in|at|for|the|a|an|and|or|of|to|from|china)\b', '', cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+            
+            # If cleaned text has meaningful content, treat as major
+            if cleaned and len(cleaned.split()) >= 1:
+                # Check if it's not just a city/province
+                city_province_keywords = ["guangzhou", "beijing", "shanghai", "guangdong", "jiangsu", "zhejiang"]
+                if cleaned.lower() not in city_province_keywords:
+                    result["major_raw"] = cleaned
         
-        # If cleaned text has meaningful content (2+ words or known major keywords), treat as major
-        if cleaned and len(cleaned.split()) >= 1:
-            # Check if it's not just a city/province
-            city_province_keywords = ["guangzhou", "beijing", "shanghai", "guangdong", "jiangsu", "zhejiang"]
-            if cleaned.lower() not in city_province_keywords:
-                result["major_raw"] = cleaned
+        # Expand acronyms if major_raw is a known acronym
+        if result.get("major_raw"):
+            expanded = self._expand_major_acronym(result["major_raw"])
+            if expanded != result["major_raw"]:
+                result["major_raw"] = expanded
         
         return result
     
@@ -874,10 +979,47 @@ CRITICAL RULES:
         if not prev_state or not prev_state.pending_slot:
             pending_slot_info = self._get_pending_slot(partner_id, conversation_id)
             if pending_slot_info:
-                # Create prev_state from cache if not provided
+                # CRITICAL FIX: Load full cached state if available, not just create blank state
                 if not prev_state:
-                    prev_state = PartnerQueryState()
-                    prev_state.intent = pending_slot_info.get("intent", "general")
+                    # Try to load from state cache first
+                    prev_state = self._get_state_cache(partner_id, conversation_id)
+                    
+                    # If cache missing, try to restore from pending_state snapshot
+                    if not prev_state and pending_state:
+                        prev_state = PartnerQueryState()
+                        partial = pending_state.partial_state
+                        prev_state.intent = pending_state.intent
+                        prev_state.degree_level = partial.get("degree_level")
+                        prev_state.intake_term = partial.get("intake_term")
+                        prev_state.university_query = partial.get("university_query")
+                        prev_state.major_query = partial.get("major_query")
+                        prev_state.teaching_language = partial.get("teaching_language")
+                        prev_state.wants_scholarship = partial.get("wants_scholarship", False)
+                        prev_state.wants_fees = partial.get("wants_fees", False)
+                        prev_state.wants_requirements = partial.get("wants_requirements", False)
+                        prev_state.wants_list = partial.get("wants_list", False)
+                        prev_state.wants_earliest = partial.get("wants_earliest", False)
+                        prev_state.city = partial.get("city")
+                        prev_state.province = partial.get("province")
+                        prev_state.intake_year = partial.get("intake_year")
+                        prev_state.duration_years_target = partial.get("duration_years_target")
+                        prev_state.duration_constraint = partial.get("duration_constraint")
+                        prev_state.budget_max = partial.get("budget_max")
+                        # Restore focus objects
+                        req_focus_dict = partial.get("req_focus")
+                        if req_focus_dict:
+                            from app.services.slot_schema import RequirementFocus
+                            prev_state.req_focus = RequirementFocus(**req_focus_dict) if isinstance(req_focus_dict, dict) else req_focus_dict
+                        scholarship_focus_dict = partial.get("scholarship_focus")
+                        if scholarship_focus_dict:
+                            from app.services.slot_schema import ScholarshipFocus
+                            prev_state.scholarship_focus = ScholarshipFocus(**scholarship_focus_dict) if isinstance(scholarship_focus_dict, dict) else scholarship_focus_dict
+                    
+                    # Only if both cache and pending_state missing, create blank state
+                    if not prev_state:
+                        prev_state = PartnerQueryState()
+                        prev_state.intent = pending_slot_info.get("intent", "general")
+                
                 prev_state.pending_slot = pending_slot_info.get("slot")
                 prev_state.is_clarifying = True
         
@@ -1031,14 +1173,75 @@ CRITICAL RULES:
             
             return state
         
-        # Use router for two-stage routing (handles clarification mode internally)
+        # CLARIFICATION LOCKING: If pending_slot exists, DO NOT call LLM - parse deterministically
+        # (Already handled above in pending_state check)
+        
+        # FRESH QUERY: Use ALWAYS-LLM extraction
         try:
-            print(f"DEBUG: Calling router.route() with query='{latest_user_message[:50]}'...")
-            state = self.router.route(latest_user_message, conversation_history, prev_state)
-            print(f"DEBUG: router.route() returned: intent={state.intent}, confidence={state.confidence}")
+            print(f"DEBUG: Calling llm_extract_state() for fresh query...")
+            extracted = self.llm_extract_state(conversation_history, date.today())
+            print(f"DEBUG: LLM extracted: intent={extracted.get('intent')}, confidence={extracted.get('confidence')}")
+            
+            # Convert extracted dict to PartnerQueryState
+            state = PartnerQueryState()
+            state.intent = extracted.get("intent", "GENERAL")
+            state.confidence = extracted.get("confidence", 0.5)
+            
+            # Map extracted fields to state
+            state.degree_level = extracted.get("degree_level")
+            state.major_query = extracted.get("major_raw")  # Will be resolved later
+            state.university_query = extracted.get("university_raw")  # Will be resolved later
+            state.intake_term = extracted.get("intake_term")
+            state.intake_year = extracted.get("intake_year")
+            state.teaching_language = extracted.get("teaching_language")
+            state.duration_years_target = extracted.get("duration_years")
+            state.wants_earliest = extracted.get("wants_earliest", False)
+            state.wants_scholarship = extracted.get("wants_scholarship", False)
+            state.wants_requirements = extracted.get("wants_requirements", False)
+            state.wants_fees = extracted.get("wants_fees", False)
+            state.page_action = extracted.get("page_action", "none")
+            
+            # INTENT LOCKING: If previous intent was SCHOLARSHIP/FEES/REQUIREMENTS and message is short, keep intent
+            if prev_state and prev_state.intent in [self.router.INTENT_SCHOLARSHIP, self.router.INTENT_FEES, self.router.INTENT_ADMISSION_REQUIREMENTS]:
+                message_tokens = len(latest_user_message.split())
+                is_slot_reply = (
+                    message_tokens < 4 or
+                    re.search(r'\b(english|chinese|march|september|bachelor|master|phd|language)\b', latest_user_message.lower()) or
+                    re.match(r'^\d+$', latest_user_message.strip())  # Number reply for disambiguation
+                )
+                if is_slot_reply and not is_intent_change:
+                    # Lock intent from previous state
+                    state.intent = prev_state.intent
+                    state.wants_scholarship = prev_state.wants_scholarship
+                    state.wants_fees = prev_state.wants_fees
+                    state.wants_requirements = prev_state.wants_requirements
+                    print(f"DEBUG: Intent locked to {state.intent} (short message/slot reply)")
+            
+            # DETERMINISTIC RESOLUTION: Resolve university_raw and major_raw to IDs
+            if state.university_query:
+                matched, uni_dict, _ = self._fuzzy_match_university(state.university_query)
+                if matched and uni_dict:
+                    # Store resolved university_id (will be used in build_sql_params)
+                    state.university_query = uni_dict.get("name")  # Keep name for reference
+                    state._resolved_university_id = uni_dict.get("id")  # Store ID for SQL
+            
+            if state.major_query:
+                # Resolve major_query to major_ids
+                major_ids = self.resolve_major_ids(
+                    major_query=state.major_query,
+                    degree_level=state.degree_level,
+                    teaching_language=state.teaching_language
+                )
+                if major_ids:
+                    state._resolved_major_ids = major_ids  # Store IDs for SQL
+                    # Keep major_query as text for reference
+                else:
+                    # If no match, keep major_query as text for ILIKE search
+                    state.major_query = self._expand_major_acronym(state.major_query)
+                    
         except Exception as e:
             import traceback
-            print(f"ERROR: router.route() failed: {e}")
+            print(f"ERROR: llm_extract_state failed: {e}")
             traceback.print_exc()
             # Return default state on error
             state = PartnerQueryState()
@@ -1256,8 +1459,10 @@ CRITICAL RULES:
             if uni_ids:
                 sql_params["university_ids"] = uni_ids  # Note: may need to adjust DBQueryService to accept list
         
-        # Major filter - use resolve_major_ids for efficient matching
-        if state.major_query:
+        # Major filter (use resolved IDs if available, else resolve now)
+        if hasattr(state, '_resolved_major_ids') and state._resolved_major_ids:
+            sql_params["major_ids"] = state._resolved_major_ids
+        elif state.major_query:
             major_ids = self.resolve_major_ids(
                 major_query=state.major_query,
                 degree_level=state.degree_level,
@@ -1270,6 +1475,13 @@ CRITICAL RULES:
                 # Fallback: use expanded query for DB ILIKE search
                 expanded_major = self._expand_major_acronym(state.major_query)
                 sql_params["major_text"] = expanded_major
+        
+        # Scholarship filter
+        if state.wants_scholarship:
+            sql_params["has_scholarship"] = True
+            # If CSC scholarship specifically requested
+            if state.scholarship_focus and state.scholarship_focus.csc:
+                sql_params["scholarship_type"] = "CSC"  # May need DBQueryService support
         
         # Degree level
         if state.degree_level:
@@ -1428,8 +1640,8 @@ CRITICAL RULES:
                                     fallback_filters["major_ids"] = [m.id for m in majors]
                                     fallback_applied = True
                                     print(f"DEBUG: Expanded {major_lower} to {exp_name}, found {len(majors)} majors")
-                                    break
-                    
+                                    break  # Break from for loop when found
+            
                     # Fallback 2: If intake_term causes 0 results and user didn't explicitly demand it, retry without term
                     if not fallback_applied and filters.get("intake_term") and state:
                         # Check if user explicitly mentioned the term in original query
@@ -1767,7 +1979,7 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
                         if 0.98 > best_score_for_major:
                             best_score_for_major = 0.98
                             match_type = "keyword_exact"
-                            break  # Highest priority, stop here
+                        break  # Highest priority, stop here
                     # Keyword contains match
                     elif user_input_clean in keyword_clean or keyword_clean in user_input_clean:
                         match_ratio = SequenceMatcher(None, user_input_clean, keyword_clean).ratio()
@@ -1819,6 +2031,45 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
         has_high_confidence = best_match and best_match[1] >= 0.8
         
         return has_high_confidence, best_match[0] if best_match else None, top_matches
+    
+    def resolve_university_id(self, university_raw: str) -> Optional[int]:
+        """
+        Deterministic resolution: match university_raw against universities.name/name_cn/aliases using fuzzy.
+        Returns university_id if match found, None otherwise.
+        """
+        if not university_raw:
+            return None
+        
+        matched, uni_dict, _ = self._fuzzy_match_university(university_raw)
+        if matched and uni_dict:
+            return uni_dict.get("id")
+        return None
+    
+    def resolve_major_ids(self, major_query: str, degree_level: Optional[str] = None, 
+                         teaching_language: Optional[str] = None, university_id: Optional[int] = None,
+                         limit: int = 50) -> List[int]:
+        """
+        Deterministic resolution: match major_query against majors.name/name_cn/keywords using fuzzy.
+        Returns list of major_ids (up to limit) if matches found, empty list otherwise.
+        Supports acronym expansion (ECE/CSE/EEE/CS).
+        """
+        if not major_query:
+            return []
+        
+        # Use _fuzzy_match_major for resolution
+        matched, best_match, all_matches = self._fuzzy_match_major(
+            major_query,
+            university_id=university_id,
+            degree_level=degree_level,
+            top_k=limit
+        )
+        
+        if not matched or not all_matches:
+            return []
+        
+        # Return list of major IDs (up to limit)
+        major_ids = [m[0]["id"] for m in all_matches[:limit]]
+        return major_ids
     
     def _get_upcoming_intakes(
         self,
@@ -3739,22 +3990,13 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
                         state.degree_level = matched_degree
                     state.major_query = None
                 else:
-                    # Strip degree phrases from major_query (e.g., "bachelor in chemistry" -> "chemistry")
-                    # Also detect degree_level from the phrase if missing
-                    text_lower = state.major_query.lower()
-            if not state.degree_level:
-                # Check for degree phrases and set degree_level accordingly
-                if any(phrase in text_lower for phrase in ["bachelor", "bsc", "b.sc"]):
-                    state.degree_level = "Bachelor"
-                elif any(phrase in text_lower for phrase in ["master", "msc", "m.sc"]):
-                    state.degree_level = "Master"
-                elif any(phrase in text_lower for phrase in ["phd", "doctorate"]):
-                    state.degree_level = "PhD"
-            
-            state.major_query = self._strip_degree_from_major_query(state.major_query)
-            # If cleaned value is empty, set to None
-            if not state.major_query or not state.major_query.strip():
-                state.major_query = None
+                    # Preserve major_query - it's a valid major
+                    state.major_query = self._normalize_unicode_text(state.major_query)
+                    # Strip degree phrases if present
+                    state.major_query = self._strip_degree_from_major_query(state.major_query)
+                    # If cleaned value is empty, set to None
+                    if not state.major_query or not state.major_query.strip():
+                        state.major_query = None
 
         print(f"DEBUG: Final state after normalization: {state.to_dict() if state else 'None'}")
         
