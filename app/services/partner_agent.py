@@ -100,6 +100,10 @@ CRITICAL RULES:
         # Pending clarification state: keyed by conv_key -> PendingState
         self._pending: Dict[str, PendingState] = {}
         self._pending_ttl: float = 600.0  # 10 minutes TTL
+        
+        # Per-conversation state cache: keyed by (partner_id, conversation_id) -> (PartnerQueryState, timestamp)
+        self._state_cache: Dict[Tuple[Optional[int], str], Tuple[PartnerQueryState, float]] = {}
+        self._state_cache_ttl: float = 1800.0  # 30 minutes TTL
     
     def _get_universities_cached(self, force_reload: bool = False) -> List[Dict[str, Any]]:
         """Lazy load university cache with TTL (only loads when needed for fuzzy matching)"""
@@ -265,14 +269,56 @@ CRITICAL RULES:
         return pending
     
     def _set_pending_state(self, conv_key: str, intent: str, missing_slots: List[str], 
-                           partial_state: Dict[str, Any]):
-        """Set pending state for conversation"""
+                           full_state: PartnerQueryState):
+        """Set pending state for conversation - stores FULL state snapshot"""
+        # Convert full state to dict for storage (preserve all fields)
+        partial_state_dict = {
+            "degree_level": full_state.degree_level,
+            "intake_term": full_state.intake_term,
+            "university_query": full_state.university_query,
+            "major_query": full_state.major_query,
+            "teaching_language": full_state.teaching_language,
+            "wants_scholarship": full_state.wants_scholarship,
+            "wants_fees": full_state.wants_fees,
+            "wants_requirements": full_state.wants_requirements,
+            "wants_list": full_state.wants_list,
+            "wants_earliest": full_state.wants_earliest,
+            "city": full_state.city,
+            "province": full_state.province,
+            "intake_year": full_state.intake_year,
+            "duration_years_target": full_state.duration_years_target,
+            "duration_constraint": full_state.duration_constraint,
+            "budget_max": full_state.budget_max,
+            "req_focus": full_state.req_focus,
+            "scholarship_focus": full_state.scholarship_focus,
+        }
         self._pending[conv_key] = PendingState(
             intent=intent,
             missing_slots=missing_slots,
             created_at=time.time(),
-            partial_state=partial_state
+            partial_state=partial_state_dict
         )
+    
+    def _get_state_cache(self, partner_id: Optional[int], conversation_id: Optional[str]) -> Optional[PartnerQueryState]:
+        """Get cached state for conversation"""
+        if not conversation_id:
+            return None
+        key = (partner_id, conversation_id)
+        if key not in self._state_cache:
+            return None
+        state, timestamp = self._state_cache[key]
+        now = time.time()
+        if (now - timestamp) > self._state_cache_ttl:
+            del self._state_cache[key]
+            return None
+        return state
+    
+    def _set_state_cache(self, partner_id: Optional[int], conversation_id: Optional[str], state: PartnerQueryState):
+        """Cache state for conversation"""
+        if not conversation_id:
+            return
+        key = (partner_id, conversation_id)
+        self._state_cache[key] = (state, time.time())
     
     def _clear_pending_state(self, conv_key: str):
         """Clear pending state for conversation"""
@@ -711,9 +757,11 @@ CRITICAL RULES:
             # DO NOT call router.route() - parse deterministically
             state = PartnerQueryState()
             
-            # Restore partial state
+            # CRITICAL: Restore FULL state from pending snapshot
             partial = pending_state.partial_state
             state.intent = pending_state.intent  # Lock intent
+            
+            # Restore ALL fields from snapshot (preserve full context)
             state.degree_level = partial.get("degree_level")
             state.intake_term = partial.get("intake_term")
             state.university_query = partial.get("university_query")
@@ -723,9 +771,32 @@ CRITICAL RULES:
             state.wants_fees = partial.get("wants_fees", False)
             state.wants_requirements = partial.get("wants_requirements", False)
             state.wants_list = partial.get("wants_list", False)
+            state.wants_earliest = partial.get("wants_earliest", False)
+            state.city = partial.get("city")
+            state.province = partial.get("province")
+            state.intake_year = partial.get("intake_year")
+            state.duration_years_target = partial.get("duration_years_target")
+            state.duration_constraint = partial.get("duration_constraint")
+            state.budget_max = partial.get("budget_max")
             
-            # Parse user reply to fill missing slots
+            # Restore focus objects
+            req_focus_dict = partial.get("req_focus")
+            if req_focus_dict:
+                from app.services.slot_schema import RequirementFocus
+                state.req_focus = RequirementFocus(**req_focus_dict) if isinstance(req_focus_dict, dict) else req_focus_dict
+            
+            scholarship_focus_dict = partial.get("scholarship_focus")
+            if scholarship_focus_dict:
+                from app.services.slot_schema import ScholarshipFocus
+                state.scholarship_focus = ScholarshipFocus(**scholarship_focus_dict) if isinstance(scholarship_focus_dict, dict) else scholarship_focus_dict
+            
+            # Also allow safe slot updates if present in user message (even if not the pending slot)
+            # This handles cases like "English March" when asked for teaching_language
             parsed = self.parse_query_rules(latest_user_message)
+            if not state.intake_term and parsed.get("intake_term"):
+                state.intake_term = parsed["intake_term"]
+            if not state.degree_level and parsed.get("degree_level"):
+                state.degree_level = parsed["degree_level"]
             
             # Fill missing slots using deterministic parsing
             for slot in pending_state.missing_slots:
@@ -774,10 +845,13 @@ CRITICAL RULES:
             # If all slots filled, clear pending state
             if not still_missing:
                 self._clear_pending_state(conv_key)
+                self._clear_pending_slot(partner_id, conversation_id)
                 state.is_clarifying = False
+                state.pending_slot = None
             else:
                 # Still missing slots - keep pending
                 state.is_clarifying = True
+                state.pending_slot = still_missing[0]
             
             # Force intent and flags for SCHOLARSHIP
             if state.intent == self.router.INTENT_SCHOLARSHIP:
@@ -785,6 +859,9 @@ CRITICAL RULES:
                 if not state.scholarship_focus:
                     from app.services.slot_schema import ScholarshipFocus
                     state.scholarship_focus = ScholarshipFocus()
+            
+            # Cache the updated state
+            self._set_state_cache(partner_id, conversation_id, state)
             
             return state
         
@@ -974,6 +1051,9 @@ CRITICAL RULES:
         if state.university_query and not state.university:
             state.university = state.university_query
         
+        # Cache the final state for persistence across turns
+        self._set_state_cache(partner_id, conversation_id, state)
+        
         return state
         
     def route_and_clarify(self, conversation_history: List[Dict[str, str]], prev_state: Optional[PartnerQueryState] = None,
@@ -1034,21 +1114,13 @@ CRITICAL RULES:
             slot = missing_slots[0]  # Ask for the first missing slot
             self._set_pending_slot(partner_id, conversation_id, slot, state.intent)
             
-            # Also store in new pending state system
+            # Also store in new pending state system (store FULL state snapshot)
             conv_key = self._get_conv_key(partner_id, conversation_id, conversation_history, 
                                          conversation_history[-1].get("content", "") if conversation_history else "")
-            partial_state = {
-                "degree_level": state.degree_level,
-                "intake_term": state.intake_term,
-                "university_query": state.university_query,
-                "major_query": state.major_query,
-                "teaching_language": state.teaching_language,
-                "wants_scholarship": state.wants_scholarship,
-                "wants_fees": state.wants_fees,
-                "wants_requirements": state.wants_requirements,
-                "wants_list": state.wants_list,
-            }
-            self._set_pending_state(conv_key, state.intent, missing_slots, partial_state)
+            self._set_pending_state(conv_key, state.intent, missing_slots, state)  # Pass full state
+            
+            # Also cache the current state
+            self._set_state_cache(partner_id, conversation_id, state)
         
         # Build SQL plan (only if no clarification needed)
         sql_plan = None
@@ -3785,18 +3857,14 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
                         # Set pending state for teaching language
                         conv_key = self._get_conv_key(partner_id, conversation_id, conversation_history, 
                                                      conversation_history[-1].get("content", "") if conversation_history else "")
-                        partial_state = {
-                            "degree_level": state.degree_level,
-                            "intake_term": state.intake_term,
-                            "university_query": state.university_query,
-                            "major_query": state.major_query,
-                            "teaching_language": None,
-                            "wants_scholarship": state.wants_scholarship,
-                            "wants_fees": state.wants_fees,
-                            "wants_requirements": state.wants_requirements,
-                            "wants_list": state.wants_list,
-                        }
-                        self._set_pending_state(conv_key, state.intent, ["teaching_language"], partial_state)
+                        # Create a copy of state with teaching_language=None for the snapshot
+                        state_snapshot = PartnerQueryState()
+                        state_snapshot.__dict__.update(state.__dict__)
+                        state_snapshot.teaching_language = None  # Clear only this slot
+                        self._set_pending_state(conv_key, state.intent, ["teaching_language"], state_snapshot)
+                        
+                        # Cache the state
+                        self._set_state_cache(partner_id, conversation_id, state)
                         self._set_pending_slot(partner_id, conversation_id, "teaching_language", state.intent)
                         
                         return {
@@ -3823,19 +3891,15 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
                         langs_str = " or ".join(sorted(teaching_languages))
                         conv_key = self._get_conv_key(partner_id, conversation_id, conversation_history, 
                                                      conversation_history[-1].get("content", "") if conversation_history else "")
-                        partial_state = {
-                            "degree_level": state.degree_level,
-                            "intake_term": state.intake_term,
-                            "university_query": state.university_query,
-                            "major_query": state.major_query,
-                            "teaching_language": None,
-                            "wants_scholarship": state.wants_scholarship,
-                            "wants_fees": state.wants_fees,
-                            "wants_requirements": state.wants_requirements,
-                            "wants_list": state.wants_list,
-                        }
-                        self._set_pending_state(conv_key, state.intent, ["teaching_language"], partial_state)
+                        # Create a copy of state with teaching_language=None for the snapshot
+                        state_snapshot = PartnerQueryState()
+                        state_snapshot.__dict__.update(state.__dict__)
+                        state_snapshot.teaching_language = None  # Clear only this slot
+                        self._set_pending_state(conv_key, state.intent, ["teaching_language"], state_snapshot)
                         self._set_pending_slot(partner_id, conversation_id, "teaching_language", state.intent)
+                        
+                        # Cache the state
+                        self._set_state_cache(partner_id, conversation_id, state)
                         
                         return {
                             "response": f"I found programs available in {langs_str}. Which do you prefer?",
