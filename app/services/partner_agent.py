@@ -145,13 +145,16 @@ CRITICAL RULES:
             return "March"  # Next March
     
     def _get_majors_cached(self, force_reload: bool = False) -> List[Dict[str, Any]]:
-        """Lazy load major cache with TTL (only loads when needed for fuzzy matching)"""
+        """
+        Lazy load major cache with TTL (ONLY loads when fuzzy matching is actually needed).
+        This is called ONLY when _fuzzy_match_major needs it, not on every request.
+        """
         import time
         now = time.time()
         
         if force_reload or self._majors_cache is None or (self._cache_ts and (now - self._cache_ts) > self._cache_ttl_seconds):
-            # Load minimal fields for fuzzy matching
-            majors = self.db_service.search_majors(limit=2000)  # Reasonable limit
+            # Load minimal fields for fuzzy matching (bounded to 2000 entries)
+            majors = self.db_service.search_majors(limit=2000)  # Max 2000 entries
             self._majors_cache = []
             for major in majors:
                 # Normalize keywords (same as _load_all_majors did)
@@ -742,20 +745,18 @@ CRITICAL RULES:
                     lang = self.parse_teaching_language(latest_user_message)
                     if lang:
                         state.teaching_language = lang
-                elif slot == "scholarship_bundle":
-                    # Parse all fields from bundle
-                    degree = self.parse_degree_level(latest_user_message)
-                    if degree:
-                        state.degree_level = degree
-                    term = self.parse_intake_term(latest_user_message)
-                    if term:
-                        state.intake_term = term
+                elif slot == "major_or_university":
+                    # Parse major or university from reply
                     major = self.parse_major_query(latest_user_message)
+                    uni = self.parse_university_query(latest_user_message)
                     if major:
                         state.major_query = major
-                    lang = self.parse_teaching_language(latest_user_message)
-                    if lang:
-                        state.teaching_language = lang
+                    elif uni:
+                        state.university_query = uni
+                    # Also check for city
+                    city_match = re.search(r'\b(guangzhou|beijing|shanghai|shenzhen|hangzhou|nanjing|chengdu|xian|wuhan)\b', self.normalize_text(latest_user_message))
+                    if city_match:
+                        state.city = city_match.group(1).title()
             
             # Check if all missing slots are now filled
             still_missing = []
@@ -765,6 +766,8 @@ CRITICAL RULES:
                 still_missing.append("intake_term")
             if "major_query" in pending_state.missing_slots and not state.major_query:
                 still_missing.append("major_query")
+            if "major_or_university" in pending_state.missing_slots and not state.major_query and not state.university_query and not state.city:
+                still_missing.append("major_or_university")
             if "teaching_language" in pending_state.missing_slots and not state.teaching_language:
                 still_missing.append("teaching_language")
             
@@ -821,7 +824,29 @@ CRITICAL RULES:
             state.degree_level = prev_state.degree_level
             
             # Handle pending_slot
-            if prev_state.pending_slot == "scholarship_bundle":
+            if prev_state.pending_slot == "major_or_university":
+                # Parse major or university from reply
+                major = self.parse_major_query(latest_user_message)
+                uni = self.parse_university_query(latest_user_message)
+                if major:
+                    state.major_query = major
+                elif uni:
+                    state.university_query = uni
+                # Also check for city
+                city_match = re.search(r'\b(guangzhou|beijing|shanghai|shenzhen|hangzhou|nanjing|chengdu|xian|wuhan)\b', self.normalize_text(latest_user_message))
+                if city_match:
+                    state.city = city_match.group(1).title()
+                
+                # Clear slot if we got at least one
+                if state.major_query or state.university_query or state.city:
+                    state.pending_slot = None
+                    state.is_clarifying = False
+                    self._clear_pending_slot(partner_id, conversation_id)
+                else:
+                    state.pending_slot = prev_state.pending_slot
+                    state.is_clarifying = True
+                    return state
+            elif prev_state.pending_slot == "scholarship_bundle":
                 # Parse bundle: degree_level + major + intake_term + teaching_language
                 # Use rule-based parsing to extract all fields at once
                 parsed = self.parse_query_rules(latest_user_message)
@@ -1083,31 +1108,22 @@ CRITICAL RULES:
                     question_parts.append("subject/major")
         
         elif intent == self.router.INTENT_SCHOLARSHIP:
-            # SCHOLARSHIP clarification rules (upgraded)
-            # ALWAYS require degree_level
+            # SCHOLARSHIP clarification rules (FIXED: no scholarship_bundle, default to any scholarship)
+            # Default scholarship_focus.any = True (handled in state initialization)
+            
+            # Require degree_level + (major_query OR university_query OR city/province)
             if not state.degree_level:
                 missing_slots.append("degree_level")
                 question_parts.append("degree level (Language/Bachelor/Master/PhD)")
             
-            # If generic "scholarship info" with nothing else: ask for bundle
-            if not state.degree_level and not state.major_query and not state.university_query:
-                missing_slots.append("scholarship_bundle")
-                return missing_slots, "Which level and intake? (1) Language (March) (2) Bachelor (March/Sept) (3) Master (Sept) (4) PhD (Sept). Reply like: 'Bachelor, CSE, March, English'"
-            
-            # If degree_level present but major missing and university missing: ask for major/subject
-            if state.degree_level and not state.major_query and not state.university_query:
+            # If degree_level present but no narrowing filter: ask for major/university/city
+            if state.degree_level and not state.major_query and not state.university_query and not state.city and not state.province:
                 if "degree_level" not in missing_slots:
-                    missing_slots.append("major_query")
-                    question_parts.append("major/subject (e.g., CSE, Computer Science)")
+                    missing_slots.append("major_or_university")
+                    question_parts.append("major/subject, university name, or city")
             
-            # If intake_term missing: ask March or September
-            if not state.intake_term and not state.wants_earliest:
-                if "degree_level" not in missing_slots and "major_query" not in missing_slots:
-                    missing_slots.append("intake_term")
-                    question_parts.append("intake term (March/September or earliest)")
-            
+            # Intake_term is optional but preferred
             # teaching_language: will be asked AFTER DB check if both exist (handled separately)
-            # If we have some info, proceed and only ask if result set too broad
         
         elif intent == self.router.INTENT_ADMISSION_REQUIREMENTS:
             # Need: either university_query OR (major_query + degree_level) OR program_intake from last list
@@ -1168,31 +1184,20 @@ CRITICAL RULES:
             if uni_ids:
                 sql_params["university_ids"] = uni_ids  # Note: may need to adjust DBQueryService to accept list
         
-        # Major filter - use acronym expansion + fuzzy matching with major cache
+        # Major filter - use resolve_major_ids for efficient matching
         if state.major_query:
-            # Expand acronyms before searching (e.g., "cse" -> "computer science")
-            expanded_major = self._expand_major_acronym(state.major_query)
-            
-            # First try DB search with expanded input (efficient)
-            majors = self.db_service.search_majors(name=expanded_major, limit=50)
-            if majors:
-                sql_params["major_ids"] = [m.id for m in majors]
+            major_ids = self.resolve_major_ids(
+                major_query=state.major_query,
+                degree_level=state.degree_level,
+                teaching_language=state.teaching_language,
+                university_id=sql_params.get("university_id")
+            )
+            if major_ids:
+                sql_params["major_ids"] = major_ids
             else:
-                # Fallback to fuzzy match using cached loaders (lazy loaded - only when needed)
-                matched, best_match, all_matches = self._fuzzy_match_major(
-                    state.major_query,
-                    university_id=sql_params.get("university_id"),
-                    degree_level=state.degree_level,
-                    top_k=20
-                )
-                
-                if all_matches:
-                    # Extract major_ids from matches
-                    matched_major_ids = [m[0]["id"] for m in all_matches[:20]]
-                    sql_params["major_ids"] = matched_major_ids
-                else:
-                    # If still no match, use the expanded query as-is for DB ILIKE search
-                    sql_params["major_text"] = expanded_major
+                # Fallback: use expanded query for DB ILIKE search
+                expanded_major = self._expand_major_acronym(state.major_query)
+                sql_params["major_text"] = expanded_major
         
         # Degree level
         if state.degree_level:

@@ -48,6 +48,7 @@ class PartnerRouter:
             r'\bspring\b': 'march',
             r'\basap\b': 'earliest',
             r'\bsoonest\b': 'earliest',
+            r'\fastest\b': 'earliest',
         }
         for pattern, replacement in synonyms.items():
             text = re.sub(pattern, replacement, text)
@@ -103,15 +104,38 @@ class PartnerRouter:
         state = PartnerQueryState()
         
         # Detect intent with priority order
-        if re.search(r'\b(next|more|show more|next page|page \d+|continue|prev|previous|back|page 1|first page)\b', normalized):
-            state.intent = self.INTENT_PAGINATION
-            if re.search(r'\b(next|more|show more|next page|continue)\b', normalized):
-                state.page_action = "next"
-            elif re.search(r'\b(prev|previous|back)\b', normalized):
-                state.page_action = "prev"
-            elif re.search(r'\b(page 1|first page)\b', normalized):
-                state.page_action = "first"
-            state.confidence += 0.4
+        # FIX: Only treat as PAGINATION if it's actually pagination, not "next March/intake/semester"
+        is_time_modifier = re.search(r'\b(next\s+(march|september|sept|intake|semester|year|intake\s+term))\b', normalized, re.IGNORECASE)
+        
+        # If "next" is a time modifier, extract intake term and skip pagination
+        if is_time_modifier:
+            if re.search(r'\bnext\s+(march|spring)\b', normalized, re.IGNORECASE):
+                state.intake_term = "March"
+                state.wants_earliest = True
+            elif re.search(r'\bnext\s+(september|sept|fall|autumn)\b', normalized, re.IGNORECASE):
+                state.intake_term = "September"
+                state.wants_earliest = True
+            elif re.search(r'\bnext\s+intake\b', normalized, re.IGNORECASE):
+                state.wants_earliest = True
+            # Don't set PAGINATION intent - continue to other intent detection
+        elif re.search(r'\b(next|more|show more|next page|page \d+|continue|prev|previous|back|page 1|first page)\b', normalized):
+            # Check if it's a standalone pagination command (not part of a larger query)
+            pagination_only_patterns = [
+                r'^(next|more|show more|next page|continue|prev|previous|back|page \d+|page 1|first page)$',
+                r'^(next|more|show more|next page|continue|prev|previous|back|page \d+|page 1|first page)\s*$',
+                r'^(show\s+more|next\s+page|previous\s+page)',
+            ]
+            is_standalone_pagination = any(re.match(pattern, normalized.strip()) for pattern in pagination_only_patterns)
+            
+            if is_standalone_pagination:
+                state.intent = self.INTENT_PAGINATION
+                if re.search(r'\b(next|more|show more|next page|continue)\b', normalized):
+                    state.page_action = "next"
+                elif re.search(r'\b(prev|previous|back)\b', normalized):
+                    state.page_action = "prev"
+                elif re.search(r'\b(page 1|first page)\b', normalized):
+                    state.page_action = "first"
+                state.confidence += 0.4
         
         elif re.search(r'\b(university|universities|partner universities?|uni list|show all universities?|list universities?)\b', normalized):
             state.intent = self.INTENT_LIST_UNIVERSITIES
@@ -181,16 +205,16 @@ class PartnerRouter:
         
         # Extract slots
         # Degree level
-        if re.search(r'\b(bachelor|undergrad|undergraduate|b\.?sc|bsc|b\.?s|bs|b\.?a|ba|beng|b\.?eng)\b', normalized):
+        if re.search(r'\b(bachelor|undergrad|bba|b.b.a|undergrad|B.A.|undergraduate|b\.?sc|bsc|b\.?s|bs|b\.?a|ba|beng|b\.?eng)\b', normalized):
             state.degree_level = "Bachelor"
             state.confidence += 0.2
         elif re.search(r'\b(master|masters|postgrad|post-graduate|graduate|msc|m\.?sc|ms|m\.?s|ma|m\.?a|mba)\b', normalized):
             state.degree_level = "Master"
             state.confidence += 0.2
-        elif re.search(r'\b(phd|ph\.?d|doctorate|doctoral|dphil)\b', normalized):
+        elif re.search(r'\b(phd|ph\.?d|doctorate|doctoral|dphil|dr.)\b', normalized):
             state.degree_level = "PhD"
             state.confidence += 0.2
-        elif re.search(r'\b(language\s+program|language\s+course|non-?degree|foundation|foundation\s+program)\b', normalized):
+        elif re.search(r'\b(language\s+program|language\s+course|non-?degree|foundation|foundation\s+program|preparatory|foundation program)\b', normalized):
             state.degree_level = "Language"
             state.confidence += 0.2
         elif re.search(r'\b(diploma|associate|assoc)\b', normalized):
@@ -246,7 +270,7 @@ class PartnerRouter:
         
         # Major query extraction (avoid "university/universities/database/list/program/course/major/majors")
         # CRITICAL: Never treat "master"/"bachelor"/"degree" as majors
-        degree_words = {"master", "masters", "bachelor", "bachelors", "degree", "phd", "doctorate", "language", "diploma", "undergrad", "graduate", "postgrad", "postgraduate"}
+        degree_words = {"master", "masters", "bachelor", "bachelors", "degree", "phd", "doctorate", "language","chinese language","foundation program", "diploma", "undergrad", "graduate", "postgrad", "postgraduate"}
         stop_words = {"university", "universities", "database", "list", "program", "programs", "course", "courses", "major", "majors", "show", "all", "available", "what", "which"}
         words = normalized.split()
         major_words = [w for w in words if w not in stop_words and w not in degree_words and len(w) > 2]
@@ -401,6 +425,7 @@ Output ONLY valid JSON, no other text:"""
     def _fuzzy_match_degree_level(self, query: str) -> Optional[str]:
         """
         Fuzzy match degree level using string similarity.
+        Handles typos: bachelov, bacheller, bachelar => Bachelor
         Returns degree_level if similarity ≥ 0.75, None otherwise.
         """
         normalized = self.normalize_query(query).strip()
@@ -412,23 +437,25 @@ Output ONLY valid JSON, no other text:"""
         if len(words) > 2:
             return None
         
-        # Target degree levels
+        # Target degree levels with common typos
         degree_targets = {
-            "Bachelor": ["bachelor", "bsc", "bs", "ba", "beng", "b.eng", "undergrad", "undergraduate"],
-            "Master": ["master", "masters", "msc", "ms", "ma", "mba", "m.sc", "m.s", "m.a", "postgrad", "postgraduate", "graduate"],
-            "PhD": ["phd", "ph.d", "doctorate", "doctoral", "dphil"],
-            "Language": ["language", "nondegree", "non-degree", "foundation"],
+            "Bachelor": ["bachelor", "bsc", "bs", "ba", "beng", "b.eng", "undergrad", "undergraduate", "bba","b.b.a","B.A.",
+                        "bachelov", "bacheller", "bachelar", "bacheler", "bachlor"],
+            "Master": ["master", "masters", "msc", "ms", "ma", "mba", "m.sc", "m.s", "m.a", 
+                      "postgrad", "postgraduate", "graduate", "masters","m.a.","M.A.","M.A"],
+            "PhD": ["phd", "ph.d", "doctorate", "doctoral", "dphil","dr.","Dr.","Dr"],
+            "Language": ["language", "nondegree", "non-degree", "foundation", "chinese language", "preparatory", "foundation program"],
             "Diploma": ["diploma", "associate", "assoc"]
         }
         
-        # First try exact/regex match
-        if re.match(r'^(bachelor|bacheler|bsc|bs|ba|undergrad|undergraduate)$', normalized):
+        # First try exact/regex match (including typos)
+        if re.match(r'^(bachelor|bacheler|bachelov|bacheller|bachelar|bachlor|bsc|bs|ba|undergrad|undergraduate)$', normalized):
             return "Bachelor"
         elif re.match(r'^(master|masters|msc|ms|ma|mba|postgrad|postgraduate|graduate)$', normalized):
             return "Master"
         elif re.match(r'^(phd|ph\.?d|doctorate|doctoral|dphil)$', normalized):
             return "PhD"
-        elif re.match(r'^(language|non.?degree|foundation)$', normalized):
+        elif re.match(r'^(language|non.?degree|foundation|chinese\s+language)$', normalized):
             return "Language"
         elif re.match(r'^(diploma|associate|assoc)$', normalized):
             return "Diploma"

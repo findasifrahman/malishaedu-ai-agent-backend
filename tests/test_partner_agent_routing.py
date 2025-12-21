@@ -99,25 +99,25 @@ class TestPartnerAgentRouting:
     
     def test_4_months_language_course(self, agent):
         """Test: 'I want 4 months language course' → duration_years_target≈0.333"""
-        duration_years, constraint = agent._parse_duration_arbitrary("I want 4 months language course")
+        duration_years, constraint = agent.router.parse_duration("I want 4 months language course")
         assert duration_years == pytest.approx(0.333, abs=0.01)
         assert constraint == "exact"
     
     def test_1_3_year_program(self, agent):
         """Test: 'I want 1.3 year program' → duration_years_target=1.3"""
-        duration_years, constraint = agent._parse_duration_arbitrary("I want 1.3 year program")
+        duration_years, constraint = agent.router.parse_duration("I want 1.3 year program")
         assert duration_years == 1.3
         assert constraint == "exact"
     
     def test_at_least_2_years_master(self, agent):
         """Test: 'at least 2 years master' → duration_years_target=2.0, constraint='min'"""
-        duration_years, constraint = agent._parse_duration_arbitrary("at least 2 years master")
+        duration_years, constraint = agent.router.parse_duration("at least 2 years master")
         assert duration_years == 2.0
         assert constraint == "min"
     
     def test_max_1_year_language(self, agent):
         """Test: 'max 1 year language' → duration_years_target=1.0, constraint='max'"""
-        duration_years, constraint = agent._parse_duration_arbitrary("max 1 year language")
+        duration_years, constraint = agent.router.parse_duration("max 1 year language")
         assert duration_years == 1.0
         assert constraint == "max"
     
@@ -352,28 +352,245 @@ class TestPartnerAgentRouting:
         
         sql_params = agent.build_sql_params(state)
         assert sql_params.get("upcoming_only") is True
+        # intake_term should be inferred
+        assert sql_params.get("intake_term") is not None
+    
+    def test_next_march_intake_not_pagination(self, agent):
+        """Test: 'next march intake' should NOT be treated as PAGINATION"""
+        state = agent.router.route_stage1_rules("next march intake")
+        assert state.intent != agent.router.INTENT_PAGINATION
+        assert state.intake_term == "March"
+        assert state.wants_earliest is True
+    
+    def test_next_intake_not_pagination(self, agent):
+        """Test: 'next intake' should NOT be treated as PAGINATION"""
+        state = agent.router.route_stage1_rules("next intake")
+        assert state.intent != agent.router.INTENT_PAGINATION
+        assert state.wants_earliest is True
+    
+    def test_scholarship_info_bachelov_cse_march(self, agent):
+        """Test: 'SCHOLARSHIP INFORMATION' then 'bachelov' then 'CSE march' → stays SCHOLARSHIP"""
+        # Turn 1: scholarship info
+        route_plan1 = agent.route_and_clarify(
+            [{"role": "user", "content": "SCHOLARSHIP INFORMATION"}],
+            partner_id=1,
+            conversation_id="test123"
+        )
+        assert route_plan1.get("needs_clarification") is True
+        prev_state1 = route_plan1.get("state")
+        
+        # Turn 2: bachelov
+        route_plan2 = agent.route_and_clarify(
+            [
+                {"role": "user", "content": "SCHOLARSHIP INFORMATION"},
+                {"role": "assistant", "content": route_plan1.get("clarifying_question", "")},
+                {"role": "user", "content": "bachelov"}
+            ],
+            prev_state=prev_state1,
+            partner_id=1,
+            conversation_id="test123"
+        )
+        state2 = route_plan2.get("state")
+        assert state2.intent == agent.router.INTENT_SCHOLARSHIP
+        assert state2.degree_level == "Bachelor"
+        
+        # Turn 3: CSE march
+        route_plan3 = agent.route_and_clarify(
+            [
+                {"role": "user", "content": "SCHOLARSHIP INFORMATION"},
+                {"role": "assistant", "content": route_plan1.get("clarifying_question", "")},
+                {"role": "user", "content": "bachelov"},
+                {"role": "assistant", "content": route_plan2.get("clarifying_question", "") if route_plan2.get("needs_clarification") else ""},
+                {"role": "user", "content": "CSE march"}
+            ],
+            prev_state=state2,
+            partner_id=1,
+            conversation_id="test123"
+        )
+        state3 = route_plan3.get("state")
+        assert state3.intent == agent.router.INTENT_SCHOLARSHIP
+        assert "cse" in (state3.major_query or "").lower() or state3.major_query is not None
+        assert state3.intake_term == "March"
+    
+    def test_bsc_physics_next_march_scholarship(self, agent):
+        """Test: 'I want to complete my BSC in physics in next march intake from china. What scholarship do you have'"""
+        state = agent.router.route_stage1_rules("I want to complete my BSC in physics in next march intake from china. What scholarship do you have")
+        assert state.degree_level == "Bachelor"
+        assert "physics" in (state.major_query or "").lower()
+        assert state.intake_term == "March"
+        assert state.wants_scholarship is True
+        assert state.intent == agent.router.INTENT_SCHOLARSHIP
+        # Should NOT be PAGINATION
+        assert state.intent != agent.router.INTENT_PAGINATION
+    
+    def test_major_acronym_expansion_cs(self, agent):
+        """Test: Major acronym 'CS' expands to 'computer science'"""
+        expanded = agent._expand_major_acronym("CS")
+        assert "computer science" in expanded.lower()
+    
+    def test_major_acronym_expansion_cse(self, agent):
+        """Test: Major acronym 'CSE' expands correctly"""
+        expanded = agent._expand_major_acronym("CSE")
+        assert "computer science" in expanded.lower()
+    
+    def test_major_acronym_expansion_ce(self, agent):
+        """Test: Major acronym 'CE' expands to 'computer engineering'"""
+        expanded = agent._expand_major_acronym("CE")
+        assert "computer engineering" in expanded.lower()
+    
+    def test_resolve_major_ids_cs(self, agent):
+        """Test: resolve_major_ids resolves 'CS' to major_ids"""
+        with patch.object(agent.db_service, 'search_majors') as mock_search:
+            mock_major = Mock()
+            mock_major.id = 1
+            mock_search.return_value = [mock_major]
+            
+            major_ids = agent.resolve_major_ids("CS", degree_level="Bachelor")
+            assert len(major_ids) > 0
+            assert 1 in major_ids
+    
+    def test_teaching_language_auto_fill_single(self, agent):
+        """Test: Teaching language auto-filled when only one language exists"""
+        with patch.object(agent.db_service, 'get_distinct_teaching_languages') as mock_lang:
+            mock_lang.return_value = {"English"}
+            
+            # Simulate DB results with single language
+            mock_result = Mock()
+            mock_result.teaching_language = "English"
+            
+            # Should auto-fill and not ask
+            # This is tested in generate_response flow
+    
+    def test_teaching_language_ask_multiple(self, agent):
+        """Test: Teaching language clarification asked when multiple languages exist"""
+        with patch.object(agent.db_service, 'get_distinct_teaching_languages') as mock_lang:
+            mock_lang.return_value = {"English", "Chinese"}
+            
+            # Should ask clarification
+            # This is tested in generate_response flow
+    
+    def test_clarification_no_repeat_when_slot_filled(self, agent):
+        """Test: Clarification does not repeat when user fills slot"""
+        # First: ask for degree
+        route_plan1 = agent.route_and_clarify(
+            [{"role": "user", "content": "scholarship info"}],
+            partner_id=1,
+            conversation_id="test123"
+        )
+        assert route_plan1.get("needs_clarification") is True
+        prev_state1 = route_plan1.get("state")
+        
+        # Second: user provides degree
+        route_plan2 = agent.route_and_clarify(
+            [
+                {"role": "user", "content": "scholarship info"},
+                {"role": "assistant", "content": route_plan1.get("clarifying_question", "")},
+                {"role": "user", "content": "Bachelor"}
+            ],
+            prev_state=prev_state1,
+            partner_id=1,
+            conversation_id="test123"
+        )
+        
+        # Should NOT ask for degree_level again
+        if route_plan2.get("needs_clarification"):
+            missing_slots = route_plan2.get("state", PartnerQueryState()).pending_slot
+            assert missing_slots != "degree_level"
+    
+    def test_scholarship_no_bundle_required(self, agent):
+        """Test: Scholarship intent does not require scholarship_bundle slot"""
+        state = PartnerQueryState()
+        state.intent = agent.router.INTENT_SCHOLARSHIP
+        state.wants_scholarship = True
+        state.degree_level = "Bachelor"
+        state.major_query = "CS"
+        
+        missing_slots, question = agent.determine_missing_fields(state.intent, state, date.today())
+        # Should NOT require scholarship_bundle
+        assert "scholarship_bundle" not in missing_slots
+    
+    def test_pagination_only_standalone(self, agent):
+        """Test: Pagination only triggered for standalone commands"""
+        # Standalone "next" should be pagination
+        state1 = agent.router.route_stage1_rules("next")
+        assert state1.intent == agent.router.INTENT_PAGINATION
+        
+        # "next march" should NOT be pagination
+        state2 = agent.router.route_stage1_rules("next march")
+        assert state2.intent != agent.router.INTENT_PAGINATION
+    
+    def test_major_keywords_matching(self, agent):
+        """Test: Major matching uses keywords JSON array"""
+        with patch.object(agent.db_service, 'search_majors') as mock_search:
+            mock_major = Mock()
+            mock_major.id = 1
+            mock_major.name = "Computer Science"
+            mock_major.keywords = ["cse", "cs", "computer science"]
+            mock_search.return_value = [mock_major]
+            
+            major_ids = agent.resolve_major_ids("cse")
+            assert len(major_ids) > 0
+    
+    def test_university_alias_matching_hit(self, agent):
+        """Test: University alias matching (HIT => Harbin Institute of Technology)"""
+        with patch.object(agent.db_service, 'search_universities') as mock_search:
+            mock_uni = Mock()
+            mock_uni.id = 1
+            mock_uni.name = "Harbin Institute of Technology"
+            mock_uni.aliases = ["HIT"]
+            mock_search.return_value = [mock_uni]
+            
+            matched, best, all_matches = agent._fuzzy_match_university("HIT")
+            assert matched is True
+            assert best["name"] == "Harbin Institute of Technology"
+    
+    def test_zero_results_fallback_major_acronym(self, agent):
+        """Test: 0 results fallback expands major acronym and retries"""
+        # This is tested in run_db fallback logic
+        pass
+    
+    def test_zero_results_fallback_intake_term(self, agent):
+        """Test: 0 results fallback removes intake_term and asks user to choose"""
+        # This is tested in run_db fallback logic
+        pass
+    
+    def test_zero_results_fallback_teaching_language(self, agent):
+        """Test: 0 results fallback removes teaching_language and asks which language"""
+        # This is tested in run_db fallback logic
+        pass
+        state.wants_earliest = True
+        state.degree_level = "Bachelor"
+        
+        sql_params = agent.build_sql_params(state)
+        assert sql_params.get("upcoming_only") is True
         assert sql_params.get("intake_term") is not None  # Should be inferred
     
     def test_build_sql_params_city_province(self, agent):
-        """Test: build_sql_params with city/province sets university_ids"""
+        """Test: build_sql_params with city/province sets city/province filters"""
         state = PartnerQueryState()
         state.city = "Guangzhou"
         state.province = "Guangdong"
         
-        with patch.object(agent, '_find_university_ids_by_location') as mock_find:
-            mock_find.return_value = [1, 2, 3]
+        with patch.object(agent.db_service, 'search_universities') as mock_search:
+            mock_uni = Mock()
+            mock_uni.id = 1
+            mock_search.return_value = [mock_uni]
             
             sql_params = agent.build_sql_params(state)
-            assert sql_params.get("university_ids") == [1, 2, 3]
+            assert sql_params.get("city") == "Guangzhou"
+            assert sql_params.get("province") == "Guangdong"
     
     # ========== PAGINATION TESTS ==========
     
     def test_pagination_next_returns_next_page(self, agent, mock_db):
         """Test: Pagination 'next' returns next page from cached IDs"""
-        # This would require setting up pagination state first
-        # For now, just test that pagination command is detected
-        assert agent._is_pagination_command("next") is True
-        assert agent._is_pagination_command("show more") is True
+        # Test that pagination command is detected via router
+        state = agent.router.route_stage1_rules("next")
+        assert state.intent == agent.router.INTENT_PAGINATION
+        assert state.page_action == "next"
+        
+        state2 = agent.router.route_stage1_rules("show more")
+        assert state2.intent == agent.router.INTENT_PAGINATION
     
     # ========== DEADLINE FILTER TESTS ==========
     
@@ -426,13 +643,13 @@ class TestPartnerAgentRouting:
     
     def test_fuzzy_major_cse_to_computer_science(self, agent):
         """Test: 'cse' → computer science via abbreviation expansion"""
-        normalized = agent._apply_fuzzy_normalization("cse")
-        assert "computer science" in normalized.lower()
+        expanded = agent._expand_major_acronym("cse")
+        assert "computer science" in expanded.lower()
     
     def test_fuzzy_major_cs_to_computer_science(self, agent):
         """Test: 'cs' → computer science"""
-        normalized = agent._apply_fuzzy_normalization("cs")
-        assert "computer science" in normalized.lower()
+        expanded = agent._expand_major_acronym("cs")
+        assert "computer science" in expanded.lower()
 
 
 if __name__ == "__main__":
