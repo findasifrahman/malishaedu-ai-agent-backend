@@ -314,14 +314,21 @@ CRITICAL RULES:
     def _get_cached_state(self, partner_id: Optional[int], conversation_id: Optional[str]) -> Optional[Dict[str, Any]]:
         """Get unified cached state for conversation (state + pending info)"""
         if not conversation_id:
+            print(f"DEBUG: _get_cached_state - conversation_id is None, returning None")
             return None
         key = (partner_id, conversation_id)
+        print(f"DEBUG: _get_cached_state - key={key}, cache_keys={list(self._state_cache.keys())}")
         if key in self._state_cache:
             cached = self._state_cache[key]
-            if (time.time() - cached.get("ts", 0)) < self._state_cache_ttl:
+            age = time.time() - cached.get("ts", 0)
+            if age < self._state_cache_ttl:
+                print(f"DEBUG: _get_cached_state - found cached state (age={age:.1f}s, pending={cached.get('pending') is not None})")
                 return cached
             else:
+                print(f"DEBUG: _get_cached_state - cached state expired (age={age:.1f}s > {self._state_cache_ttl}s)")
                 del self._state_cache[key]
+        else:
+            print(f"DEBUG: _get_cached_state - key not found in cache")
         return None
     
     def _set_cached_state(self, partner_id: Optional[int], conversation_id: Optional[str], 
@@ -438,6 +445,7 @@ RULES:
 - Use today's date ({today_date.strftime('%Y-%m-%d')}) to interpret "next intake", "earliest intake", "asap".
 - Do NOT output major_raw = "scholarship info" / "fees" / "information". If unsure, null.
 - Do NOT output university_raw = "list" / "all" / "database". If unsure, null.
+- For teaching_language: Extract "English" from phrases like "English", "English taught", "English-taught", "taught in English", "English program". Extract "Chinese" from "Chinese", "Chinese taught", "Mandarin", "中文".
 - Output confidence in [0,1] based on how clear the user's intent is.
 - For "next March intake", set intake_term="March" and wants_earliest=true, NOT page_action="next".
 
@@ -700,8 +708,11 @@ Output ONLY valid JSON, no other text:"""
         text_norm = self.normalize_text(text)
         
         # English patterns (including typos and Banglish)
+        # Match: "english", "english taught", "english-taught", "english program", etc.
         english_patterns = [
-            r'\b(english|englsih|englsh|inglish|ingreji|english\s+e|english-?taught|english\s+program|en)\b',
+            r'\b(english|englsih|englsh|inglish|ingreji|english\s+e)\b',
+            r'\b(english\s+taught|english-?taught|english\s+program)\b',  # "english taught" or "english-taught"
+            r'\b(taught\s+in\s+english|program\s+in\s+english)\b',  # "taught in english"
             r'\b(英文)\b',  # Chinese word for English
         ]
         for pattern in english_patterns:
@@ -1478,7 +1489,11 @@ Output ONLY valid JSON, no other text:"""
             state.university_query = extracted.get("university_raw")  # Will be resolved later
             state.intake_term = extracted.get("intake_term")
             state.intake_year = extracted.get("intake_year")
+            # Parse teaching_language from extracted or from latest message if not extracted
             state.teaching_language = extracted.get("teaching_language")
+            if not state.teaching_language:
+                # Try to parse from latest message (handles "English taught", "english-taught", etc.)
+                state.teaching_language = self.parse_teaching_language(latest_user_message)
             state.duration_years_target = extracted.get("duration_years")
             state.wants_earliest = extracted.get("wants_earliest", False)
             state.wants_scholarship = extracted.get("wants_scholarship", False)
@@ -1856,7 +1871,7 @@ Output ONLY valid JSON, no other text:"""
         
         return sql_params
     
-    def run_db(self, route_plan: Dict[str, Any]) -> List[Any]:
+    def run_db(self, route_plan: Dict[str, Any], latest_user_message: Optional[str] = None) -> List[Any]:
         """
         Stage B: Run DB queries based on sql_plan.
         Returns list of results (ProgramIntake, University, or Major objects).
@@ -1869,6 +1884,29 @@ Output ONLY valid JSON, no other text:"""
         intent = route_plan["intent"]
         state = route_plan.get("state")
         print(f"DEBUG: run_db() - intent={intent}, sql_params keys={list(sql_params.keys())}")
+        
+        # For REQUIREMENTS intent: if user only mentioned university (not major), clear major filters
+        if intent == self.router.INTENT_ADMISSION_REQUIREMENTS and latest_user_message:
+            message_lower = latest_user_message.lower()
+            # Check if current message explicitly mentions a major/subject
+            major_keywords = ["major", "subject", "program", "course", "degree in", "study", "computer science", "physics", "engineering"]
+            mentions_major = any(kw in message_lower for kw in major_keywords)
+            
+            # Also check if state.major_query appears in the current message
+            if state and state.major_query:
+                major_lower = state.major_query.lower()
+                if major_lower in message_lower:
+                    mentions_major = True
+            
+            if not mentions_major and state and state.university_query:
+                # User only mentioned university, clear major filters to show all programs
+                print(f"DEBUG: REQUIREMENTS query - user only mentioned university '{state.university_query}', clearing major filters")
+                sql_params.pop("major_ids", None)
+                sql_params.pop("major_text", None)
+                if state:
+                    state.major_query = None
+                    if hasattr(state, '_resolved_major_ids'):
+                        state._resolved_major_ids = None
         
         if intent == self.router.INTENT_LIST_UNIVERSITIES:
             # Use list_universities_by_filters
@@ -1895,19 +1933,39 @@ Output ONLY valid JSON, no other text:"""
                 filters["university_id"] = sql_params["university_id"]
             if sql_params.get("university_ids"):
                 filters["university_ids"] = sql_params["university_ids"]
-            if sql_params.get("major_ids"):
-                # Always use major_ids list for IN clause (more efficient than multiple OR conditions)
-                filters["major_ids"] = sql_params["major_ids"]
-            if sql_params.get("major_text"):
-                filters["major_text"] = sql_params["major_text"]
+            
+            # For REQUIREMENTS intent: relax filters to show all programs at university
+            # Only include major/teaching_language/intake filters if user explicitly mentioned them
+            if intent == self.router.INTENT_ADMISSION_REQUIREMENTS:
+                # For requirements queries, only filter by major if explicitly mentioned
+                # If user only mentions university, show requirements for all programs
+                if sql_params.get("major_ids"):
+                    # Check if major was likely mentioned in current query (not just from prev_state)
+                    # For now, include it but we'll relax other filters
+                    filters["major_ids"] = sql_params["major_ids"]
+                elif sql_params.get("major_text"):
+                    filters["major_text"] = sql_params["major_text"]
+                
+                # Don't filter by teaching_language for requirements queries (show all languages)
+                # Don't filter by intake_term/intake_year (show all intakes)
+                # This allows showing requirements for all programs at the university
+                print(f"DEBUG: REQUIREMENTS query - relaxing filters (not filtering by teaching_language/intake_term)")
+            else:
+                # For other intents, include all filters as normal
+                if sql_params.get("major_ids"):
+                    filters["major_ids"] = sql_params["major_ids"]
+                if sql_params.get("major_text"):
+                    filters["major_text"] = sql_params["major_text"]
+                if sql_params.get("teaching_language"):
+                    filters["teaching_language"] = sql_params["teaching_language"]
+                if sql_params.get("intake_term"):
+                    filters["intake_term"] = sql_params["intake_term"]
+                if sql_params.get("intake_year"):
+                    filters["intake_year"] = sql_params["intake_year"]
+            
             if sql_params.get("degree_level"):
                 filters["degree_level"] = sql_params["degree_level"]
-            if sql_params.get("teaching_language"):
-                filters["teaching_language"] = sql_params["teaching_language"]
-            if sql_params.get("intake_term"):
-                filters["intake_term"] = sql_params["intake_term"]
-            if sql_params.get("intake_year"):
-                filters["intake_year"] = sql_params["intake_year"]
+            
             if sql_params.get("duration_years_target") is not None:
                 filters["duration_years_target"] = sql_params["duration_years_target"]
                 filters["duration_constraint"] = sql_params.get("duration_constraint", "approx")
@@ -1918,13 +1976,14 @@ Output ONLY valid JSON, no other text:"""
             if sql_params.get("province"):
                 filters["province"] = sql_params["province"]
             
-            # Scholarship filters
-            if state and state.wants_scholarship:
-                filters["has_scholarship"] = True
-                if state.scholarship_focus.csc:
-                    filters["scholarship_type"] = "csc"
-                elif state.scholarship_focus.university:
-                    filters["scholarship_type"] = "university"
+            # Scholarship filters - DO NOT include for REQUIREMENTS intent
+            if intent != self.router.INTENT_ADMISSION_REQUIREMENTS:
+                if state and state.wants_scholarship:
+                    filters["has_scholarship"] = True
+                    if state.scholarship_focus.csc:
+                        filters["scholarship_type"] = "csc"
+                    elif state.scholarship_focus.university:
+                        filters["scholarship_type"] = "university"
             
             # Requirements filters
             if state and state.wants_requirements:
@@ -2118,11 +2177,29 @@ Focus areas: {', '.join([k for k, v in req_focus.items() if v])}
 CRITICAL RULES:
 - Use ONLY the information provided in DATABASE CONTEXT above.
 - Never mention a major/university that is NOT in the DATABASE CONTEXT.
-- If scholarship fields are missing, say "Not provided in our partner database."
-- If information is missing, say "Not provided in our partner database."
+- POSITIVE LANGUAGE: Always present information in a positive way. NEVER say "Not provided" unless the DATABASE CONTEXT explicitly says "not provided", "Not specified", or "N/A".
+- ALWAYS show requirements (documents, exams, bank statements, age, HSK, English tests, accommodation) if they are present in the DATABASE CONTEXT.
+- If the DATABASE CONTEXT shows ANY of the following, you MUST include them in your response:
+  * Teaching Language (e.g., "Teaching Language: English")
+  * Documents (from Documents section or documents_required field)
+  * Exam Requirements (HSK, English tests, from Exam Requirements section)
+  * Bank Statement requirements (amount, currency, notes)
+  * Age requirements (min/max)
+  * Inside China applicants (allowed/not allowed)
+  * Interview, Written Test, Acceptance Letter requirements
+  * Important Notes (from notes field)
+  * Accommodation information (from accommodation_note)
+- For requirements, combine information from ALL sources in the DATABASE CONTEXT:
+  * Documents section (ProgramDocument table)
+  * Exam Requirements section (ProgramExamRequirement table, HSK, English tests)
+  * Bank statement, age, inside_china, interview, written_test fields from ProgramIntake
+  * Notes field (contains important admission info, fees, and other details)
+  * Accommodation note field
+- If a field is present in DATABASE CONTEXT, show it. Only omit if it literally says "not provided" or "Not specified" in the context.
+- Do NOT use negative language like "Not provided in our partner database" unless the context explicitly states that.
 - Do NOT invent or hallucinate any information.
 
-Provide a concise answer using ONLY the DATABASE CONTEXT above.
+Provide a comprehensive, positive answer using ALL relevant information from the DATABASE CONTEXT above.
 """
         
         try:
@@ -2440,7 +2517,23 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above.
         ]
         
         if not high_confidence_matches:
-            # No high-confidence matches - return empty to trigger fallback or clarification
+            # No high-confidence matches - check if best match is close enough for typos
+            if all_matches:
+                best_score = all_matches[0][1]
+                # For common typos (like "sciance" -> "science"), lower threshold to 0.70
+                # Check if it's a single-word typo (edit distance 1-2)
+                if best_score >= 0.70:
+                    # Check if it's likely a typo (high similarity but below threshold)
+                    from difflib import SequenceMatcher
+                    expanded_lower = expanded_query.lower()
+                    best_major_name = all_matches[0][0].get("name", "").lower()
+                    # If similarity is high (>=0.70) and word overlap is good, accept it
+                    word_overlap = len(set(expanded_lower.split()) & set(best_major_name.split()))
+                    if word_overlap >= 1:  # At least one word matches
+                        print(f"DEBUG: resolve_major_ids('{major_query}') - accepting typo match (score={best_score:.2f}, threshold={confidence_threshold})")
+                        # Return top match even if below threshold
+                        return [all_matches[0][0]["id"]]
+            
             best_score = all_matches[0][1] if all_matches else 0.0
             print(f"DEBUG: resolve_major_ids('{major_query}') - no matches >= {confidence_threshold} threshold (best was {best_score:.2f})")
             return []
@@ -3403,13 +3496,13 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above.
                                         intake_info += f": {form['rules']}"
                 
                 # Include ProgramIntake notes and scholarship_info
-                # Fix 3: Always show notes for documents_only/eligibility_only/scholarship_only
-                if intent in ["documents_only", "eligibility_only", "scholarship_only"]:
+                # Fix 3: Always show notes for documents_only/eligibility_only/scholarship_only/SCHOLARSHIP/REQUIREMENTS
+                if intent in ["documents_only", "eligibility_only", "scholarship_only", "SCHOLARSHIP", "REQUIREMENTS", self.router.INTENT_ADMISSION_REQUIREMENTS]:
                     if intake.get('notes'):
                         intake_info += f"\n  Important Notes: {intake['notes']}"
                     else:
                         intake_info += f"\n  Important Notes: Not specified"
-                    if intent == "scholarship_only" and intake.get('scholarship_info'):
+                    if intent in ["scholarship_only", "SCHOLARSHIP"] and intake.get('scholarship_info'):
                         intake_info += f"\n  Scholarship Info: {intake['scholarship_info']}"
                 else:
                     # For other intents, include notes if present
@@ -3490,8 +3583,8 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above.
                                     'applies_to': None
                                 })
                             else:
-                                # NULL - not specified (only show for doc/eligibility intents)
-                                if intent in ["documents_only", "eligibility_only"]:
+                                # NULL - not specified (only show for doc/eligibility/requirements intents)
+                                if intent in ["documents_only", "eligibility_only", "REQUIREMENTS", self.router.INTENT_ADMISSION_REQUIREMENTS]:
                                     documents.append({
                                         'name': 'Bank Statement',
                                         'is_required': None,
@@ -4392,7 +4485,9 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above.
             }
         
         # Run DB query using route_plan
-        db_results = self.run_db(route_plan)
+        # Pass latest user message for REQUIREMENTS intent to check if major was mentioned
+        latest_user_msg = user_message_normalized if 'user_message_normalized' in locals() else user_message
+        db_results = self.run_db(route_plan, latest_user_message=latest_user_msg)
         
         # Check if result is a fallback dict
         fallback_result = None
@@ -6305,8 +6400,12 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above.
         t_ctx_start = time.perf_counter()
 
         # Flags based on intent
+        # For SCHOLARSHIP intent, also include requirements (docs, exams, eligibility) since user might ask about admission requirements
         include_docs = include_exams = include_scholarships = include_eligibility = include_deadlines = include_cost = True
-        if intent == "fees_only":
+        if intent == "SCHOLARSHIP" or intent == "scholarship_only":
+            # Keep all flags True for SCHOLARSHIP to show full requirements
+            pass
+        elif intent == "fees_only":
             include_docs = False
             include_exams = False
             include_scholarships = False
@@ -6328,9 +6427,10 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above.
             include_cost = False
         elif intent == "scholarship_only":
             include_docs = True  # Include scholarship-related documents
-            include_exams = False
+            include_exams = True  # Include exam requirements (HSK, English tests)
             include_scholarships = True
-            include_eligibility = False
+            include_eligibility = True  # Include eligibility requirements (age, bank statement, etc.)
+            include_deadlines = True
             include_cost = False
         elif intent == "eligibility_only":
             include_docs = False

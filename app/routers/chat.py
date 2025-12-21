@@ -397,10 +397,13 @@ async def chat(
             print("="*80 + "\n")
             
             agent = PartnerAgent(db)
+            # Use chat_session_id as conversation_id for pending state management
+            conversation_id = request.chat_session_id or (f"partner_{current_partner.id}" if not request.chat_session_id else None)
             result = agent.generate_response(
                 user_message=request.message,
                 conversation_history=messages_history,
-                partner_id=current_partner.id
+                partner_id=current_partner.id,
+                conversation_id=conversation_id
             )
             
             print("\n" + "="*80)
@@ -617,10 +620,13 @@ async def chat_stream(
         if is_partner:
             # Partner authenticated → Use PartnerAgent
             agent = PartnerAgent(db)
+            # Use chat_session_id as conversation_id for pending state management
+            conversation_id = request.chat_session_id or (f"partner_{current_partner.id}" if not request.chat_session_id else None)
             result = agent.generate_response(
                 user_message=request.message,
                 conversation_history=messages_history,
-                partner_id=current_partner.id
+                partner_id=current_partner.id,
+                conversation_id=conversation_id
             )
             full_response = result['response']
             used_rag = False
