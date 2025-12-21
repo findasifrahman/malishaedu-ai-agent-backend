@@ -60,10 +60,11 @@ CRITICAL RULES:
         self.openai_service = OpenAIService()
         self.router = PartnerRouter(self.openai_service)
         
-        # Lazy caches with TTL (loaded only when needed)
-        self._uni_name_cache: Optional[List[Dict[str, Any]]] = None
-        self._uni_cache_timestamp: Optional[float] = None
-        self._uni_cache_ttl: float = 3600.0  # 1 hour TTL
+        # Unified lazy caches with TTL (loaded only when needed for fuzzy matching)
+        self._universities_cache: Optional[List[Dict[str, Any]]] = None
+        self._majors_cache: Optional[List[Dict[str, Any]]] = None
+        self._cache_ts: Optional[float] = None
+        self._cache_ttl_seconds: float = 900.0  # 15 minutes TTL
         
         # Conversation memory for follow-up questions
         self.last_selected_university_id: Optional[int] = None
@@ -85,21 +86,16 @@ CRITICAL RULES:
         # Pending slot cache: keyed by (partner_id, conversation_id) -> {"slot": str, "timestamp": float, "intent": str}
         self._pending_slot_cache: Dict[Tuple[Optional[int], str], Dict[str, Any]] = {}
         self._pending_slot_ttl: float = 600.0  # 10 minutes TTL
-        
-        # Major cache with TTL (lazy loaded)
-        self._major_cache: Optional[List[Dict[str, Any]]] = None
-        self._major_cache_timestamp: Optional[float] = None
-        self._major_cache_ttl: float = 3600.0  # 1 hour TTL
     
-    def _get_uni_name_cache(self, force_reload: bool = False) -> List[Dict[str, Any]]:
-        """Lazy load lightweight university name cache with TTL"""
+    def _get_universities_cached(self, force_reload: bool = False) -> List[Dict[str, Any]]:
+        """Lazy load university cache with TTL (only loads when needed for fuzzy matching)"""
         import time
         now = time.time()
         
-        if force_reload or self._uni_name_cache is None or (self._uni_cache_timestamp and (now - self._uni_cache_timestamp) > self._uni_cache_ttl):
+        if force_reload or self._universities_cache is None or (self._cache_ts and (now - self._cache_ts) > self._cache_ttl_seconds):
             # Load only name, id, aliases for fuzzy matching (lightweight)
             universities = self.db_service.search_universities(is_partner=True, limit=1000)  # Reasonable limit
-            self._uni_name_cache = [
+            self._universities_cache = [
                 {
                     "id": uni.id,
                     "name": uni.name,
@@ -108,9 +104,13 @@ CRITICAL RULES:
                 }
                 for uni in universities
             ]
-            self._uni_cache_timestamp = now
+            self._cache_ts = now
         
-        return self._uni_name_cache
+        return self._universities_cache
+    
+    def _get_uni_name_cache(self, force_reload: bool = False) -> List[Dict[str, Any]]:
+        """Alias for backward compatibility"""
+        return self._get_universities_cached(force_reload)
     
     def _infer_earliest_intake_term(self, current_date: Optional[date] = None) -> Optional[str]:
         """
@@ -130,28 +130,53 @@ CRITICAL RULES:
         else:  # 9, 10, 11
             return "March"  # Next March
     
-    def _get_major_cache(self, force_reload: bool = False) -> List[Dict[str, Any]]:
-        """Lazy load lightweight major cache with TTL"""
+    def _get_majors_cached(self, force_reload: bool = False) -> List[Dict[str, Any]]:
+        """Lazy load major cache with TTL (only loads when needed for fuzzy matching)"""
+        import time
         now = time.time()
         
-        if force_reload or self._major_cache is None or (self._major_cache_timestamp and (now - self._major_cache_timestamp) > self._major_cache_ttl):
-            # Load only minimal fields for fuzzy matching
+        if force_reload or self._majors_cache is None or (self._cache_ts and (now - self._cache_ts) > self._cache_ttl_seconds):
+            # Load minimal fields for fuzzy matching
             majors = self.db_service.search_majors(limit=2000)  # Reasonable limit
-            self._major_cache = [
-                {
+            self._majors_cache = []
+            for major in majors:
+                # Normalize keywords (same as _load_all_majors did)
+                keywords = getattr(major, 'keywords', None)
+                if isinstance(keywords, str):
+                    try:
+                        keywords = json.loads(keywords)
+                    except (json.JSONDecodeError, ValueError):
+                        keywords = [k.strip() for k in keywords.split(',') if k.strip()] if keywords else []
+                elif not isinstance(keywords, list):
+                    keywords = []
+                
+                # Normalize aliases
+                aliases = getattr(major, 'aliases', None)
+                if isinstance(aliases, str):
+                    try:
+                        aliases = json.loads(aliases)
+                    except (json.JSONDecodeError, ValueError):
+                        aliases = [a.strip() for a in aliases.split(',') if a.strip()] if aliases else []
+                elif not isinstance(aliases, list):
+                    aliases = []
+                
+                self._majors_cache.append({
                     "id": major.id,
                     "name": major.name,
                     "name_cn": getattr(major, 'name_cn', None),
-                    "keywords": getattr(major, 'keywords', None),
+                    "keywords": keywords,
+                    "aliases": aliases,
                     "degree_level": str(major.degree_level) if major.degree_level else None,
                     "teaching_language": str(major.teaching_language) if major.teaching_language else None,
                     "university_id": major.university_id,
-                }
-                for major in majors
-            ]
-            self._major_cache_timestamp = now
+                })
+            self._cache_ts = now
         
-        return self._major_cache
+        return self._majors_cache
+    
+    def _get_major_cache(self, force_reload: bool = False) -> List[Dict[str, Any]]:
+        """Alias for backward compatibility"""
+        return self._get_majors_cached(force_reload)
     
     def _get_pending_slot(self, partner_id: Optional[int], conversation_id: Optional[str]) -> Optional[Dict[str, Any]]:
         """Get pending slot for conversation, checking TTL"""
@@ -201,6 +226,58 @@ CRITICAL RULES:
         """Get major name by ID using DBQueryService (lazy, no eager load)"""
         major = self.db.query(Major).filter(Major.id == major_id).first()
         return major.name if major else "Unknown Major"
+    
+    def _expand_major_acronym(self, text: str) -> str:
+        """
+        Expand common major acronyms before fuzzy matching.
+        Also strips trailing stopwords like "and", "&", ",".
+        """
+        if not text:
+            return text
+        
+        # Strip trailing stopwords
+        text = re.sub(r'\s+(and|&|,)\s*$', '', text, flags=re.IGNORECASE).strip()
+        
+        text_lower = text.lower()
+        
+        # Acronym expansion map
+        acronym_map = {
+            "cse": "computer science",
+            "cs": "computer science",
+            "ce": "computer engineering",
+            "se": "software engineering",
+            "eee": "electrical engineering",
+            "it": "information technology",
+            "ai": "artificial intelligence",
+            "ds": "data science",
+            "ml": "machine learning",
+            "cv": "computer vision",
+            "nlp": "natural language processing",
+            "bme": "biomedical engineering",
+            "mse": "materials science engineering",
+            "chem": "chemistry",
+            "bio": "biology",
+            "phy": "physics",
+            "math": "mathematics",
+            "econ": "economics",
+            "fin": "finance",
+            "mba": "master of business administration",
+        }
+        
+        # Check if text is short (<=6 chars) or all-caps-like (mostly uppercase)
+        is_short = len(text.replace(' ', '')) <= 6
+        is_caps_like = len([c for c in text if c.isupper()]) > len([c for c in text if c.islower()]) if text else False
+        
+        if is_short or is_caps_like:
+            for abbrev, expansion in acronym_map.items():
+                # Match whole word only
+                pattern = r'\b' + re.escape(abbrev) + r'\b'
+                if re.search(pattern, text_lower):
+                    # Replace acronym with expansion
+                    text = re.sub(pattern, expansion, text, flags=re.IGNORECASE)
+                    break  # Only expand first match
+        
+        return text
     
     def parse_query_rules(self, text: str) -> Dict[str, Any]:
         """
@@ -389,7 +466,58 @@ CRITICAL RULES:
             state.degree_level = prev_state.degree_level
             
             # Handle pending_slot
-            if prev_state.pending_slot == "degree_level":
+            if prev_state.pending_slot == "scholarship_bundle":
+                # Parse bundle: degree_level + major + intake_term + teaching_language
+                # Use rule-based parsing to extract all fields at once
+                parsed = self.parse_query_rules(latest_user_message)
+                
+                # Extract degree_level (fuzzy match ok)
+                if parsed.get("degree_level"):
+                    state.degree_level = parsed["degree_level"]
+                else:
+                    matched_degree = self.router._fuzzy_match_degree_level(latest_user_message)
+                    if matched_degree:
+                        state.degree_level = matched_degree
+                
+                # Extract intake_term
+                if parsed.get("intake_term"):
+                    state.intake_term = parsed["intake_term"]
+                elif re.search(r'\b(mar(ch)?|spring)\b', self.router.normalize_query(latest_user_message)):
+                    state.intake_term = "March"
+                elif re.search(r'\b(sep(t|tember)?|fall|autumn)\b', self.router.normalize_query(latest_user_message)):
+                    state.intake_term = "September"
+                elif re.search(r'\b(earliest|asap|as soon as possible|soonest)\b', self.router.normalize_query(latest_user_message)):
+                    state.wants_earliest = True
+                
+                # Extract major_query (clean stopwords)
+                major_raw = parsed.get("major_raw")
+                if major_raw:
+                    # Clean semantic stopwords
+                    if not self._is_semantic_stopword(major_raw):
+                        state.major_query = major_raw
+                
+                # Extract teaching_language
+                if parsed.get("teaching_language"):
+                    state.teaching_language = parsed["teaching_language"]
+                
+                # Force intent and flags
+                state.intent = prev_state.intent  # Keep SCHOLARSHIP
+                state.wants_scholarship = True
+                state.scholarship_focus = prev_state.scholarship_focus  # Inherit
+                
+                # Clear pending slot if we got at least degree_level
+                if state.degree_level:
+                    state.pending_slot = None
+                    state.is_clarifying = False
+                    self._clear_pending_slot(partner_id, conversation_id)
+                else:
+                    # Still missing degree_level, keep pending
+                    state.pending_slot = prev_state.pending_slot
+                    state.is_clarifying = True
+                
+                return state  # DO NOT call router.route() - intent locked
+                
+            elif prev_state.pending_slot == "degree_level":
                 # Fuzzy match degree level
                 matched_degree = self.router._fuzzy_match_degree_level(latest_user_message)
                 if matched_degree:
@@ -415,6 +543,23 @@ CRITICAL RULES:
                     self._clear_pending_slot(partner_id, conversation_id)
                 elif re.search(r'\b(sep(t|tember)?|fall|autumn)\b', normalized):
                     state.intake_term = "September"
+                    state.pending_slot = None
+                    state.is_clarifying = False
+                    self._clear_pending_slot(partner_id, conversation_id)
+                else:
+                    state.pending_slot = prev_state.pending_slot
+                    state.is_clarifying = True
+                    return state
+            elif prev_state.pending_slot == "teaching_language":
+                # Parse teaching language
+                normalized = self.router.normalize_query(latest_user_message)
+                if re.search(r'\b(english|english-?taught|english\s+program)\b', normalized):
+                    state.teaching_language = "English"
+                    state.pending_slot = None
+                    state.is_clarifying = False
+                    self._clear_pending_slot(partner_id, conversation_id)
+                elif re.search(r'\b(chinese|chinese-?taught|chinese\s+program|mandarin)\b', normalized):
+                    state.teaching_language = "Chinese"
                     state.pending_slot = None
                     state.is_clarifying = False
                     self._clear_pending_slot(partner_id, conversation_id)
@@ -565,10 +710,10 @@ CRITICAL RULES:
                     question_parts.append("subject/major")
         
         elif intent == self.router.INTENT_SCHOLARSHIP:
-            # If generic "scholarship info", provide summary first, then ask
+            # If generic "scholarship info", ask for bundle (degree_level + major + intake_term)
             if not state.degree_level and not state.major_query and not state.university_query:
-                # Ask ONE question with options
-                missing_slots.append("degree_level")
+                # Use bundle slot to prevent rerouting on next message
+                missing_slots.append("scholarship_bundle")
                 return missing_slots, "Which level and intake? (1) Language (March) (2) Bachelor (March/Sept) (3) Master (Sept) (4) PhD (Sept). You can answer like: 'Bachelor, CSE, March'"
             # If we have some info, proceed and only ask if result set too broad
         
@@ -631,41 +776,31 @@ CRITICAL RULES:
             if uni_ids:
                 sql_params["university_ids"] = uni_ids  # Note: may need to adjust DBQueryService to accept list
         
-        # Major filter - use fuzzy matching with major cache
+        # Major filter - use acronym expansion + fuzzy matching with major cache
         if state.major_query:
-            # First try DB search (efficient)
-            majors = self.db_service.search_majors(name=state.major_query, limit=50)
+            # Expand acronyms before searching (e.g., "cse" -> "computer science")
+            expanded_major = self._expand_major_acronym(state.major_query)
+            
+            # First try DB search with expanded input (efficient)
+            majors = self.db_service.search_majors(name=expanded_major, limit=50)
             if majors:
                 sql_params["major_ids"] = [m.id for m in majors]
             else:
-                # Fallback to fuzzy match using major cache (lazy loaded)
-                major_cache = self._get_major_cache()
-                matched_major_ids = []
-                query_normalized = self._normalize_token(state.major_query)
+                # Fallback to fuzzy match using cached loaders (lazy loaded - only when needed)
+                matched, best_match, all_matches = self._fuzzy_match_major(
+                    state.major_query,
+                    university_id=sql_params.get("university_id"),
+                    degree_level=state.degree_level,
+                    top_k=20
+                )
                 
-                for major in major_cache[:2000]:  # Limit to 2000 for performance
-                    major_name = self._normalize_token(major.get("name", ""))
-                    keywords = self._normalize_keywords(major.get("keywords", []))
-                    
-                    # Check name similarity
-                    name_score = self._similarity(query_normalized, major_name)
-                    if name_score >= 0.72:
-                        matched_major_ids.append(major["id"])
-                        continue
-                    
-                    # Check keyword similarity
-                    for keyword in keywords:
-                        kw_normalized = self._normalize_token(keyword)
-                        kw_score = self._similarity(query_normalized, kw_normalized)
-                        if kw_score >= 0.72:
-                            matched_major_ids.append(major["id"])
-                            break
-                
-                if matched_major_ids:
-                    sql_params["major_ids"] = matched_major_ids[:20]  # Limit to 20
+                if all_matches:
+                    # Extract major_ids from matches
+                    matched_major_ids = [m[0]["id"] for m in all_matches[:20]]
+                    sql_params["major_ids"] = matched_major_ids
                 else:
-                    # If still no match, use the query as-is for DB ILIKE search
-                    sql_params["major_text"] = state.major_query
+                    # If still no match, use the expanded query as-is for DB ILIKE search
+                    sql_params["major_text"] = expanded_major
         
         # Degree level
         if state.degree_level:
@@ -1029,41 +1164,56 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
     
     def _fuzzy_match_major(self, user_input: str, university_id: Optional[int] = None, degree_level: Optional[str] = None, top_k: int = 20) -> Tuple[bool, Optional[Dict[str, Any]], List[Tuple[Dict[str, Any], float]]]:
         """
-        Fuzzy match user input to major using DBQueryService.
+        Fuzzy match user input to major using acronym expansion + keyword exact match + name/fuzzy similarity.
         Returns (matched: bool, best_match: Optional[Dict], all_matches: List[Tuple[Dict, score]])
         """
-        user_input_clean = re.sub(r'[^\w\s&]', '', user_input.lower())
+        # Step 1: Expand acronyms (e.g., "cse" -> "computer science")
+        expanded_input = self._expand_major_acronym(user_input)
+        user_input_clean = re.sub(r'[^\w\s&]', '', expanded_input.lower())
         
-        # Use DBQueryService to search majors
+        # Step 2: Try DBQueryService first (fast ILIKE search with expanded input)
         majors = self.db_service.search_majors(
             university_id=university_id,
-            name=user_input,
+            name=expanded_input,  # Use expanded input for DB search
             degree_level=degree_level,
             limit=top_k * 2  # Get more candidates for fuzzy matching
         )
         
+        # Step 3: If DB returns no results, try cache-based fuzzy matching (lazy loaded)
         if not majors:
+            major_cache = self._get_majors_cached()  # Use cached loaders
+            # Filter by university_id and degree_level if provided
+            candidates = major_cache
+            if university_id:
+                candidates = [m for m in candidates if m.get("university_id") == university_id]
+            if degree_level:
+                candidates = [m for m in candidates if str(m.get("degree_level", "")).lower() == str(degree_level).lower()]
+            
+            # Convert cache format to match DB format
+            all_majors = candidates[:500]  # Limit for performance
+        else:
+            # Convert to dict format for compatibility
+            all_majors = [
+                {
+                    "id": m.id,
+                    "name": m.name,
+                    "name_cn": m.name_cn,
+                    "keywords": m.keywords if isinstance(m.keywords, list) else (json.loads(m.keywords) if isinstance(m.keywords, str) else []),
+                    "university_id": m.university_id,
+                    "university_name": m.university.name if m.university else None,
+                    "degree_level": m.degree_level,
+                    "teaching_language": m.teaching_language,
+                    "discipline": m.discipline,
+                    "duration_years": m.duration_years,
+                    "category": m.category
+                }
+                for m in majors
+            ]
+        
+        if not all_majors:
             return False, None, []
         
-        # Convert to dict format for compatibility
-        all_majors = [
-            {
-                "id": m.id,
-                "name": m.name,
-                "name_cn": m.name_cn,
-                "keywords": m.keywords if isinstance(m.keywords, list) else (json.loads(m.keywords) if isinstance(m.keywords, str) else []),
-                "university_id": m.university_id,
-                "university_name": m.university.name if m.university else None,
-                "degree_level": m.degree_level,
-                "teaching_language": m.teaching_language,
-                "discipline": m.discipline,
-                "duration_years": m.duration_years,
-                "category": m.category
-            }
-            for m in majors
-        ]
-        
-        # Collect all matches with scores - no early returns
+        # Step 4: Match in order: keywords exact -> name exact/contains -> fuzzy similarity
         matches = []  # List of (major, score, match_type)
         
         for major in all_majors:
@@ -1071,57 +1221,43 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
             best_score_for_major = 0.0
             match_type = None
             
-            # 1. Exact name match (highest priority)
-            if user_input_clean == major_name_clean:
-                best_score_for_major = 1.0
-                match_type = "exact_name"
-            else:
-                # 2. Substring match in name
-                if user_input_clean in major_name_clean or major_name_clean in user_input_clean:
+            # FIRST PASS: Exact keyword match (highest priority for acronyms like "cse", "cs")
+            keywords = self._normalize_keywords(major.get("keywords", []))
+            if keywords:
+                for keyword in keywords:
+                    keyword_clean = re.sub(r'[^\w\s&]', '', str(keyword).lower())
+                    if not keyword_clean:
+                        continue
+                    # Exact keyword match (case-insensitive)
+                    if user_input_clean == keyword_clean:
+                        if 0.98 > best_score_for_major:
+                            best_score_for_major = 0.98
+                            match_type = "keyword_exact"
+                            break  # Highest priority, stop here
+                    # Keyword contains match
+                    elif user_input_clean in keyword_clean or keyword_clean in user_input_clean:
+                        match_ratio = SequenceMatcher(None, user_input_clean, keyword_clean).ratio()
+                        if match_ratio > best_score_for_major:
+                            best_score_for_major = match_ratio * 0.95  # High score for keyword contains
+                            match_type = "keyword_contains"
+            
+            # SECOND PASS: Exact/contains name match (only if keyword didn't match)
+            if best_score_for_major < 0.9:
+                if user_input_clean == major_name_clean:
+                    best_score_for_major = 1.0
+                    match_type = "exact_name"
+                elif user_input_clean in major_name_clean or major_name_clean in user_input_clean:
                     match_ratio = SequenceMatcher(None, user_input_clean, major_name_clean).ratio()
                     if match_ratio > best_score_for_major:
                         best_score_for_major = match_ratio
                         match_type = "name_substring"
-                
-                # 3. Check keywords (exact and substring)
-                keywords = self._normalize_keywords(major.get("keywords", [])) if hasattr(self, '_normalize_keywords') else (major.get("keywords", []) if isinstance(major.get("keywords"), list) else [])
-                if keywords:
-                    for keyword in keywords:
-                        keyword_clean = re.sub(r'[^\w\s&]', '', str(keyword).lower())
-                        if not keyword_clean:
-                            continue
-                        # Exact keyword match
-                        if user_input_clean == keyword_clean:
-                            if 0.95 > best_score_for_major:  # Slightly lower than exact name
-                                best_score_for_major = 0.95
-                                match_type = "keyword_exact"
-                        # Keyword substring match
-                        elif user_input_clean in keyword_clean or keyword_clean in user_input_clean:
-                            match_ratio = SequenceMatcher(None, user_input_clean, keyword_clean).ratio()
-                            if match_ratio > best_score_for_major:
-                                best_score_for_major = match_ratio * 0.9  # Slightly penalize keyword matches
-                                match_type = "keyword_substring"
-                
-                # 4. Word overlap (fuzzy)
-                # Allow single-word matches for queries like "materials", "finance", "painting"
-                # but only if keyword match didn't already score well
-                user_words = set(user_input_clean.split())
-                major_words = set(major_name_clean.split())
-                common_words = user_words & major_words
-                if common_words:
-                    # For 2+ common words: use existing logic
-                    if len(common_words) >= 2:
-                        match_ratio = len(common_words) / max(len(user_words), len(major_words))
-                        if match_ratio >= 0.4 and match_ratio > best_score_for_major:
-                            best_score_for_major = match_ratio * 0.7  # Penalize word overlap matches
-                            match_type = "word_overlap"
-                    # For single-word matches: only use if keyword match didn't score well (score < 0.6)
-                    elif len(common_words) == 1 and best_score_for_major < 0.6:
-                        # Single word overlap gets lower score
-                        match_ratio = 0.5  # Fixed lower score for single-word matches
-                        if match_ratio > best_score_for_major:
-                            best_score_for_major = match_ratio * 0.6  # Further penalize single-word matches
-                            match_type = "word_overlap_single"
+            
+            # THIRD PASS: SequenceMatcher fuzzy similarity (only if previous passes didn't match well)
+            if best_score_for_major < 0.75:
+                match_ratio = SequenceMatcher(None, user_input_clean, major_name_clean).ratio()
+                if match_ratio > best_score_for_major:
+                    best_score_for_major = match_ratio * 0.85  # Slightly penalize pure fuzzy matches
+                    match_type = "fuzzy_similarity"
             
             # Add match if score is above threshold
             if best_score_for_major >= 0.4:
@@ -3101,6 +3237,30 @@ Provide a concise answer using ONLY the DATABASE CONTEXT above. If information i
         # Run DB query using route_plan
         db_results = self.run_db(route_plan)
         print(f"DEBUG: DB query returned {len(db_results)} results")
+        
+        # ========== POST-QUERY: Check for mixed teaching languages ==========
+        # If DB results have both English + Chinese taught and user didn't specify, ask once
+        if db_results and not state.teaching_language and not state.is_clarifying:
+            teaching_languages = set()
+            for result in db_results:
+                if hasattr(result, 'teaching_language') and result.teaching_language:
+                    teaching_languages.add(str(result.teaching_language))
+                elif hasattr(result, 'major') and result.major and result.major.teaching_language:
+                    teaching_languages.add(str(result.major.teaching_language))
+            
+            if len(teaching_languages) > 1:
+                # Mixed teaching languages - ask clarification
+                print(f"DEBUG: Mixed teaching languages detected: {teaching_languages}, asking clarification")
+                state.pending_slot = "teaching_language"
+                state.is_clarifying = True
+                self._set_pending_slot(partner_id, conversation_id, "teaching_language", state.intent)
+                
+                return {
+                    "response": "I found programs available in both English-taught and Chinese-taught. Which do you prefer? (English or Chinese)",
+                    "used_db": True,
+                    "used_tavily": False,
+                    "sources": []
+                }
         
         # ========== STAGE C: Format Response ==========
         # Build DB context (small, field-aware)
@@ -5301,8 +5461,8 @@ if __name__ == "__main__":
     
     # Create minimal agent instance
     agent = PartnerAgent.__new__(PartnerAgent)
-    agent.all_universities = []
-    agent.all_majors = []
+    # Removed: agent.all_universities and agent.all_majors - now using lazy cached loaders
+    # agent._universities_cache and agent._majors_cache are loaded only when needed
     
     # Test queries
     test_queries = [
