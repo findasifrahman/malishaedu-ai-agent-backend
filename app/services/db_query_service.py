@@ -2,7 +2,7 @@
 Database Query Service - Implements DB-first principle for agent queries
 """
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, func
+from sqlalchemy import and_, or_, func, String
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta, timezone
 import json
@@ -27,11 +27,24 @@ class DBQueryService:
         is_partner: Optional[bool] = None,
         limit: int = 10
     ) -> List[University]:
-        """Search universities by various criteria"""
+        """Search universities by various criteria. Also searches aliases JSON field."""
+        from sqlalchemy import or_
         query = self.db.query(University)
         
         if name:
-            query = query.filter(University.name.ilike(f"%{name}%"))
+            # Search in name, name_cn, and aliases JSONB
+            search_term = f"%{name}%"
+            name_lower = name.lower().strip()
+            conditions = [
+                University.name.ilike(search_term),
+                University.name_cn.ilike(search_term)
+            ]
+            # Check if aliases field exists and search in it (cast JSONB to text for ILIKE)
+            if hasattr(University, 'aliases'):
+                from sqlalchemy import Text
+                # Cast JSONB to text and search (works when array is cast to string like '["HIT", "Harbin"]')
+                conditions.append(func.cast(University.aliases, Text).ilike(search_term))
+            query = query.filter(or_(*conditions))
         if city:
             query = query.filter(University.city.ilike(f"%{city}%"))
         if province:
@@ -56,15 +69,17 @@ class DBQueryService:
         # Build query with ILIKE search
         db_query = self.db.query(University).filter(University.is_partner == True)
         
-        # Search in name, name_cn, and aliases JSON
+        # Search in name, name_cn, and aliases JSONB (cast to text for ILIKE)
         search_term = f"%{query}%"
-        db_query = db_query.filter(
-            or_(
-                University.name.ilike(search_term),
-                University.name_cn.ilike(search_term),
-                University.aliases.ilike(search_term) if hasattr(University, 'aliases') else False
-            )
-        )
+        conditions = [
+            University.name.ilike(search_term),
+            University.name_cn.ilike(search_term)
+        ]
+        # Check if aliases field exists and search in it (cast JSONB to text for ILIKE)
+        if hasattr(University, 'aliases'):
+            from sqlalchemy import Text
+            conditions.append(func.cast(University.aliases, Text).ilike(search_term))
+        db_query = db_query.filter(or_(*conditions))
         
         results = db_query.limit(limit).all()
         
@@ -136,9 +151,11 @@ class DBQueryService:
         teaching_language: Optional[str] = None,  # Changed from TeachingLanguage enum to str
         discipline: Optional[str] = None,
         is_featured: Optional[bool] = None,
+        category: Optional[str] = None,  # New: filter by category (e.g., "Non-degree/Language Program")
+        keywords: Optional[str] = None,  # New: search in keywords field
         limit: int = 10
     ) -> List[Major]:
-        """Search majors by various criteria"""
+        """Search majors by various criteria. Also searches keywords field if provided."""
         query = self.db.query(Major)
         
         if university_id:
@@ -155,6 +172,15 @@ class DBQueryService:
             else:
                 # Single word or abbreviation
                 query = query.filter(Major.name.ilike(f"%{name}%"))
+        if keywords:
+            # Search in keywords field (comma-separated or JSON array)
+            # Use ILIKE to match keywords containing the search term
+            search_term = f"%{keywords}%"
+            # Keywords can be stored as JSON array, comma-separated string, or plain text
+            # Cast to text for ILIKE search
+            if hasattr(Major, 'keywords'):
+                from sqlalchemy import Text
+                query = query.filter(func.cast(Major.keywords, Text).ilike(search_term))
         if degree_level:
             # Handle both string and enum types for backward compatibility
             if isinstance(degree_level, str):
@@ -172,6 +198,9 @@ class DBQueryService:
             query = query.filter(Major.discipline.ilike(f"%{discipline}%"))
         if is_featured is not None:
             query = query.filter(Major.is_featured == is_featured)
+        if category:
+            # Filter by category (e.g., "Non-degree/Language Program")
+            query = query.filter(Major.category.ilike(f"%{category}%"))
         
         query = query.order_by(Major.is_featured.desc(), Major.name)
         
@@ -992,6 +1021,9 @@ class DBQueryService:
         if filters:
             if filters.get("university_id"):
                 query = query.filter(ProgramIntake.university_id == filters["university_id"])
+            elif filters.get("university_ids"):
+                # Filter by list of university IDs (IN clause)
+                query = query.filter(ProgramIntake.university_id.in_(filters["university_ids"]))
             if filters.get("major_ids"):
                 # Filter by list of major IDs (IN clause)
                 query = query.filter(ProgramIntake.major_id.in_(filters["major_ids"]))

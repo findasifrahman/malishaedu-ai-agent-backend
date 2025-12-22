@@ -370,6 +370,7 @@ CRITICAL RULES:
                 "wants_scholarship": snapshot.wants_scholarship,
                 "wants_fees": snapshot.wants_fees,
                 "wants_requirements": snapshot.wants_requirements,
+                "wants_deadline": getattr(snapshot, 'wants_deadline', False),
                 "city": snapshot.city,
                 "province": snapshot.province,
                 "country": snapshot.country,
@@ -428,10 +429,12 @@ Output ONLY valid JSON with these exact fields:
   "intent": "SCHOLARSHIP" | "FEES" | "REQUIREMENTS" | "LIST_PROGRAMS" | "LIST_UNIVERSITIES" | "GENERAL" | "PAGINATION",
   "degree_level": "Language" | "Bachelor" | "Master" | "PhD" | null,
   "major_raw": string or null,
-  "university_raw": string or null,
+  "university_raw": string or null,  # Can be full name, alias (e.g., "HIT" for "Harbin Institute of Technology"), or abbreviation
   "intake_term": "March" | "September" | null,
   "intake_year": number or null,
   "teaching_language": "English" | "Chinese" | null,
+  "city": string or null,  # City name (e.g., "Guangzhou", "Beijing", "Shanghai", "Shenzhen", "Hangzhou", "Nanjing", "Chengdu", "Xian", "Wuhan", "Tianjin", "Dalian", "Qingdao")
+  "province": string or null,  # Province name (e.g., "Guangdong", "Jiangsu", "Zhejiang", "Sichuan", "Shaanxi", "Hubei", "Shandong", "Hunan", "Beijing", "Shanghai", "Tianjin")
   "duration_years": number or null,
   "wants_earliest": boolean,
   "wants_scholarship": boolean,
@@ -445,7 +448,14 @@ RULES:
 - Use today's date ({today_date.strftime('%Y-%m-%d')}) to interpret "next intake", "earliest intake", "asap".
 - Do NOT output major_raw = "scholarship info" / "fees" / "information". If unsure, null.
 - Do NOT output university_raw = "list" / "all" / "database". If unsure, null.
+- For university_raw: Extract university names, abbreviations, or aliases (e.g., "HIT" for "Harbin Institute of Technology", "BUAA" for "Beihang University"). Include common abbreviations and aliases.
 - For teaching_language: Extract "English" from phrases like "English", "English taught", "English-taught", "taught in English", "English program". Extract "Chinese" from "Chinese", "Chinese taught", "Mandarin", "中文".
+- For deadline questions (e.g., "application deadline", "when is the deadline"), set wants_deadline=true and intent can be GENERAL if no other intent is clear.
+- For fee-related questions (e.g., "tuition fee", "tuition", "fee", "cost", "price", "bank statement amount"), set wants_fees=true and intent=FEES.
+- For scholarship questions (e.g., "scholarship", "scholarship info", "scholarship opportunity"), set wants_scholarship=true and intent=SCHOLARSHIP.
+- For accommodation questions (e.g., "accommodation", "accommodation facility", "housing", "dormitory"), set wants_fees=true and intent=FEES (accommodation info is part of fees).
+- For "offered majors", "offered subjects", "available majors", "list of majors", set intent=LIST_PROGRAMS.
+- For city/province: Extract city names (e.g., "Guangzhou", "Beijing", "Shanghai", "Shenzhen", "Hangzhou", "Nanjing", "Chengdu", "Xian", "Wuhan", "Tianjin", "Dalian", "Qingdao") and province names (e.g., "Guangdong", "Jiangsu", "Zhejiang", "Sichuan", "Shaanxi", "Hubei", "Shandong", "Hunan", "Beijing", "Shanghai", "Tianjin"). Handle common typos (e.g., "guangzou" -> "Guangzhou", "guangjou" -> "Guangzhou"). City/province is NOT a university or major - it's a location filter.
 - Output confidence in [0,1] based on how clear the user's intent is.
 - For "next March intake", set intake_term="March" and wants_earliest=true, NOT page_action="next".
 
@@ -549,9 +559,13 @@ Output ONLY valid JSON, no other text:"""
         """
         Expand common major acronyms before fuzzy matching.
         Also strips trailing stopwords like "and", "&", ",".
+        Handles dots in acronyms (e.g., "B.B.A." -> "BBA" -> "bachelor of business administration").
         """
         if not text:
             return text
+        
+        # Normalize dots in acronyms first (e.g., "B.B.A." -> "BBA")
+        text = text.replace('.', '').strip()
         
         # Strip trailing stopwords
         text = re.sub(r'\s+(and|&|,)\s*$', '', text, flags=re.IGNORECASE).strip()
@@ -591,7 +605,7 @@ Output ONLY valid JSON, no other text:"""
         
         if is_short or is_caps_like:
             for abbrev, expansion in acronym_map.items():
-                # Match whole word only
+                # Match whole word only (case-insensitive)
                 pattern = r'\b' + re.escape(abbrev) + r'\b'
                 if re.search(pattern, text_lower):
                     # Replace acronym with expansion
@@ -838,6 +852,8 @@ Output ONLY valid JSON, no other text:"""
             "intake_term": None,
             "intake_year": None,
             "duration_text": None,
+            "city": None,
+            "province": None,
             "wants_scholarship": False,
             "wants_documents": False,
             "wants_fees": False,
@@ -883,7 +899,25 @@ Output ONLY valid JSON, no other text:"""
         
         # Duration detection - support arbitrary durations
         # Parse "4 months" => 0.333 years, "1.3 year" => 1.3, "at least 2 years" => 2.0 (min), "max 1 year" => 1.0 (max)
-        duration_years, duration_constraint = self._parse_duration_arbitrary(text)
+        duration_years = None
+        duration_constraint = "approx"
+        # Parse months (e.g., "4 months", "6 month")
+        month_match = re.search(r'\b(\d+)\s*(?:month|months)\b', lower)
+        if month_match:
+            months = int(month_match.group(1))
+            duration_years = months / 12.0
+        # Parse years with decimals (e.g., "1.3 year", "1.5 years")
+        elif re.search(r'\b(\d+\.?\d*)\s*(?:year|years)\b', lower):
+            year_match = re.search(r'\b(\d+\.?\d*)\s*(?:year|years)\b', lower)
+            if year_match:
+                duration_years = float(year_match.group(1))
+        # Parse "at least" or "minimum" for min constraint
+        if re.search(r'\b(at\s+least|minimum|min)\s+(\d+\.?\d*)', lower):
+            duration_constraint = "min"
+        # Parse "max" or "maximum" for max constraint
+        elif re.search(r'\b(max|maximum)\s+(\d+\.?\d*)', lower):
+            duration_constraint = "max"
+        
         if duration_years is not None:
             result["duration_years_target"] = duration_years
             result["duration_constraint"] = duration_constraint
@@ -943,8 +977,25 @@ Output ONLY valid JSON, no other text:"""
             # Check it's not a stopword
             if major_candidate and major_candidate.lower() not in ["scholarship", "info", "information", "fees", "tuition", "cost", "requirement", "requirements", "admission", "program", "course", "china", "chinese"]:
                 result["major_raw"] = major_candidate
+            else:
+                # Pattern 2: Extract discipline words (physics, pharmacy, computer science, etc.)
+                # Remove intake terms, years, fees, etc. to get major
+                cleaned = re.sub(r'\b(20[2-9]\d)\b', '', normalized, flags=re.IGNORECASE)
+                cleaned = re.sub(r'\b(mar(ch)?|sep(t|tember)?|spring|fall|autumn)\b', '', cleaned, flags=re.IGNORECASE)
+                cleaned = re.sub(r'\b(fee|fees|tuition|cost|price|application\s+fee|deadline|scholarship|document|documents?)\b', '', cleaned, flags=re.IGNORECASE)
+                cleaned = re.sub(r'\b(list|show|all|available|what|which|programs?|majors?|courses?)\b', '', cleaned, flags=re.IGNORECASE)
+                cleaned = re.sub(r'\b(bachelor|master|masters|phd|language|diploma|degree|program|course|bsc|msc|bs|ms)\b', '', cleaned, flags=re.IGNORECASE)
+                cleaned = re.sub(r'\b(english|chinese|taught|in|at|for|the|a|an|and|or|of|to|from|china)\b', '', cleaned, flags=re.IGNORECASE)
+                cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+                
+                # If cleaned text has meaningful content, treat as major
+                if cleaned and len(cleaned.split()) >= 1:
+                    # Check if it's not just a city/province
+                    city_province_keywords = ["guangzhou", "beijing", "shanghai", "guangdong", "jiangsu", "zhejiang"]
+                    if cleaned.lower() not in city_province_keywords:
+                        result["major_raw"] = cleaned
         else:
-            # Pattern 2: Extract discipline words (physics, pharmacy, computer science, etc.)
+            # Pattern 2: Extract discipline words when no "in" pattern found
             # Remove intake terms, years, fees, etc. to get major
             cleaned = re.sub(r'\b(20[2-9]\d)\b', '', normalized, flags=re.IGNORECASE)
             cleaned = re.sub(r'\b(mar(ch)?|sep(t|tember)?|spring|fall|autumn)\b', '', cleaned, flags=re.IGNORECASE)
@@ -966,6 +1017,77 @@ Output ONLY valid JSON, no other text:"""
             expanded = self._expand_major_acronym(result["major_raw"])
             if expanded != result["major_raw"]:
                 result["major_raw"] = expanded
+        
+        # City and Province detection with fuzzy matching for typos
+        # Common Chinese cities with fuzzy matching
+        city_map = {
+            "guangzhou": ["guangzhou", "guangzou", "guangjou", "guangzho", "gz"],
+            "beijing": ["beijing", "beijin", "peking", "bj"],
+            "shanghai": ["shanghai", "shanghae", "sh"],
+            "shenzhen": ["shenzhen", "shenzen", "sz"],
+            "hangzhou": ["hangzhou", "hangzho", "hz"],
+            "nanjing": ["nanjing", "nanking", "nj"],
+            "chengdu": ["chengdu", "chengdu", "cd"],
+            "xian": ["xian", "xi'an", "xian", "xa"],
+            "wuhan": ["wuhan", "wh"],
+            "tianjin": ["tianjin", "tj"],
+            "dalian": ["dalian", "dl"],
+            "qingdao": ["qingdao", "qd"],
+        }
+        
+        # Common Chinese provinces
+        province_map = {
+            "guangdong": ["guangdong", "guangdong", "gd"],
+            "jiangsu": ["jiangsu", "js"],
+            "zhejiang": ["zhejiang", "zj"],
+            "sichuan": ["sichuan", "sc"],
+            "shaanxi": ["shaanxi", "shanxi", "sx"],
+            "hubei": ["hubei", "hb"],
+            "shandong": ["shandong", "sd"],
+            "hunan": ["hunan", "hn"],
+            "beijing": ["beijing", "bj"],  # Beijing is also a province-level municipality
+            "shanghai": ["shanghai", "sh"],  # Shanghai is also a province-level municipality
+            "tianjin": ["tianjin", "tj"],  # Tianjin is also a province-level municipality
+        }
+        
+        # Check for city mentions (with fuzzy matching)
+        # Handle patterns like "in Guangzhou", "Guangzhou universities", "from Guangzhou", etc.
+        for correct_city, variants in city_map.items():
+            for variant in variants:
+                # Match city in various contexts: "in guangzhou", "guangzhou universities", "from guangzhou", "at guangzhou", or just "guangzhou"
+                city_patterns = [
+                    rf'\b(in|from|at|near|around)\s+{variant}\b',  # "in guangzhou", "from guangzhou"
+                    rf'\b{variant}\s+(universit|institut|college|city|province)',  # "guangzhou universities"
+                    rf'\b{variant}\b',  # Just "guangzhou" as standalone word
+                ]
+                for pattern in city_patterns:
+                    if re.search(pattern, lower):
+                        result["city"] = correct_city.title()
+                        print(f"DEBUG: parse_query_rules - detected city: {result['city']} from pattern: {pattern}")
+                        break
+                if result.get("city"):
+                    break
+            if result.get("city"):
+                break
+        
+        # Check for province mentions (with fuzzy matching)
+        for correct_province, variants in province_map.items():
+            for variant in variants:
+                # Match province in various contexts
+                province_patterns = [
+                    rf'\b(in|from|at|near|around)\s+{variant}\b',  # "in guangdong"
+                    rf'\b{variant}\s+(province|universit|institut|college)',  # "guangdong province"
+                    rf'\b{variant}\b',  # Just "guangdong" as standalone word
+                ]
+                for pattern in province_patterns:
+                    if re.search(pattern, lower):
+                        result["province"] = correct_province.title()
+                        print(f"DEBUG: parse_query_rules - detected province: {result['province']} from pattern: {pattern}")
+                        break
+                if result.get("province"):
+                    break
+            if result.get("province"):
+                break
         
         return result
     
@@ -1028,6 +1150,7 @@ Output ONLY valid JSON, no other text:"""
             state.wants_scholarship = snapshot.get("wants_scholarship", False)
             state.wants_fees = snapshot.get("wants_fees", False)
             state.wants_requirements = snapshot.get("wants_requirements", False)
+            state.wants_deadline = snapshot.get("wants_deadline", False)
             state.wants_list = snapshot.get("wants_list", False)
             state.wants_earliest = snapshot.get("wants_earliest", False)
             state.city = snapshot.get("city")
@@ -1061,6 +1184,10 @@ Output ONLY valid JSON, no other text:"""
                 degree = self.parse_degree_level(latest_user_message)
                 if degree:
                     state.degree_level = degree
+                    # Preserve wants_deadline from snapshot if it was set
+                    if snapshot.get("wants_deadline"):
+                        state.wants_deadline = snapshot.get("wants_deadline")
+                        print(f"DEBUG: Preserved wants_deadline={state.wants_deadline} from snapshot for degree_level reply")
                     self._consume_pending(partner_id, conversation_id)
                 else:
                     return state
@@ -1068,6 +1195,10 @@ Output ONLY valid JSON, no other text:"""
                 term = self.parse_intake_term(latest_user_message)
                 if term:
                     state.intake_term = term
+                    # Preserve wants_deadline from snapshot if it was set
+                    if snapshot.get("wants_deadline"):
+                        state.wants_deadline = snapshot.get("wants_deadline")
+                        print(f"DEBUG: Preserved wants_deadline={state.wants_deadline} from snapshot for intake_term reply")
                     self._consume_pending(partner_id, conversation_id)
                 else:
                     return state
@@ -1090,8 +1221,29 @@ Output ONLY valid JSON, no other text:"""
                     state.intake_term = term
                 
                 if major:
-                    state.major_query = major
-                    self._consume_pending(partner_id, conversation_id)
+                    # Expand acronyms (e.g., "BBA" -> "bachelor of business administration")
+                    expanded_major = self._expand_major_acronym(major)
+                    state.major_query = expanded_major  # Use expanded version
+                    
+                    # Try to resolve the major to validate it exists
+                    # Use degree_level from snapshot if available
+                    major_ids = self.resolve_major_ids(
+                        major_query=expanded_major,
+                        degree_level=state.degree_level,
+                        teaching_language=state.teaching_language,
+                        limit=3,
+                        confidence_threshold=0.70  # Lower threshold for clarification replies
+                    )
+                    
+                    if major_ids:
+                        # Major was successfully resolved - store IDs and clear pending
+                        state._resolved_major_ids = major_ids
+                        print(f"DEBUG: Resolved major '{expanded_major}' (from '{major}') to {len(major_ids)} major IDs: {major_ids}")
+                        self._consume_pending(partner_id, conversation_id)
+                    else:
+                        # Major not found - keep pending and ask again
+                        print(f"DEBUG: Could not resolve major '{expanded_major}' (from '{major}'), keeping pending slot")
+                        return state
                 elif uni:
                     state.university_query = uni
                     self._consume_pending(partner_id, conversation_id)
@@ -1381,6 +1533,24 @@ Output ONLY valid JSON, no other text:"""
                     state.is_clarifying = False
                     state.confidence = 1.0
                     state.major_query = None  # CRITICAL: Ensure degree words never become majors
+                    # Preserve important flags from previous state
+                    if hasattr(prev_state, 'wants_deadline'):
+                        state.wants_deadline = prev_state.wants_deadline
+                        if state.wants_deadline:
+                            print(f"DEBUG: Preserved wants_deadline=True from previous state for degree_level reply")
+                    # Preserve other context fields
+                    if hasattr(prev_state, 'major_query') and prev_state.major_query:
+                        state.major_query = prev_state.major_query
+                    if hasattr(prev_state, 'university_query') and prev_state.university_query:
+                        state.university_query = prev_state.university_query
+                    if hasattr(prev_state, 'intake_term') and prev_state.intake_term:
+                        state.intake_term = prev_state.intake_term
+                    if hasattr(prev_state, 'intake_year') and prev_state.intake_year:
+                        state.intake_year = prev_state.intake_year
+                    if hasattr(prev_state, '_resolved_university_id') and prev_state._resolved_university_id:
+                        state._resolved_university_id = prev_state._resolved_university_id
+                    if hasattr(prev_state, '_resolved_major_ids') and prev_state._resolved_major_ids:
+                        state._resolved_major_ids = prev_state._resolved_major_ids
                     # Clear from cache
                     self._clear_pending_slot(partner_id, conversation_id)
                 else:
@@ -1471,6 +1641,8 @@ Output ONLY valid JSON, no other text:"""
                     # Cache the updated state
                     self._set_cached_state(partner_id, conversation_id, state, None)
                     return state
+                else:
+                    print(f"DEBUG: Could not restore cached state for accepted major - falling through to fresh query")
         
         # FRESH QUERY: Use ALWAYS-LLM extraction
         try:
@@ -1494,12 +1666,290 @@ Output ONLY valid JSON, no other text:"""
             if not state.teaching_language:
                 # Try to parse from latest message (handles "English taught", "english-taught", etc.)
                 state.teaching_language = self.parse_teaching_language(latest_user_message)
+            
+            # Extract city and province (with fuzzy matching fallback from parse_query_rules)
+            state.city = extracted.get("city")
+            state.province = extracted.get("province")
+            # Fallback: if LLM didn't extract city/province, try parse_query_rules (handles typos and "in X" patterns)
+            if not state.city and not state.province:
+                rules = self.parse_query_rules(latest_user_message)
+                if rules.get("city"):
+                    state.city = rules.get("city")
+                    print(f"DEBUG: Extracted city from parse_query_rules: {state.city}")
+                if rules.get("province"):
+                    state.province = rules.get("province")
+                    print(f"DEBUG: Extracted province from parse_query_rules: {state.province}")
+            elif state.city:
+                print(f"DEBUG: Extracted city from LLM: {state.city}")
+            elif state.province:
+                print(f"DEBUG: Extracted province from LLM: {state.province}")
+            
+            # CRITICAL: For deadline queries, force intent to GENERAL (not REQUIREMENTS)
+            # Deadline queries need to find specific programs, not general requirements
+            state.wants_deadline = extracted.get("wants_deadline", False)
+            # Fallback: parse from latest message if LLM didn't extract it
+            if not state.wants_deadline:
+                rules = self.parse_query_rules(latest_user_message)
+                state.wants_deadline = rules.get("wants_deadline", False)
+            if state.wants_deadline:
+                # Force intent to GENERAL for deadline queries (they need specific program info)
+                if state.intent in ["REQUIREMENTS", self.router.INTENT_ADMISSION_REQUIREMENTS]:
+                    print(f"DEBUG: Deadline query detected - changing intent from {state.intent} to GENERAL")
+                    state.intent = "GENERAL"
+                print(f"DEBUG: Deadline query detected - will preserve intake_term and intake_year filters if provided")
             state.duration_years_target = extracted.get("duration_years")
             state.wants_earliest = extracted.get("wants_earliest", False)
             state.wants_scholarship = extracted.get("wants_scholarship", False)
             state.wants_requirements = extracted.get("wants_requirements", False)
             state.wants_fees = extracted.get("wants_fees", False)
+            state.wants_deadline = extracted.get("wants_deadline", False)
+            # Fallback: parse from latest message if LLM didn't extract it
+            if not state.wants_deadline:
+                rules = self.parse_query_rules(latest_user_message)
+                state.wants_deadline = rules.get("wants_deadline", False)
+            
+            # CRITICAL: For slot replies like "September", preserve wants_deadline from previous context
+            # This happens BEFORE context preservation, so we check cached state here too
+            if not state.wants_deadline and partner_id and conversation_id:
+                cached = self._get_cached_state(partner_id, conversation_id)
+                if cached and cached.get("state"):
+                    prev_cached = cached.get("state")
+                    if hasattr(prev_cached, 'wants_deadline') and prev_cached.wants_deadline:
+                        # Check if this is a slot reply (short message like "September")
+                        is_slot_reply = len(latest_user_message.split()) <= 2 and any(
+                            kw in latest_user_message.lower() for kw in ["bachelor", "master", "phd", "language", "march", "september", "english", "chinese"]
+                        )
+                        if is_slot_reply:
+                            state.wants_deadline = prev_cached.wants_deadline
+                            print(f"DEBUG: Preserved wants_deadline={state.wants_deadline} from cached state for slot reply")
+            
+            # CRITICAL: For deadline queries, force intent to GENERAL (not REQUIREMENTS)
+            # Deadline queries need to find specific programs, not general requirements
+            if state.wants_deadline:
+                # Force intent to GENERAL for deadline queries (they need specific program info)
+                if state.intent in ["REQUIREMENTS", self.router.INTENT_ADMISSION_REQUIREMENTS]:
+                    print(f"DEBUG: Deadline query detected - changing intent from {state.intent} to GENERAL")
+                    state.intent = "GENERAL"
+                print(f"DEBUG: Deadline query detected - will preserve intake_term and intake_year filters if provided")
             state.page_action = extracted.get("page_action", "none")
+            
+            # CONTEXT PRESERVATION: Always preserve key fields (major, university, teaching_language, intake, degree_level)
+            # unless user explicitly changes them or changes intent in a way that doesn't make sense
+            # Check if user is changing intent (e.g., "what about fees?", "does it require bank_statement?")
+            is_changing_intent = (
+                state.intent != prev_state.intent if prev_state else False
+            ) or any(kw in latest_user_message.lower() for kw in ["what about", "how about", "does it require", "does it need", "is", "are"])
+            
+            # Check if this is a list query that should preserve context
+            is_list_query = state.intent in [self.router.INTENT_LIST_PROGRAMS, self.router.INTENT_LIST_UNIVERSITIES]
+            
+            # Always try to preserve context from cached state if available (even if prev_state is None)
+            if partner_id and conversation_id:
+                cached = self._get_cached_state(partner_id, conversation_id)
+                if cached and cached.get("state"):
+                    prev_cached_state = cached.get("state")
+                    # Also preserve if this is a slot reply (like "Bachelor" to a clarification question)
+                    is_slot_reply = len(latest_user_message.split()) <= 2 and any(
+                        kw in latest_user_message.lower() for kw in ["bachelor", "master", "phd", "language", "march", "september", "english", "chinese"]
+                    )
+                    
+                    # ALWAYS preserve context - key fields (major, university, teaching_language, intake, degree_level)
+                    # should be preserved until user explicitly changes them
+                    # This ensures context carries across queries until user explicitly changes intent or fields
+                    should_preserve = True  # Always preserve if we have cached state
+                    
+                    if should_preserve:
+                        print(f"DEBUG: Preserving context from previous query - intent change={is_changing_intent}, slot_reply={is_slot_reply}, list_query={is_list_query}, missing fields detected")
+                        # Preserve context fields if not explicitly mentioned in current query
+                        # For slot replies and list queries, always preserve ALL context fields from previous query
+                        if is_slot_reply or is_list_query:
+                            # For slot replies and list queries, preserve ALL context fields from previous query
+                            context_type = "list query" if is_list_query else "slot reply"
+                            if hasattr(prev_cached_state, 'major_query') and prev_cached_state.major_query:
+                                state.major_query = prev_cached_state.major_query
+                                print(f"DEBUG: Preserved major_query ({context_type}): {state.major_query}")
+                            if hasattr(prev_cached_state, 'degree_level') and prev_cached_state.degree_level:
+                                state.degree_level = prev_cached_state.degree_level
+                                print(f"DEBUG: Preserved degree_level ({context_type}): {state.degree_level}")
+                            if hasattr(prev_cached_state, 'intake_term') and prev_cached_state.intake_term:
+                                state.intake_term = prev_cached_state.intake_term
+                                print(f"DEBUG: Preserved intake_term ({context_type}): {state.intake_term}")
+                            if hasattr(prev_cached_state, 'intake_year') and prev_cached_state.intake_year:
+                                state.intake_year = prev_cached_state.intake_year
+                                print(f"DEBUG: Preserved intake_year ({context_type}): {state.intake_year}")
+                            if hasattr(prev_cached_state, 'teaching_language') and prev_cached_state.teaching_language:
+                                state.teaching_language = prev_cached_state.teaching_language
+                                print(f"DEBUG: Preserved teaching_language ({context_type}): {state.teaching_language}")
+                            # Only preserve university_query if user didn't explicitly mention a new one
+                            # Check if the current message contains a university mention
+                            has_university_mention = False
+                            if latest_user_message:
+                                # Check for common university patterns
+                                uni_mention_patterns = [
+                                    r'\b(what|how)\s+about\s+([A-Z][A-Z0-9]+|[A-Z][a-z]+)',
+                                    r'\b([A-Z][A-Z0-9]+|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(university|institute|college)',
+                                    r'^([A-Z][A-Z0-9]+)\s*[?]?$',  # Just "LNPU?" or "HIT?"
+                                ]
+                                for pattern in uni_mention_patterns:
+                                    if re.search(pattern, latest_user_message, re.IGNORECASE):
+                                        has_university_mention = True
+                                        break
+                            
+                            if not has_university_mention and hasattr(prev_cached_state, 'university_query') and prev_cached_state.university_query:
+                                state.university_query = prev_cached_state.university_query
+                                print(f"DEBUG: Preserved university_query ({context_type}): {state.university_query}")
+                            elif has_university_mention:
+                                print(f"DEBUG: Detected university mention in message ({context_type}), not preserving old university_query")
+                            if hasattr(prev_cached_state, 'wants_deadline') and prev_cached_state.wants_deadline:
+                                state.wants_deadline = prev_cached_state.wants_deadline
+                                print(f"DEBUG: Preserved wants_deadline ({context_type}): {state.wants_deadline}")
+                            if hasattr(prev_cached_state, '_resolved_major_ids') and prev_cached_state._resolved_major_ids:
+                                state._resolved_major_ids = prev_cached_state._resolved_major_ids
+                                print(f"DEBUG: Preserved _resolved_major_ids ({context_type}): {state._resolved_major_ids}")
+                            if hasattr(prev_cached_state, '_resolved_university_id') and prev_cached_state._resolved_university_id:
+                                state._resolved_university_id = prev_cached_state._resolved_university_id
+                                print(f"DEBUG: Preserved _resolved_university_id ({context_type}): {state._resolved_university_id}")
+                        else:
+                            # For non-slot replies, only preserve if not explicitly mentioned
+                            if not state.major_query and hasattr(prev_cached_state, 'major_query') and prev_cached_state.major_query:
+                                state.major_query = prev_cached_state.major_query
+                                print(f"DEBUG: Preserved major_query: {state.major_query}")
+                            if not state.degree_level and hasattr(prev_cached_state, 'degree_level') and prev_cached_state.degree_level:
+                                state.degree_level = prev_cached_state.degree_level
+                                print(f"DEBUG: Preserved degree_level: {state.degree_level}")
+                            if not state.intake_term and hasattr(prev_cached_state, 'intake_term') and prev_cached_state.intake_term:
+                                state.intake_term = prev_cached_state.intake_term
+                                print(f"DEBUG: Preserved intake_term: {state.intake_term}")
+                            if not state.intake_year and hasattr(prev_cached_state, 'intake_year') and prev_cached_state.intake_year:
+                                state.intake_year = prev_cached_state.intake_year
+                                print(f"DEBUG: Preserved intake_year: {state.intake_year}")
+                            if not state.teaching_language and hasattr(prev_cached_state, 'teaching_language') and prev_cached_state.teaching_language:
+                                state.teaching_language = prev_cached_state.teaching_language
+                                print(f"DEBUG: Preserved teaching_language: {state.teaching_language}")
+                            # Only preserve university_query if user didn't explicitly mention a new one
+                            # Check if the current message contains a university mention
+                            has_university_mention = False
+                            if latest_user_message:
+                                # Check for common university patterns
+                                uni_mention_patterns = [
+                                    r'\b(what|how)\s+about\s+([A-Z][A-Z0-9]+|[A-Z][a-z]+)',
+                                    r'\b([A-Z][A-Z0-9]+|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(university|institute|college)',
+                                    r'^([A-Z][A-Z0-9]+)\s*[?]?$',  # Just "LNPU?" or "HIT?"
+                                ]
+                                for pattern in uni_mention_patterns:
+                                    if re.search(pattern, latest_user_message, re.IGNORECASE):
+                                        has_university_mention = True
+                                        break
+                            
+                            if not state.university_query and not has_university_mention and hasattr(prev_cached_state, 'university_query') and prev_cached_state.university_query:
+                                state.university_query = prev_cached_state.university_query
+                                print(f"DEBUG: Preserved university_query: {state.university_query}")
+                            elif has_university_mention:
+                                print(f"DEBUG: Detected university mention in message, not preserving old university_query")
+                            # Preserve wants_deadline flag (important for deadline queries)
+                            if hasattr(prev_cached_state, 'wants_deadline') and prev_cached_state.wants_deadline:
+                                state.wants_deadline = prev_cached_state.wants_deadline
+                                print(f"DEBUG: Preserved wants_deadline: {state.wants_deadline}")
+                            # Preserve resolved IDs if available
+                            if hasattr(prev_cached_state, '_resolved_major_ids') and prev_cached_state._resolved_major_ids:
+                                state._resolved_major_ids = prev_cached_state._resolved_major_ids
+                                print(f"DEBUG: Preserved _resolved_major_ids: {state._resolved_major_ids}")
+                            if hasattr(prev_cached_state, '_resolved_university_id') and prev_cached_state._resolved_university_id:
+                                state._resolved_university_id = prev_cached_state._resolved_university_id
+                                print(f"DEBUG: Preserved _resolved_university_id: {state._resolved_university_id}")
+                            # Preserve city and province context (only if not explicitly mentioned in current query)
+                            if not state.city and hasattr(prev_cached_state, 'city') and prev_cached_state.city:
+                                state.city = prev_cached_state.city
+                                print(f"DEBUG: Preserved city: {state.city}")
+                            if not state.province and hasattr(prev_cached_state, 'province') and prev_cached_state.province:
+                                state.province = prev_cached_state.province
+                                print(f"DEBUG: Preserved province: {state.province}")
+                        # Preserve previous university_ids or intake_ids if available (for filtering follow-up queries)
+                        if hasattr(prev_cached_state, '_previous_university_ids') and prev_cached_state._previous_university_ids:
+                            state._previous_university_ids = prev_cached_state._previous_university_ids
+                            print(f"DEBUG: Preserved _previous_university_ids: {state._previous_university_ids}")
+                        if hasattr(prev_cached_state, '_previous_intake_ids') and prev_cached_state._previous_intake_ids:
+                            state._previous_intake_ids = prev_cached_state._previous_intake_ids
+                            print(f"DEBUG: Preserved _previous_intake_ids: {state._previous_intake_ids}")
+            
+            # CRITICAL: Even if cache is empty, try to preserve context from conversation history for list queries
+            # This ensures context is preserved even if cache fails
+            if is_list_query and (not cached or not cached.get("state")):
+                print(f"DEBUG: List query detected but cache is empty - trying to extract context from conversation history")
+                # Try to extract context from previous messages in conversation history
+                if conversation_history and len(conversation_history) > 2:
+                    # Look for previous user messages that might contain context
+                    prev_messages = [msg for msg in conversation_history[-6:] if msg.get('role') == 'user']
+                    for prev_msg in reversed(prev_messages):
+                        prev_text = prev_msg.get('content', '').lower()
+                        # Try to extract key fields from previous messages
+                        if not state.university_query:
+                            # Look for university mentions (HIT, HUST, etc.)
+                            if 'hit' in prev_text or 'harbin' in prev_text:
+                                state.university_query = "Harbin Institute of Technology"
+                            elif 'hust' in prev_text or 'huazhong' in prev_text:
+                                state.university_query = "Huazhong University of Science and Technology"
+                            elif 'lnpu' in prev_text:
+                                state.university_query = "Liaoning Normal University"
+                        if not state.degree_level:
+                            if 'bachelor' in prev_text or 'bba' in prev_text or 'bsc' in prev_text:
+                                state.degree_level = "Bachelor"
+                            elif 'master' in prev_text or 'mba' in prev_text or 'msc' in prev_text:
+                                state.degree_level = "Master"
+                            elif 'phd' in prev_text or 'doctorate' in prev_text:
+                                state.degree_level = "PhD"
+                        if not state.intake_term:
+                            if 'september' in prev_text or 'sept' in prev_text:
+                                state.intake_term = "September"
+                            elif 'march' in prev_text:
+                                state.intake_term = "March"
+                        if not state.major_query:
+                            # Look for major mentions
+                            if 'bba' in prev_text or 'business' in prev_text:
+                                state.major_query = "business administration"
+                            elif 'cse' in prev_text or 'computer' in prev_text:
+                                state.major_query = "computer science"
+                        # If we found any context, break
+                        if state.university_query or state.degree_level or state.intake_term or state.major_query:
+                            print(f"DEBUG: Extracted context from conversation history: university={state.university_query}, degree={state.degree_level}, intake={state.intake_term}, major={state.major_query}")
+                            break
+            
+            # Detect specific requirement questions (e.g., "bank_statement", "age", "hsk", "english test")
+            req_keywords = {
+                "bank": ["bank", "bank statement", "bank_statement", "financial", "funds"],
+                "age": ["age", "minimum age", "age requirement"],
+                "hsk": ["hsk", "chinese test", "chinese language test"],
+                "english": ["english test", "ielts", "toefl", "english requirement"],
+                "documents": ["document", "documents", "required documents", "application documents"],
+                "accommodation": ["accommodation", "housing", "dormitory", "dorm"]
+            }
+            latest_lower = latest_user_message.lower()
+            for req_type, keywords in req_keywords.items():
+                if any(kw in latest_lower for kw in keywords):
+                    state.wants_requirements = True
+                    # Update req_focus if not already set
+                    if not hasattr(state, 'req_focus') or not state.req_focus:
+                        from app.services.slot_schema import RequirementFocus
+                        state.req_focus = RequirementFocus()
+                    # Set specific focus based on keyword
+                    if req_type == "bank":
+                        state.req_focus.bank = True
+                    elif req_type == "age":
+                        state.req_focus.age = True
+                    elif req_type == "hsk":
+                        state.req_focus.exams = True
+                    elif req_type == "english":
+                        state.req_focus.exams = True
+                    elif req_type == "documents":
+                        state.req_focus.docs = True
+                    elif req_type == "accommodation":
+                        state.req_focus.accommodation = True
+                    print(f"DEBUG: Detected requirement question: {req_type}, set wants_requirements=True")
+                    # For FEES intent: Keep FEES intent but allow showing specific requirement fields (bank_statement, age, etc.)
+                    # Don't change to REQUIREMENTS intent - FEES should focus on fees, not full document lists
+                    if state.intent == self.router.INTENT_FEES:
+                        # Keep FEES intent - bank statement, age, accommodation are fee-related info
+                        print(f"DEBUG: FEES intent - will show fee-related requirements (bank_statement, age, accommodation) but not full document lists")
             
             # INTENT LOCKING: If previous intent was SCHOLARSHIP/FEES/REQUIREMENTS and message is short, keep intent
             if prev_state and prev_state.intent in [self.router.INTENT_SCHOLARSHIP, self.router.INTENT_FEES, self.router.INTENT_ADMISSION_REQUIREMENTS]:
@@ -1517,21 +1967,61 @@ Output ONLY valid JSON, no other text:"""
                     state.wants_requirements = prev_state.wants_requirements
                     print(f"DEBUG: Intent locked to {state.intent} (short message/slot reply)")
             
+            # CRITICAL: Check for explicit university changes in short messages like "What about LNPU?"
+            # This must happen BEFORE context preservation to ensure new university is used
+            # Always check for university patterns in short messages (likely university switches)
+            is_short_message = len(latest_user_message.split()) <= 5
+            has_university_pattern = False
+            if is_short_message:
+                # Check for patterns like "what about X", "how about X", "X university", etc.
+                uni_patterns = [
+                    r'\b(what|how)\s+about\s+([A-Z][A-Z0-9]+|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b',
+                    r'\b([A-Z][A-Z0-9]+|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(university|institute|college)\b',
+                    r'^([A-Z][A-Z0-9]+|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*[?]?$',  # Just "LNPU?" or "HIT?"
+                ]
+                for pattern in uni_patterns:
+                    match = re.search(pattern, latest_user_message, re.IGNORECASE)
+                    if match:
+                        potential_uni = match.group(2) if match.lastindex >= 2 else match.group(1)
+                        # Try to resolve it
+                        matched, uni_dict, _ = self._fuzzy_match_university(potential_uni)
+                        if matched and uni_dict:
+                            state.university_query = uni_dict.get("name")
+                            state._resolved_university_id = uni_dict.get("id")
+                            has_university_pattern = True
+                            print(f"DEBUG: Detected explicit university change to '{state.university_query}' from message: '{latest_user_message}'")
+                            break
+            
             # DETERMINISTIC RESOLUTION: Resolve university_raw and major_raw to IDs
-            if state.university_query:
+            # Only resolve if we didn't already resolve it from pattern matching above
+            if state.university_query and not has_university_pattern:
                 matched, uni_dict, _ = self._fuzzy_match_university(state.university_query)
                 if matched and uni_dict:
                     # Store resolved university_id (will be used in build_sql_params)
                     state.university_query = uni_dict.get("name")  # Keep name for reference
                     state._resolved_university_id = uni_dict.get("id")  # Store ID for SQL
+                    print(f"DEBUG: Resolved university_query '{state.university_query}' to university_id: {state._resolved_university_id}")
+                else:
+                    print(f"DEBUG: Could not resolve university_query '{state.university_query}' to a university_id")
+            
+            # Special handling: if degree_level is "Language" and major_query is None or generic,
+            # treat "language program" as the major_query
+            if state.degree_level == "Language" and (not state.major_query or state.major_query.lower() in ["language", "language program", "language course"]):
+                # Set major_query to "language program" for proper matching
+                if not state.major_query:
+                    state.major_query = "language program"
+                    print(f"DEBUG: Set major_query='language program' for Language degree_level")
             
             if state.major_query:
-                # Resolve major_query to major_ids (max 3, confidence >= 0.78)
+                # Resolve major_query to major_ids
+                # For language programs, use much higher limit (100) to get all language programs
+                # Don't limit language programs - we need all of them to check durations and show options
+                limit = 100 if state.degree_level == "Language" else 6
                 major_ids = self.resolve_major_ids(
                     major_query=state.major_query,
                     degree_level=state.degree_level,
                     teaching_language=state.teaching_language,
-                    limit=3,
+                    limit=limit,
                     confidence_threshold=0.78
                 )
                 if major_ids:
@@ -1597,16 +2087,34 @@ Output ONLY valid JSON, no other text:"""
         # CRITICAL: Apply semantic stoplist BEFORE determine_missing_fields
         # This prevents "scholarship", "info", "fees" from being treated as major_query
         if state and state.major_query:
+            # Normalize dots in acronyms (e.g., "B.B.A." -> "BBA")
+            original_major = state.major_query
+            normalized_major = state.major_query.replace('.', '').strip().upper()
+            if normalized_major != original_major.replace('.', '').strip().upper():
+                state.major_query = normalized_major
+                print(f"DEBUG: Normalized major_query from '{original_major}' to '{normalized_major}'")
+            
+            # Check if it's a known major acronym BEFORE checking for degree words
+            # Known major acronyms: BBA, MBA, LLB, CSE, CS, CE, ECE, EEE, etc.
+            expanded_major = self._expand_major_acronym(state.major_query)
+            is_known_acronym = expanded_major.lower() != state.major_query.lower()
+            
             if self._is_semantic_stopword(state.major_query):
                 print(f"DEBUG: Clearing major_query '{state.major_query}' - semantic stopword")
                 state.major_query = None
-            # Also check if it's a degree word
-            matched_degree = self.router._fuzzy_match_degree_level(state.major_query)
-            if matched_degree:
-                print(f"DEBUG: Clearing major_query '{state.major_query}' - it's a degree word ({matched_degree})")
-                if not state.degree_level:
-                    state.degree_level = matched_degree
-                state.major_query = None
+            # Check if it's a degree word, BUT skip this check if it's a known major acronym
+            elif not is_known_acronym:
+                # Only check for degree words if it's NOT a known acronym
+                matched_degree = self.router._fuzzy_match_degree_level(state.major_query)
+                if matched_degree:
+                    print(f"DEBUG: Clearing major_query '{state.major_query}' - it's a degree word ({matched_degree})")
+                    if not state.degree_level:
+                        state.degree_level = matched_degree
+                    state.major_query = None
+            else:
+                # It's a known acronym - use the expanded version for better matching
+                print(f"DEBUG: Major query '{state.major_query}' is a known acronym, expanded to '{expanded_major}'")
+                state.major_query = expanded_major
         
         # Check if clarification is needed using determine_missing_fields
         try:
@@ -1621,6 +2129,98 @@ Output ONLY valid JSON, no other text:"""
             needs_clar = False
             clarifying_question = None
         
+        # CRITICAL: For language/foundation programs, check for multiple durations and ask for clarification
+        # BUT: For LIST_UNIVERSITIES with city filter, first check how many universities match
+        # Only ask for duration if we have >= 3 universities (otherwise it's not necessary)
+        if state and state.degree_level == "Language" and not state.duration_years_target and not needs_clar:
+            # For LIST_UNIVERSITIES with city/province filter, first check university count
+            should_check_duration = True
+            if state.intent in [self.router.INTENT_LIST_UNIVERSITIES, self.router.INTENT_LIST_PROGRAMS] and (state.city or state.province):
+                # Filter universities by location first
+                location_universities = self.db_service.search_universities(
+                    city=state.city,
+                    province=state.province,
+                    is_partner=True,
+                    limit=100
+                )
+                location_uni_ids = [uni.id for uni in location_universities] if location_universities else []
+                print(f"DEBUG: City/province filter - found {len(location_uni_ids)} universities in {state.city or state.province}")
+                
+                # If < 3 universities, skip duration clarification (not necessary)
+                if len(location_uni_ids) < 3:
+                    print(f"DEBUG: Only {len(location_uni_ids)} universities found - skipping duration clarification")
+                    should_check_duration = False
+                else:
+                    # Filter majors to only those from universities in this location
+                    print(f"DEBUG: {len(location_uni_ids)} universities found - will check durations for majors in these universities")
+            
+            if should_check_duration:
+                # Check if we have resolved major_ids or need to resolve them
+                major_ids_to_check = []
+                if hasattr(state, '_resolved_major_ids') and state._resolved_major_ids:
+                    major_ids_to_check = state._resolved_major_ids
+                elif state.major_query:
+                    # Resolve major_ids to check durations
+                    major_ids_to_check = self.resolve_major_ids(
+                        major_query=state.major_query,
+                        degree_level=state.degree_level,
+                        teaching_language=state.teaching_language,
+                        limit=200,  # Get all language programs
+                        confidence_threshold=0.70
+                    )
+                
+                # If we have location filter, further filter majors to only those from location universities
+                if major_ids_to_check and state.intent in [self.router.INTENT_LIST_UNIVERSITIES, self.router.INTENT_LIST_PROGRAMS] and (state.city or state.province):
+                    # Get majors that belong to universities in the location
+                    location_major_ids = []
+                    for mid in major_ids_to_check:
+                        major = self.db.query(Major).filter(Major.id == mid).first()
+                        if major and major.university_id in location_uni_ids:
+                            location_major_ids.append(mid)
+                    major_ids_to_check = location_major_ids
+                    print(f"DEBUG: Filtered majors to {len(major_ids_to_check)} majors from universities in {state.city or state.province}")
+                
+                if major_ids_to_check:
+                    # Get all majors and check for distinct durations
+                    distinct_durations = set()
+                    duration_majors = {}  # Map duration -> list of major names
+                    for mid in major_ids_to_check:
+                        major = self.db.query(Major).filter(Major.id == mid).first()
+                        if major and major.duration_years is not None:
+                            duration = major.duration_years
+                            distinct_durations.add(duration)
+                            if duration not in duration_majors:
+                                duration_majors[duration] = []
+                            duration_majors[duration].append(major.name)
+                    
+                    # If multiple distinct durations exist, ask for clarification
+                    if len(distinct_durations) > 1:
+                        print(f"DEBUG: Language program has multiple durations: {sorted(distinct_durations)}")
+                        # Format duration options (convert years to readable format)
+                        duration_options = []
+                        for dur in sorted(distinct_durations):
+                            if dur < 0.5:
+                                duration_options.append(f"{int(dur * 12)} months")
+                            elif dur < 1.0:
+                                duration_options.append(f"{int(dur * 12)} months (half year)")
+                            elif dur == 1.0:
+                                duration_options.append("1 year")
+                            else:
+                                duration_options.append(f"{dur} years")
+                        
+                        state.pending_slot = "duration"
+                        state.is_clarifying = True
+                        clarifying_question = f"I found language programs with different durations. Which duration do you prefer: {', '.join(duration_options)}?"
+                        print(f"DEBUG: Asking for duration clarification: {clarifying_question}")
+                        return {
+                            "intent": state.intent,
+                            "state": state,
+                            "needs_clarification": True,
+                            "clarifying_question": clarifying_question,
+                            "sql_plan": None,
+                            "req_focus": {}
+                        }
+        
         # Check if major resolution is ambiguous (low confidence or too many candidates)
         if state.major_query and not hasattr(state, '_resolved_major_ids') and not needs_clar:
             # Try to resolve with lower threshold to see all candidates
@@ -1632,19 +2232,35 @@ Output ONLY valid JSON, no other text:"""
                 confidence_threshold=0.6  # Lower threshold to see all candidates
             )
             if len(major_ids) > 3:
-                # Too many candidates - ask user to pick
+                # Too many candidates - check if they're all the same major name
                 candidates = []
                 for mid in major_ids[:6]:
                     major_name = self._get_major_name_by_id(mid)
                     candidates.append(major_name)
                 
+                # Check if all candidates have the same name (case-insensitive)
                 if candidates:
-                    needs_clar = True
-                    missing_slots = ["major_choice"]
-                    clarifying_question = f"Which major did you mean? " + " ".join([f"{i+1}) {c}" for i, c in enumerate(candidates)])
-                    # Store candidates in state for later retrieval
-                    state._major_candidates = candidates
-                    state._major_candidate_ids = major_ids[:6]
+                    unique_names = set(name.lower().strip() for name in candidates)
+                    if len(unique_names) == 1:
+                        # All candidates are the same major - use them without asking
+                        print(f"DEBUG: All {len(major_ids)} candidates have the same name '{candidates[0]}', using them without clarification")
+                        state._resolved_major_ids = major_ids
+                    else:
+                        # Different major names - ask user to pick
+                        needs_clar = True
+                        missing_slots = ["major_choice"]
+                        # Remove duplicates while preserving order
+                        seen = set()
+                        unique_candidates = []
+                        for c in candidates:
+                            c_lower = c.lower().strip()
+                            if c_lower not in seen:
+                                seen.add(c_lower)
+                                unique_candidates.append(c)
+                        clarifying_question = f"Which major did you mean? " + " ".join([f"{i+1}) {c}" for i, c in enumerate(unique_candidates)])
+                        # Store candidates in state for later retrieval
+                        state._major_candidates = unique_candidates
+                        state._major_candidate_ids = major_ids[:6]
         
         # Set pending state if clarification needed
         if needs_clar and clarifying_question and missing_slots:
@@ -1662,6 +2278,12 @@ Output ONLY valid JSON, no other text:"""
             
             # Cache the current state
             self._set_cached_state(partner_id, conversation_id, state, None)
+        
+        # Always cache the state (for context preservation in next query)
+        # This ensures that even when clarification is not needed, the state is available for the next turn
+        if not needs_clar:
+            self._set_cached_state(partner_id, conversation_id, state, None)
+            print(f"DEBUG: Cached state for next query (no clarification needed)")
         
         # Build SQL plan (only if no clarification needed)
         sql_plan = None
@@ -1783,6 +2405,39 @@ Output ONLY valid JSON, no other text:"""
                 missing_slots.append("target")
                 return missing_slots, f"Please provide: {', '.join(missing_fields)}"
         
+        # For GENERAL intent with deadline questions: allow queries with university + major + intake_term, but require degree_level
+        elif intent == "GENERAL" or intent == self.router.INTENT_GENERAL:
+            # For deadline questions, we can work with less information, but still need degree_level when we have university + major + intake
+            if hasattr(state, 'wants_deadline') and state.wants_deadline:
+                # For deadline queries: need at least university OR (major + intake_term)
+                has_minimum = (
+                    state.university_query or
+                    (state.major_query and (state.intake_term or state.wants_earliest))
+                )
+                if not has_minimum:
+                    # Only ask for the most critical missing field
+                    if not state.university_query and not state.major_query:
+                        missing_slots.append("university_or_major")
+                        question_parts.append("university name or major/subject")
+                    elif state.major_query and not state.intake_term and not state.wants_earliest:
+                        missing_slots.append("intake_term")
+                        question_parts.append("intake term (March/September)")
+                # If we have university + major + intake_term, we should ask for degree_level to narrow down results
+                elif state.university_query and state.major_query and (state.intake_term or state.wants_earliest):
+                    if not state.degree_level:
+                        missing_slots.append("degree_level")
+                        missing_slots.append("degree_level")
+                        question_parts.append("degree level (Language/Bachelor/Master/PhD)")
+                    else:
+                        # For general queries, need at least one filter
+                        has_filter = (
+                            state.university_query or state.major_query or state.degree_level or
+                            state.intake_term or state.wants_earliest or state.city or state.province
+                        )
+                        if not has_filter:
+                            missing_slots.append("filter")
+                            question_parts.append("major/subject, university name, or intake term (March/September)")
+        
         if missing_slots:
             question = f"Which {question_parts[0]}?" if question_parts else None
             return missing_slots, question
@@ -1800,21 +2455,50 @@ Output ONLY valid JSON, no other text:"""
         }
         
         # University filter
-        if state.university_query:
+        # First check if university_id was already resolved in extract_partner_query_state
+        if hasattr(state, '_resolved_university_id') and state._resolved_university_id:
+            sql_params["university_id"] = state._resolved_university_id
+            print(f"DEBUG: build_sql_params - using pre-resolved university_id: {state._resolved_university_id}")
+        elif state.university_query:
             # Try to find university ID via fuzzy match
             matched, uni_dict, _ = self._fuzzy_match_university(state.university_query)
             if matched and uni_dict:
                 sql_params["university_id"] = uni_dict.get("id")
+                print(f"DEBUG: build_sql_params - resolved university_id: {uni_dict.get('id')} for query: {state.university_query}")
+            else:
+                print(f"DEBUG: build_sql_params - could not resolve university_id for query: {state.university_query}")
         
-        # Location filters
+        # Location filters (city/province)
         if state.city or state.province:
-            uni_ids = self._find_university_ids_by_location(state.city, state.province)
-            if uni_ids:
-                sql_params["university_ids"] = uni_ids  # Note: may need to adjust DBQueryService to accept list
+            # Use DBQueryService to find universities by location
+            location_universities = self.db_service.search_universities(
+                city=state.city,
+                province=state.province,
+                is_partner=True,
+                limit=100  # Get all partner universities in this location
+            )
+            if location_universities:
+                location_uni_ids = [uni.id for uni in location_universities]
+                # If we already have university_id, intersect with location filter
+                if sql_params.get("university_id"):
+                    if sql_params["university_id"] in location_uni_ids:
+                        # University matches location, keep it
+                        pass
+                    else:
+                        # University doesn't match location, clear it
+                        del sql_params["university_id"]
+                        print(f"DEBUG: build_sql_params - university doesn't match location filter, clearing university_id")
+                else:
+                    # No specific university, use location filter
+                    sql_params["university_ids"] = location_uni_ids
+                    print(f"DEBUG: build_sql_params - filtering by location: city={state.city}, province={state.province}, found {len(location_uni_ids)} universities")
+            else:
+                print(f"DEBUG: build_sql_params - no universities found for location: city={state.city}, province={state.province}")
         
         # Major filter (use resolved IDs if available, else resolve now)
         if hasattr(state, '_resolved_major_ids') and state._resolved_major_ids:
             sql_params["major_ids"] = state._resolved_major_ids
+            print(f"DEBUG: build_sql_params - using resolved major_ids: {state._resolved_major_ids}")
         elif state.major_query:
             major_ids = self.resolve_major_ids(
                 major_query=state.major_query,
@@ -1824,10 +2508,18 @@ Output ONLY valid JSON, no other text:"""
             )
             if major_ids:
                 sql_params["major_ids"] = major_ids
+                print(f"DEBUG: build_sql_params - resolved major_ids: {major_ids}")
             else:
                 # Fallback: use expanded query for DB ILIKE search
                 expanded_major = self._expand_major_acronym(state.major_query)
                 sql_params["major_text"] = expanded_major
+                print(f"DEBUG: build_sql_params - no major_ids found, using major_text: {expanded_major}")
+        
+        # Special fallback for language programs: if no major_ids and degree_level is Language,
+        # don't filter by major at all - just use degree_level
+        if state.degree_level == "Language" and not sql_params.get("major_ids") and not sql_params.get("major_text"):
+            print(f"DEBUG: build_sql_params - Language program with no major filter, querying all Language programs")
+            # Don't add major filter - query will use degree_level only
         
         # Scholarship filter
         if state.wants_scholarship:
@@ -1844,22 +2536,37 @@ Output ONLY valid JSON, no other text:"""
         if state.teaching_language:
             sql_params["teaching_language"] = state.teaching_language
         
-        # Intake term
+        # Intake term - relax for deadline queries (similar to REQUIREMENTS intent)
+        # For deadline queries, don't filter by intake_term to get more results
         if state.intake_term:
-            from app.models import IntakeTerm
-            try:
-                sql_params["intake_term"] = IntakeTerm[state.intake_term.upper()]
-            except KeyError:
-                pass
+            # Check if this is a deadline query - if so, don't add intake_term filter
+            is_deadline_query = hasattr(state, 'wants_deadline') and state.wants_deadline
+            if not is_deadline_query:
+                from app.models import IntakeTerm
+                try:
+                    sql_params["intake_term"] = IntakeTerm[state.intake_term.upper()]
+                except KeyError:
+                    pass
+            else:
+                print(f"DEBUG: build_sql_params - deadline query detected, skipping intake_term filter")
         
-        # Intake year
+        # Intake year - relax for deadline queries
         if state.intake_year:
-            sql_params["intake_year"] = state.intake_year
+            is_deadline_query = hasattr(state, 'wants_deadline') and state.wants_deadline
+            if not is_deadline_query:
+                sql_params["intake_year"] = state.intake_year
+            else:
+                print(f"DEBUG: build_sql_params - deadline query detected, skipping intake_year filter")
         
         # Duration
         if state.duration_years_target is not None:
             sql_params["duration_years_target"] = state.duration_years_target
-            sql_params["duration_constraint"] = state.duration_constraint or "exact"
+            # For language programs, use "approx" constraint to be more lenient
+            # For other programs, use "exact" if not specified
+            if state.degree_level == "Language":
+                sql_params["duration_constraint"] = state.duration_constraint or "approx"
+            else:
+                sql_params["duration_constraint"] = state.duration_constraint or "exact"
         
         # Budget
         if state.budget_max:
@@ -1886,7 +2593,9 @@ Output ONLY valid JSON, no other text:"""
         print(f"DEBUG: run_db() - intent={intent}, sql_params keys={list(sql_params.keys())}")
         
         # For REQUIREMENTS intent: if user only mentioned university (not major), clear major filters
-        if intent == self.router.INTENT_ADMISSION_REQUIREMENTS and latest_user_message:
+        # BUT: Preserve major if it was set from previous context (e.g., user replied "Bachelor" to clarification)
+        # Check for both "REQUIREMENTS" and "ADMISSION_REQUIREMENTS" since LLM might extract either
+        if (intent == self.router.INTENT_ADMISSION_REQUIREMENTS or intent == "REQUIREMENTS") and latest_user_message:
             message_lower = latest_user_message.lower()
             # Check if current message explicitly mentions a major/subject
             major_keywords = ["major", "subject", "program", "course", "degree in", "study", "computer science", "physics", "engineering"]
@@ -1898,8 +2607,18 @@ Output ONLY valid JSON, no other text:"""
                 if major_lower in message_lower:
                     mentions_major = True
             
-            if not mentions_major and state and state.university_query:
-                # User only mentioned university, clear major filters to show all programs
+            # Check if this is a slot reply (short message like "Bachelor", "Master", "English")
+            # In this case, preserve major from previous context
+            is_slot_reply = len(latest_user_message.split()) <= 2 and any(
+                kw in message_lower for kw in ["bachelor", "master", "phd", "language", "march", "september", "english", "chinese"]
+            )
+            
+            # Also check if major_ids were resolved from previous context (indicates major was set before)
+            has_resolved_major_ids = state and hasattr(state, '_resolved_major_ids') and state._resolved_major_ids
+            
+            if not mentions_major and state and state.university_query and not is_slot_reply and not has_resolved_major_ids:
+                # User only mentioned university in current message AND it's not a slot reply AND no major was resolved from context
+                # Clear major filters to show all programs
                 print(f"DEBUG: REQUIREMENTS query - user only mentioned university '{state.university_query}', clearing major filters")
                 sql_params.pop("major_ids", None)
                 sql_params.pop("major_text", None)
@@ -1907,6 +2626,9 @@ Output ONLY valid JSON, no other text:"""
                     state.major_query = None
                     if hasattr(state, '_resolved_major_ids'):
                         state._resolved_major_ids = None
+            elif is_slot_reply or has_resolved_major_ids:
+                # This is a slot reply or major was resolved from context - preserve it
+                print(f"DEBUG: REQUIREMENTS query - preserving major from context (slot_reply={is_slot_reply}, has_resolved_major_ids={has_resolved_major_ids})")
         
         if intent == self.router.INTENT_LIST_UNIVERSITIES:
             # Use list_universities_by_filters
@@ -1926,8 +2648,9 @@ Output ONLY valid JSON, no other text:"""
         
         elif intent in [self.router.INTENT_LIST_PROGRAMS, self.router.INTENT_FEES, 
                         self.router.INTENT_ADMISSION_REQUIREMENTS, self.router.INTENT_SCHOLARSHIP,
-                        self.router.INTENT_COMPARISON, self.router.INTENT_PROGRAM_DETAILS, "general"]:
+                        self.router.INTENT_COMPARISON, self.router.INTENT_PROGRAM_DETAILS, "general", "GENERAL", "REQUIREMENTS"]:
             # Use efficient find_program_intakes method
+            print(f"DEBUG: Entering find_program_intakes branch - intent={intent}")
             filters = {}
             if sql_params.get("university_id"):
                 filters["university_id"] = sql_params["university_id"]
@@ -1936,20 +2659,58 @@ Output ONLY valid JSON, no other text:"""
             
             # For REQUIREMENTS intent: relax filters to show all programs at university
             # Only include major/teaching_language/intake filters if user explicitly mentioned them
-            if intent == self.router.INTENT_ADMISSION_REQUIREMENTS:
+            print(f"DEBUG: Checking intent - intent={intent}, INTENT_ADMISSION_REQUIREMENTS={self.router.INTENT_ADMISSION_REQUIREMENTS}, match={intent == self.router.INTENT_ADMISSION_REQUIREMENTS}")
+            # Check for both "REQUIREMENTS" and "ADMISSION_REQUIREMENTS" since LLM might extract either
+            if intent == self.router.INTENT_ADMISSION_REQUIREMENTS or intent == "REQUIREMENTS":
+                print(f"DEBUG: REQUIREMENTS intent detected - relaxing filters")
+                print(f"DEBUG: sql_params has intake_term: {sql_params.get('intake_term')}, intake_year: {sql_params.get('intake_year')}")
+                
+                # If user is asking about fees/requirements for previously shown programs, filter to only those universities
+                # This preserves context when user changes intent (e.g., from SCHOLARSHIP to FEES/REQUIREMENTS)
+                if state and hasattr(state, '_previous_university_ids') and state._previous_university_ids:
+                    filters["university_ids"] = state._previous_university_ids
+                    print(f"DEBUG: REQUIREMENTS - filtering to previous universities: {state._previous_university_ids}")
+                elif state and hasattr(state, '_previous_intake_ids') and state._previous_intake_ids:
+                    # If we have previous intake IDs, filter by them
+                    # Extract university_ids from intake_ids
+                    from app.models import ProgramIntake
+                    prev_intakes = self.db.query(ProgramIntake).filter(ProgramIntake.id.in_(state._previous_intake_ids)).all()
+                    if prev_intakes:
+                        prev_uni_ids = list(set([i.university_id for i in prev_intakes if i.university_id]))
+                        if prev_uni_ids:
+                            filters["university_ids"] = prev_uni_ids
+                            print(f"DEBUG: REQUIREMENTS - filtering to previous universities from intake_ids: {prev_uni_ids}")
+                
                 # For requirements queries, only filter by major if explicitly mentioned
                 # If user only mentions university, show requirements for all programs
                 if sql_params.get("major_ids"):
                     # Check if major was likely mentioned in current query (not just from prev_state)
                     # For now, include it but we'll relax other filters
                     filters["major_ids"] = sql_params["major_ids"]
+                    print(f"DEBUG: REQUIREMENTS - added major_ids to filters: {len(filters['major_ids'])} majors")
                 elif sql_params.get("major_text"):
                     filters["major_text"] = sql_params["major_text"]
+                    print(f"DEBUG: REQUIREMENTS - added major_text to filters: {filters['major_text']}")
                 
-                # Don't filter by teaching_language for requirements queries (show all languages)
-                # Don't filter by intake_term/intake_year (show all intakes)
-                # This allows showing requirements for all programs at the university
-                print(f"DEBUG: REQUIREMENTS query - relaxing filters (not filtering by teaching_language/intake_term)")
+                # For deadline queries, we NEED intake_term to find the specific deadline
+                # Don't relax intake_term/intake_year for deadline queries
+                is_deadline_query = state and hasattr(state, 'wants_deadline') and state.wants_deadline
+                if is_deadline_query:
+                    # For deadline queries, include intake_term and intake_year if available
+                    if sql_params.get("intake_term"):
+                        filters["intake_term"] = sql_params["intake_term"]
+                        print(f"DEBUG: Deadline query - adding intake_term to filters: {filters['intake_term']}")
+                    if sql_params.get("intake_year"):
+                        filters["intake_year"] = sql_params["intake_year"]
+                        print(f"DEBUG: Deadline query - adding intake_year to filters: {filters['intake_year']}")
+                else:
+                    # For non-deadline REQUIREMENTS queries, don't filter by intake_term/intake_year (show all intakes)
+                    # Don't filter by teaching_language for requirements queries (show all languages)
+                    # Duration filter IS applied if specified (uses ProgramIntake.duration_years or Major.duration_years)
+                    # This allows showing requirements for all programs at the university
+                    # NOTE: intake_term and intake_year are NOT added to filters for REQUIREMENTS intent
+                    print(f"DEBUG: REQUIREMENTS query - NOT adding intake_term/intake_year to filters (relaxing filters)")
+                    print(f"DEBUG: REQUIREMENTS query - duration filter WILL be applied if specified")
             else:
                 # For other intents, include all filters as normal
                 if sql_params.get("major_ids"):
@@ -1966,9 +2727,12 @@ Output ONLY valid JSON, no other text:"""
             if sql_params.get("degree_level"):
                 filters["degree_level"] = sql_params["degree_level"]
             
+            # Include duration filter if specified (for all intents including REQUIREMENTS)
+            # The duration filter should work correctly using ProgramIntake.duration_years or Major.duration_years
             if sql_params.get("duration_years_target") is not None:
                 filters["duration_years_target"] = sql_params["duration_years_target"]
                 filters["duration_constraint"] = sql_params.get("duration_constraint", "approx")
+                print(f"DEBUG: Adding duration filter: target={sql_params['duration_years_target']}, constraint={sql_params.get('duration_constraint', 'approx')}")
             if sql_params.get("budget_max"):
                 filters["budget_max"] = sql_params["budget_max"]
             if sql_params.get("city"):
@@ -1997,7 +2761,16 @@ Output ONLY valid JSON, no other text:"""
             offset = sql_params.get("offset", 0)
             order_by = "deadline" if state and state.wants_earliest else "deadline"
             
-            print(f"DEBUG: run_db() - Calling find_program_intakes with filters={filters}, limit={limit}")
+            # Keep upcoming_only=True for REQUIREMENTS (don't change deadline filtering)
+            
+            print(f"DEBUG: run_db() - Calling find_program_intakes")
+            print(f"DEBUG: run_db() - intent={intent}")
+            print(f"DEBUG: run_db() - filters keys: {list(filters.keys())}")
+            print(f"DEBUG: run_db() - has_duration={filters.get('duration_years_target') is not None}, duration_value={filters.get('duration_years_target')}")
+            print(f"DEBUG: run_db() - has_intake_term={filters.get('intake_term') is not None}, intake_term_value={filters.get('intake_term')}")
+            print(f"DEBUG: run_db() - has_intake_year={filters.get('intake_year') is not None}, intake_year_value={filters.get('intake_year')}")
+            print(f"DEBUG: run_db() - major_ids count: {len(filters.get('major_ids', []))}")
+            print(f"DEBUG: run_db() - degree_level: {filters.get('degree_level')}")
             try:
                 intakes, total_count = self.db_service.find_program_intakes(
                     filters=filters,
@@ -2005,13 +2778,104 @@ Output ONLY valid JSON, no other text:"""
                     offset=offset,
                     order_by=order_by
                 )
-                print(f"DEBUG: run_db() - find_program_intakes returned {len(intakes)} intakes")
+                print(f"DEBUG: run_db() - find_program_intakes returned {len(intakes)} intakes (type={type(intakes).__name__})")
+                
+                # Debug: Show what filters were actually applied
+                if len(intakes) == 0:
+                    print(f"DEBUG: 0 results - checking why...")
+                    print(f"DEBUG: Filters applied: {list(filters.keys())}")
+                    print(f"DEBUG: major_ids count: {len(filters.get('major_ids', []))}")
+                    print(f"DEBUG: duration_years_target: {filters.get('duration_years_target')}")
+                    print(f"DEBUG: duration_constraint: {filters.get('duration_constraint')}")
+                    print(f"DEBUG: intake_term in filters: {filters.get('intake_term')}")
+                    print(f"DEBUG: intake_year in filters: {filters.get('intake_year')}")
+                    print(f"DEBUG: degree_level: {filters.get('degree_level')}")
                 
                 # ========== 0 RESULTS FALLBACK LOGIC ==========
                 if len(intakes) == 0:
                     print(f"DEBUG: 0 results found, applying fallback logic...")
+                    print(f"DEBUG: Fallback - state={state is not None}, state.degree_level={state.degree_level if state else None}, filters.duration_years_target={filters.get('duration_years_target')}, filters.keys()={list(filters.keys())}")
+                    
+                    # CRITICAL: For deadline queries, if intake_term is missing, ask for it instead of suggesting unrelated majors
+                    is_deadline_query = False
+                    if state:
+                        is_deadline_query = hasattr(state, 'wants_deadline') and state.wants_deadline
+                        print(f"DEBUG: Fallback check - state exists, hasattr wants_deadline={hasattr(state, 'wants_deadline')}, wants_deadline={getattr(state, 'wants_deadline', None)}")
+                    print(f"DEBUG: Fallback check - is_deadline_query={is_deadline_query}, filters.get('intake_term')={filters.get('intake_term')}, state.intake_term={state.intake_term if state else None}")
+                    if is_deadline_query and not filters.get("intake_term") and not (state and state.intake_term):
+                        print(f"DEBUG: Deadline query with 0 results - missing intake_term, asking user for intake_term")
+                        return {
+                            "_fallback": True,
+                            "_fallback_type": "missing_intake_term",
+                            "_intakes": []
+                        }
+                    else:
+                        print(f"DEBUG: Fallback check - NOT returning missing_intake_term fallback (is_deadline_query={is_deadline_query}, has_intake_term_in_filters={filters.get('intake_term') is not None}, has_intake_term_in_state={state.intake_term if state else None})")
+                    
                     fallback_filters = filters.copy()
                     fallback_applied = False
+                    
+                    # Fallback 0: For language programs, if duration filter returns 0 results, try without duration filter
+                    if state and state.degree_level == "Language" and filters.get("duration_years_target") is not None:
+                        print(f"DEBUG: Language program with duration filter returned 0 results, trying without duration filter...")
+                        fallback_filters_no_duration = fallback_filters.copy()
+                        fallback_filters_no_duration.pop("duration_years_target", None)
+                        fallback_filters_no_duration.pop("duration_constraint", None)
+                        fallback_intakes, _ = self.db_service.find_program_intakes(
+                            filters=fallback_filters_no_duration, limit=limit, offset=offset, order_by=order_by
+                        )
+                        if len(fallback_intakes) > 0:
+                            # Get distinct durations from results
+                            distinct_durations = set()
+                            for intake in fallback_intakes:
+                                if hasattr(intake, 'major') and intake.major and intake.major.duration_years:
+                                    distinct_durations.add(intake.major.duration_years)
+                            
+                            if distinct_durations:
+                                # Format duration options
+                                duration_options = []
+                                for dur in sorted(distinct_durations):
+                                    if dur < 0.5:
+                                        duration_options.append(f"{int(dur * 12)} months")
+                                    elif dur < 1.0:
+                                        duration_options.append(f"{int(dur * 12)} months")
+                                    elif dur == 1.0:
+                                        duration_options.append("1 year")
+                                    else:
+                                        duration_options.append(f"{dur} years")
+                                
+                                print(f"DEBUG: Fallback - found {len(fallback_intakes)} intakes with durations: {sorted(distinct_durations)}")
+                                print(f"DEBUG: Fallback - returning duration fallback with {len(duration_options)} duration options: {duration_options}")
+                                return {
+                                    "_fallback": True,
+                                    "_fallback_type": "duration",
+                                    "_available_durations": duration_options,
+                                    "_intakes": fallback_intakes
+                                }
+                            else:
+                                print(f"DEBUG: Fallback - found {len(fallback_intakes)} intakes but no distinct durations (all durations are None)")
+                        else:
+                            print(f"DEBUG: Fallback - removing duration filter still returned 0 results")
+                    else:
+                        print(f"DEBUG: Fallback - duration fallback condition not met: state={state is not None}, degree_level={state.degree_level if state else None}, has_duration_filter={filters.get('duration_years_target') is not None}")
+                    
+                    # Fallback 0b: For language programs, if we have limited major_ids, try expanding to all Language majors
+                    if state and state.degree_level == "Language" and filters.get("major_ids"):
+                        print(f"DEBUG: Language program with limited major_ids ({len(filters['major_ids'])}), trying all Language majors...")
+                        # Get all Language majors
+                        all_language_majors = self.db_service.search_majors(
+                            degree_level="Language",
+                            limit=200
+                        )
+                        if all_language_majors:
+                            all_language_ids = [m.id for m in all_language_majors]
+                            fallback_filters["major_ids"] = all_language_ids
+                            fallback_intakes, _ = self.db_service.find_program_intakes(
+                                filters=fallback_filters, limit=limit, offset=offset, order_by=order_by
+                            )
+                            if len(fallback_intakes) > 0:
+                                print(f"DEBUG: Fallback - expanded to {len(all_language_ids)} Language majors, found {len(fallback_intakes)} intakes")
+                                return fallback_intakes
                     
                     # Fallback 1: If major_query is acronym (cs/cse/ce), expand and retry
                     if state and state.major_query and not filters.get("major_ids"):
@@ -2097,10 +2961,11 @@ Output ONLY valid JSON, no other text:"""
         # Default return if intent doesn't match
         return []
     
-    def build_db_context(self, results: List[Any], req_focus: Dict[str, bool], list_mode: bool = False) -> str:
+    def build_db_context(self, results: List[Any], req_focus: Dict[str, bool], list_mode: bool = False, intent: str = "general") -> str:
         """
         Build small DB_CONTEXT string from results.
         For single results, include notes. For lists, only summary fields.
+        Intent-aware: For SCHOLARSHIP intent, focus on scholarship fields. For REQUIREMENTS intent, focus on requirement fields.
         """
         if not results:
             return "DATABASE CONTEXT: No matching programs found.\n"
@@ -2109,6 +2974,11 @@ Output ONLY valid JSON, no other text:"""
         
         # Check if single result or list
         is_single = len(results) == 1
+        
+        # Determine what to include based on intent
+        is_scholarship_intent = intent in ["SCHOLARSHIP", "scholarship_only"]
+        is_requirements_intent = intent in ["REQUIREMENTS", "ADMISSION_REQUIREMENTS", "documents_only", "eligibility_only"]
+        is_fees_intent = intent in ["FEES", "fees_only"]
         
         for idx, result in enumerate(results[:10]):  # Limit to 10 for context
             if isinstance(result, dict) and "university" in result:
@@ -2134,26 +3004,261 @@ Output ONLY valid JSON, no other text:"""
                 if req_focus.get("deadline") and intake.application_deadline:
                     context_parts.append(f"  Deadline: {intake.application_deadline.strftime('%Y-%m-%d')}")
                 
-                if req_focus.get("fees"):
-                    if intake.tuition_per_year:
-                        context_parts.append(f"  Tuition/year: {intake.tuition_per_year} RMB")
-                    if intake.accommodation_fee:
-                        context_parts.append(f"  Accommodation/year: {intake.accommodation_fee} RMB")
-                    if intake.application_fee:
-                        context_parts.append(f"  Application fee: {intake.application_fee} RMB")
-                
-                if req_focus.get("scholarship"):
+                # For SCHOLARSHIP intent: Focus on scholarship fields
+                if is_scholarship_intent:
+                    # scholarship_available (Boolean, nullable)
+                    if intake.scholarship_available is not None:
+                        context_parts.append(f"  Scholarship Available: {'Yes' if intake.scholarship_available else 'No'}")
+                    
+                    # scholarship_info (Text)
+                    if intake.scholarship_info:
+                        context_parts.append(f"  Scholarship Info: {intake.scholarship_info}")
+                    
+                    # ProgramIntakeScholarship relationship
                     scholarships = self.db_service.get_program_scholarships(intake.id)
                     if scholarships:
+                        context_parts.append(f"  Structured Scholarships:")
                         for sch in scholarships:
-                            context_parts.append(f"  Scholarship: {sch['scholarship']['name']}")
-                
-                # Include notes only for single result
-                if is_single:
+                            sch_lines = [f"Name: {sch['scholarship']['name']}"]
+                            if sch.get('covers_tuition') is not None:
+                                sch_lines.append(f"Tuition: {'Covered' if sch['covers_tuition'] else 'Not covered'}")
+                            if sch.get('covers_accommodation') is not None:
+                                sch_lines.append(f"Accommodation: {'Covered' if sch['covers_accommodation'] else 'Not covered'}")
+                            if sch.get('covers_insurance') is not None:
+                                sch_lines.append(f"Insurance: {'Covered' if sch['covers_insurance'] else 'Not covered'}")
+                            if sch.get('tuition_waiver_percent') is not None:
+                                sch_lines.append(f"Tuition Waiver: {sch['tuition_waiver_percent']}%")
+                            if sch.get('living_allowance_monthly') is not None:
+                                sch_lines.append(f"Living Allowance: {sch['living_allowance_monthly']} CNY/month")
+                            elif sch.get('living_allowance_yearly') is not None:
+                                sch_lines.append(f"Living Allowance: {sch['living_allowance_yearly']} CNY/year")
+                            if sch.get('first_year_only'):
+                                sch_lines.append("First Year Only: Yes")
+                            if sch.get('renewal_required'):
+                                sch_lines.append("Renewal Required: Yes")
+                            if sch.get('deadline'):
+                                sch_lines.append(f"Scholarship Deadline: {sch['deadline']}")
+                            if sch.get('eligibility_note'):
+                                sch_lines.append(f"Eligibility: {sch['eligibility_note']}")
+                            context_parts.append(f"    - {'; '.join(sch_lines)}")
+                    
+                    # Notes (may contain scholarship info)
                     if intake.notes:
                         context_parts.append(f"  Notes: {intake.notes}")
+                
+                # For REQUIREMENTS intent: Focus on requirement fields
+                elif is_requirements_intent:
+                    # Notes (important admission info)
+                    if intake.notes:
+                        context_parts.append(f"  Notes: {intake.notes}")
+                    
+                    # Age requirements
+                    if intake.age_min is not None:
+                        context_parts.append(f"  Age Minimum: {intake.age_min}")
+                    if intake.age_max is not None:
+                        context_parts.append(f"  Age Maximum: {intake.age_max}")
+                    
+                    # Academic requirements
+                    if intake.min_average_score is not None:
+                        context_parts.append(f"  Minimum Average Score: {intake.min_average_score}")
+                    
+                    # Test/Interview requirements
+                    if intake.interview_required is not None:
+                        context_parts.append(f"  Interview Required: {'Yes' if intake.interview_required else 'No'}")
+                    if intake.written_test_required is not None:
+                        context_parts.append(f"  Written Test Required: {'Yes' if intake.written_test_required else 'No'}")
+                    if intake.acceptance_letter_required is not None:
+                        context_parts.append(f"  Acceptance Letter Required: {'Yes' if intake.acceptance_letter_required else 'No'}")
+                    
+                    # Inside China applicants
+                    if intake.inside_china_applicants_allowed is not None:
+                        context_parts.append(f"  Inside China Applicants Allowed: {'Yes' if intake.inside_china_applicants_allowed else 'No'}")
+                    if intake.inside_china_extra_requirements:
+                        context_parts.append(f"  Inside China Extra Requirements: {intake.inside_china_extra_requirements}")
+                    
+                    # Bank statement requirements
+                    if intake.bank_statement_required is not None:
+                        context_parts.append(f"  Bank Statement Required: {'Yes' if intake.bank_statement_required else 'No'}")
+                    if intake.bank_statement_amount is not None:
+                        context_parts.append(f"  Bank Statement Amount: {intake.bank_statement_amount} {intake.bank_statement_currency or 'CNY'}")
+                    if intake.bank_statement_note:
+                        context_parts.append(f"  Bank Statement Note: {intake.bank_statement_note}")
+                    
+                    # HSK requirements
+                    if intake.hsk_required is not None:
+                        context_parts.append(f"  HSK Required: {'Yes' if intake.hsk_required else 'No'}")
+                    if intake.hsk_level is not None:
+                        context_parts.append(f"  HSK Level: {intake.hsk_level}")
+                    if intake.hsk_min_score is not None:
+                        context_parts.append(f"  HSK Minimum Score: {intake.hsk_min_score}")
+                    
+                    # English test requirements
+                    if intake.english_test_required is not None:
+                        context_parts.append(f"  English Test Required: {'Yes' if intake.english_test_required else 'No'}")
+                    if intake.english_test_note:
+                        context_parts.append(f"  English Test Note: {intake.english_test_note}")
+                    
+                    # ProgramDocument relationship
+                    docs_map = self._get_program_documents_batch([intake.id])
+                    documents = docs_map.get(intake.id, [])
+                    if documents:
+                        context_parts.append(f"  Required Documents:")
+                        for doc in documents:
+                            doc_lines = [doc.get('name', 'N/A')]
+                            if doc.get('is_required') is not None:
+                                doc_lines.append(f"Required: {'Yes' if doc['is_required'] else 'No'}")
+                            if doc.get('rules'):
+                                doc_lines.append(f"Rules: {doc['rules']}")
+                            if doc.get('applies_to'):
+                                doc_lines.append(f"Applies To: {doc['applies_to']}")
+                            context_parts.append(f"    - {'; '.join(doc_lines)}")
+                    
+                    # ProgramExamRequirement relationship
+                    exams_map = self._get_program_exam_requirements_batch([intake.id])
+                    exam_reqs = exams_map.get(intake.id, [])
+                    if exam_reqs:
+                        context_parts.append(f"  Exam Requirements:")
+                        for req in exam_reqs:
+                            req_lines = [req.get('exam_name', 'N/A')]
+                            if req.get('required') is not None:
+                                req_lines.append(f"Required: {'Yes' if req['required'] else 'No'}")
+                            if req.get('subjects'):
+                                req_lines.append(f"Subjects: {req['subjects']}")
+                            if req.get('min_level') is not None:
+                                req_lines.append(f"Min Level: {req['min_level']}")
+                            if req.get('min_score') is not None:
+                                req_lines.append(f"Min Score: {req['min_score']}")
+                            if req.get('exam_language'):
+                                req_lines.append(f"Language: {req['exam_language']}")
+                            if req.get('notes'):
+                                req_lines.append(f"Notes: {req['notes']}")
+                            context_parts.append(f"    - {'; '.join(req_lines)}")
+                    
+                    # Accommodation
                     if req_focus.get("accommodation") and intake.accommodation_note:
-                        context_parts.append(f"  Accommodation note: {intake.accommodation_note}")
+                        context_parts.append(f"  Accommodation Note: {intake.accommodation_note}")
+                
+                # For FEES intent: Show all fees + specific requirement fields if asked
+                elif is_fees_intent:
+                    # All fee fields
+                    if intake.tuition_per_year:
+                        context_parts.append(f"  Tuition/year: {intake.tuition_per_year} {intake.currency or 'CNY'}")
+                    if intake.tuition_per_semester:
+                        context_parts.append(f"  Tuition/semester: {intake.tuition_per_semester} {intake.currency or 'CNY'}")
+                    if intake.application_fee:
+                        context_parts.append(f"  Application fee: {intake.application_fee} {intake.currency or 'CNY'}")
+                    if intake.accommodation_fee:
+                        period = intake.accommodation_fee_period or "year"
+                        context_parts.append(f"  Accommodation fee ({period}): {intake.accommodation_fee} {intake.currency or 'CNY'}")
+                    if intake.medical_insurance_fee:
+                        period = intake.medical_insurance_fee_period or "year"
+                        context_parts.append(f"  Medical insurance fee ({period}): {intake.medical_insurance_fee} {intake.currency or 'CNY'}")
+                    if intake.service_fee:
+                        context_parts.append(f"  Service fee: {intake.service_fee} {intake.currency or 'CNY'}")
+                    if intake.arrival_medical_checkup_fee:
+                        context_parts.append(f"  Arrival medical checkup fee (one-time): {intake.arrival_medical_checkup_fee} {intake.currency or 'CNY'}")
+                    if intake.visa_extension_fee:
+                        context_parts.append(f"  Visa extension fee (annual): {intake.visa_extension_fee} {intake.currency or 'CNY'}")
+                    if intake.application_deadline:
+                        context_parts.append(f"  Application deadline: {intake.application_deadline}")
+                    
+                    # Specific requirement fields if user asks about them (from ProgramIntake fields, NOT from documents)
+                    if req_focus.get("bank"):
+                        if intake.bank_statement_required is not None:
+                            context_parts.append(f"  Bank Statement Required: {'Yes' if intake.bank_statement_required else 'No'}")
+                        if intake.bank_statement_amount is not None:
+                            context_parts.append(f"  Bank Statement Amount: {intake.bank_statement_amount} {intake.bank_statement_currency or 'CNY'}")
+                        if intake.bank_statement_note:
+                            context_parts.append(f"  Bank Statement Note: {intake.bank_statement_note}")
+                    
+                    if req_focus.get("age"):
+                        if intake.age_min is not None:
+                            context_parts.append(f"  Age Minimum: {intake.age_min}")
+                        if intake.age_max is not None:
+                            context_parts.append(f"  Age Maximum: {intake.age_max}")
+                    
+                    # Always include accommodation_note for FEES intent
+                    if intake.accommodation_note:
+                        context_parts.append(f"  Accommodation Note: {intake.accommodation_note}")
+                    
+                    # Always include notes for FEES intent (may contain fee-related information)
+                    if intake.notes:
+                        context_parts.append(f"  Notes: {intake.notes}")
+                    
+                    if req_focus.get("exams"):
+                        if intake.hsk_required is not None:
+                            context_parts.append(f"  HSK Required: {'Yes' if intake.hsk_required else 'No'}")
+                        if intake.hsk_level is not None:
+                            context_parts.append(f"  HSK Level: {intake.hsk_level}")
+                        if intake.hsk_min_score is not None:
+                            context_parts.append(f"  HSK Minimum Score: {intake.hsk_min_score}")
+                        if intake.english_test_required is not None:
+                            context_parts.append(f"  English Test Required: {'Yes' if intake.english_test_required else 'No'}")
+                        if intake.english_test_note:
+                            context_parts.append(f"  English Test Note: {intake.english_test_note}")
+                    
+                    # Calculate total fees if duration is available
+                    if intake.duration_years or (intake.major and intake.major.duration_years):
+                        duration = intake.duration_years or (intake.major.duration_years if intake.major else None)
+                        if duration:
+                            context_parts.append(f"  Program Duration: {duration} year(s)")
+                            # Calculate total fees over the course duration
+                            total_tuition = None
+                            total_accommodation = None
+                            total_insurance = None
+                            
+                            if intake.tuition_per_year and duration:
+                                total_tuition = intake.tuition_per_year * duration
+                                context_parts.append(f"  Total Tuition (over {duration} year(s)): {total_tuition} {intake.currency or 'CNY'}")
+                            
+                            if intake.accommodation_fee and duration:
+                                # Check if accommodation fee is per year or per semester
+                                period = intake.accommodation_fee_period or "year"
+                                if period == "year":
+                                    total_accommodation = intake.accommodation_fee * duration
+                                    context_parts.append(f"  Total Accommodation (over {duration} year(s)): {total_accommodation} {intake.currency or 'CNY'}")
+                                elif period == "semester":
+                                    # Assume 2 semesters per year
+                                    total_accommodation = intake.accommodation_fee * duration * 2
+                                    context_parts.append(f"  Total Accommodation (over {duration} year(s), {duration * 2} semesters): {total_accommodation} {intake.currency or 'CNY'}")
+                            
+                            if intake.medical_insurance_fee and duration:
+                                period = intake.medical_insurance_fee_period or "year"
+                                if period == "year":
+                                    total_insurance = intake.medical_insurance_fee * duration
+                                    context_parts.append(f"  Total Medical Insurance (over {duration} year(s)): {total_insurance} {intake.currency or 'CNY'}")
+                            
+                            # Calculate grand total (one-time fees + recurring fees)
+                            one_time_fees = (intake.application_fee or 0) + (intake.arrival_medical_checkup_fee or 0)
+                            recurring_fees = (total_tuition or 0) + (total_accommodation or 0) + (total_insurance or 0)
+                            annual_recurring = (intake.visa_extension_fee or 0) * duration
+                            grand_total = one_time_fees + recurring_fees + annual_recurring
+                            
+                            if grand_total > 0:
+                                context_parts.append(f"  Estimated Total Course Fee (over {duration} year(s)): {grand_total} {intake.currency or 'CNY'}")
+                                context_parts.append(f"    Breakdown: One-time fees ({one_time_fees}) + Recurring fees ({recurring_fees}) + Visa extension ({annual_recurring})")
+                
+                # For other intents (general, etc.)
+                else:
+                    # For deadline questions, always show application_deadline
+                    if req_focus.get("deadline"):
+                        if intake.application_deadline:
+                            context_parts.append(f"  Application Deadline: {intake.application_deadline}")
+                    
+                    if req_focus.get("fees"):
+                        if intake.tuition_per_year:
+                            context_parts.append(f"  Tuition/year: {intake.tuition_per_year} {intake.currency or 'CNY'}")
+                        if intake.accommodation_fee:
+                            context_parts.append(f"  Accommodation/year: {intake.accommodation_fee} {intake.currency or 'CNY'}")
+                        if intake.application_fee:
+                            context_parts.append(f"  Application fee: {intake.application_fee} {intake.currency or 'CNY'}")
+                    
+                    # Include notes only for single result
+                    if is_single:
+                        if intake.notes:
+                            context_parts.append(f"  Notes: {intake.notes}")
+                        if req_focus.get("accommodation") and intake.accommodation_note:
+                            context_parts.append(f"  Accommodation note: {intake.accommodation_note}")
                 
                 context_parts.append("")
         
@@ -2167,39 +3272,109 @@ Output ONLY valid JSON, no other text:"""
         """
         system_prompt = self.PARTNER_SYSTEM_PROMPT
         
+        # Intent-specific instructions
+        intent_instructions = ""
+        if intent in ["SCHOLARSHIP", "scholarship_only"]:
+            intent_instructions = """
+INTENT: SCHOLARSHIP - Focus ONLY on scholarship information:
+- Show scholarship_available (Yes/No) if present
+- Show scholarship_info if present
+- Show all structured scholarships from ProgramIntakeScholarship (name, coverage, waiver %, living allowance, deadlines, eligibility)
+- Show notes if they contain scholarship-related information
+- Do NOT mention documents, bank statements, age, exams, or accommodation unless they are specifically related to scholarship eligibility
+- If a field is NULL in the database, it means "not required" or "not specified" - do NOT mention it
+- Only say "Not provided" if the DATABASE CONTEXT explicitly says "not provided" or "Not specified"
+"""
+        elif intent in ["FEES", "fees_only"]:
+            intent_instructions = """
+INTENT: FEES - Focus ONLY on fee and cost information:
+- Show all fee fields: tuition_per_year, tuition_per_semester, application_fee, accommodation_fee, medical_insurance_fee, service_fee, arrival_medical_checkup_fee, visa_extension_fee
+- Show currency for all fees
+- Show fee periods (per year, per semester, one-time, annual) as specified in the database
+- If user asks about bank_statement, show bank_statement_required, bank_statement_amount, bank_statement_currency, bank_statement_note (from ProgramIntake fields, NOT from documents)
+- If user asks about age, show age_min and age_max (from ProgramIntake fields)
+- If user asks about accommodation, show accommodation_note and accommodation_fee (from ProgramIntake fields)
+- If user asks about deadline, show application_deadline (from ProgramIntake field)
+- If user asks about HSK/English test, show hsk_required/hsk_level/hsk_min_score and english_test_required/english_test_note (from ProgramIntake fields, NOT from documents)
+- Do NOT show full document lists (ProgramDocument relationship) - only show specific requirement fields if user asks about them
+- Do NOT show exam requirements list (ProgramExamRequirement relationship) - only show specific test fields if user asks about them
+- If a field is NULL in the database, it means "not required" or "not specified" - do NOT mention it
+- Only say "Not provided" if the DATABASE CONTEXT explicitly says "not provided" or "Not specified"
+"""
+        elif intent in ["REQUIREMENTS", "ADMISSION_REQUIREMENTS", "documents_only", "eligibility_only"]:
+            intent_instructions = """
+INTENT: REQUIREMENTS/ADMISSION - Focus ONLY on admission requirements:
+- Show notes (important admission info)
+- Show age requirements (min/max) if present (NULL means not required - don't mention)
+- Show academic requirements (min_average_score) if present
+- Show test/interview requirements (interview_required, written_test_required, acceptance_letter_required) if present (NULL means not required - don't mention)
+- Show inside China applicant requirements if present
+- Show bank statement requirements (required, amount, currency, note) if present (NULL means not required - don't mention)
+- Show HSK requirements (required, level, min_score) if present (NULL means not required - don't mention)
+- Show English test requirements (required, note) if present (NULL means not required - don't mention)
+- Show all documents from ProgramDocument relationship
+- Show all exam requirements from ProgramExamRequirement relationship
+- Show accommodation note if present
+- Do NOT mention scholarship information unless specifically asked
+- If a field is NULL in the database, it means "not required" - do NOT mention it
+- Only say "Not provided" if the DATABASE CONTEXT explicitly says "not provided" or "Not specified"
+"""
+        else:
+            intent_instructions = """
+INTENT: GENERAL - Show all relevant information based on focus areas.
+- If a field is NULL in the database, it means "not required" or "not specified" - do NOT mention it
+- Only say "Not provided" if the DATABASE CONTEXT explicitly says "not provided" or "Not specified"
+"""
+        
         user_prompt = f"""{db_context}
 
 User question: {user_question}
 
 Intent: {intent}
 Focus areas: {', '.join([k for k, v in req_focus.items() if v])}
+{intent_instructions}
 
 CRITICAL RULES:
 - Use ONLY the information provided in DATABASE CONTEXT above.
 - Never mention a major/university that is NOT in the DATABASE CONTEXT.
 - POSITIVE LANGUAGE: Always present information in a positive way. NEVER say "Not provided" unless the DATABASE CONTEXT explicitly says "not provided", "Not specified", or "N/A".
-- ALWAYS show requirements (documents, exams, bank statements, age, HSK, English tests, accommodation) if they are present in the DATABASE CONTEXT.
-- If the DATABASE CONTEXT shows ANY of the following, you MUST include them in your response:
-  * Teaching Language (e.g., "Teaching Language: English")
-  * Documents (from Documents section or documents_required field)
-  * Exam Requirements (HSK, English tests, from Exam Requirements section)
-  * Bank Statement requirements (amount, currency, notes)
-  * Age requirements (min/max)
-  * Inside China applicants (allowed/not allowed)
-  * Interview, Written Test, Acceptance Letter requirements
-  * Important Notes (from notes field)
-  * Accommodation information (from accommodation_note)
-- For requirements, combine information from ALL sources in the DATABASE CONTEXT:
-  * Documents section (ProgramDocument table)
-  * Exam Requirements section (ProgramExamRequirement table, HSK, English tests)
-  * Bank statement, age, inside_china, interview, written_test fields from ProgramIntake
-  * Notes field (contains important admission info, fees, and other details)
-  * Accommodation note field
+- NULL fields in database mean "not required" or "not specified" - do NOT mention them in your response.
 - If a field is present in DATABASE CONTEXT, show it. Only omit if it literally says "not provided" or "Not specified" in the context.
-- Do NOT use negative language like "Not provided in our partner database" unless the context explicitly states that.
+- Do NOT use negative language like "No specific details on..." or "Not provided in our partner database" unless the context explicitly states that.
 - Do NOT invent or hallucinate any information.
 
-Provide a comprehensive, positive answer using ALL relevant information from the DATABASE CONTEXT above.
+FORMATTING REQUIREMENTS:
+- Use markdown formatting for better readability
+- Use **bold** for university names, major names, and important labels (e.g., **Bank statement required:**, **Scholarship Available:**)
+- Use bullet points (- or •) for lists of items (documents, fees, requirements, scholarships)
+- Use numbered lists (1., 2., 3.) for sequential steps or ordered information
+- Use line breaks between different universities/programs for clarity
+- Group related information together (e.g., all fees together, all documents together)
+- Use clear section headers with **bold** text (e.g., **Fees:**, **Required Documents:**, **Exams:**)
+
+Example format:
+**University Name:**
+
+**Major Name:**
+
+**Bank statement required:** Yes, amount 5000 USD.
+
+**Other fees:**
+- Medical checkup fee: 800 CNY (first year only)
+- Accommodation fees: Triple room 3000 or 5000 CNY/year
+
+**Required documents:**
+- Passport
+- Photo
+- High school certificate & transcript
+- Medical report
+
+CONTENT REQUIREMENTS:
+- For REQUIREMENTS/ADMISSION intents: Only show detailed document lists and admission process if there are LESS than 3 universities in the results
+- If there are 3 or more universities, ask the user to choose a specific university first
+- Focus on the most relevant information based on the user's question (e.g., if they ask about fees, prioritize fee information)
+
+Provide a comprehensive, positive answer using ALL relevant information from the DATABASE CONTEXT above, focusing on the intent-specific fields. Format it clearly with markdown for easy reading.
 """
         
         try:
@@ -2222,16 +3397,40 @@ Provide a comprehensive, positive answer using ALL relevant information from the
         """
         user_input_lower = user_input.lower().strip()
         
-        # Try DBQueryService first (fast ILIKE search)
+        # Try DBQueryService first (fast ILIKE search - now includes aliases)
         db_results = self.db_service.search_universities(name=user_input, is_partner=True, limit=10)
+        print(f"DEBUG: _fuzzy_match_university('{user_input}') - DB search returned {len(db_results)} results")
         if db_results:
-            # Check for exact match
+            # Check for exact match in name or aliases
             for uni in db_results:
-                if uni.name.lower() == user_input_lower:
+                uni_name_lower = uni.name.lower()
+                if uni_name_lower == user_input_lower:
                     return True, {"id": uni.id, "name": uni.name}, [({"id": uni.id, "name": uni.name}, 1.0)]
+                
+                # Check aliases for exact match
+                if hasattr(uni, 'aliases') and uni.aliases:
+                    aliases = uni.aliases if isinstance(uni.aliases, list) else (json.loads(uni.aliases) if isinstance(uni.aliases, str) else [])
+                    for alias in aliases:
+                        if str(alias).lower() == user_input_lower:
+                            return True, {"id": uni.id, "name": uni.name}, [({"id": uni.id, "name": uni.name}, 1.0)]
             
-            # Return top matches
-            matches = [({"id": uni.id, "name": uni.name}, SequenceMatcher(None, user_input_lower, uni.name.lower()).ratio()) for uni in db_results]
+            # Return top matches (check aliases for better scoring)
+            matches = []
+            for uni in db_results:
+                uni_name_lower = uni.name.lower()
+                score = SequenceMatcher(None, user_input_lower, uni_name_lower).ratio()
+                
+                # Check aliases for better match
+                if hasattr(uni, 'aliases') and uni.aliases:
+                    aliases = uni.aliases if isinstance(uni.aliases, list) else (json.loads(uni.aliases) if isinstance(uni.aliases, str) else [])
+                    for alias in aliases:
+                        alias_lower = str(alias).lower()
+                        alias_score = SequenceMatcher(None, user_input_lower, alias_lower).ratio()
+                        if alias_score > score:
+                            score = alias_score
+                
+                matches.append(({"id": uni.id, "name": uni.name}, score))
+            
             matches.sort(key=lambda x: x[1], reverse=True)
             if matches[0][1] >= 0.8:
                 return True, matches[0][0], matches[:3]
@@ -2347,20 +3546,14 @@ Provide a comprehensive, positive answer using ALL relevant information from the
             limit=top_k * 2  # Get more candidates for fuzzy matching
         )
         
-        # Step 3: If DB returns no results, try cache-based fuzzy matching (lazy loaded)
+        # Step 3: Prepare candidates list (from DB results or cache)
         if not majors:
+            # If DB returns no results, try cache-based fuzzy matching (lazy loaded)
             major_cache = self._get_majors_cached()  # Use cached loaders
-            # Filter by university_id and degree_level if provided
             candidates = major_cache
-            if university_id:
-                candidates = [m for m in candidates if m.get("university_id") == university_id]
-            if degree_level:
-                candidates = [m for m in candidates if str(m.get("degree_level", "")).lower() == str(degree_level).lower()]
-            # Convert cache format - already in dict format
-            all_majors = candidates[:100]  # Limit for performance
         else:
             # Convert DB objects to dict format for compatibility
-            all_majors = [
+            candidates = [
                 {
                     "id": m.id,
                     "name": m.name,
@@ -2376,6 +3569,16 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                 }
                 for m in majors
             ]
+        
+        # Filter by university_id and degree_level if provided
+        if university_id:
+            candidates = [m for m in candidates if m.get("university_id") == university_id]
+        if degree_level:
+            candidates = [m for m in candidates if str(m.get("degree_level", "")).lower() == str(degree_level).lower()]
+        
+        # Convert cache format - already in dict format
+        print(f"DEBUG: _fuzzy_match_major - candidates: {len(candidates)} candidates")
+        all_majors = candidates[:100]  # Limit for performance
         
         if not all_majors:
             return False, None, []
@@ -2482,21 +3685,103 @@ Provide a comprehensive, positive answer using ALL relevant information from the
         expanded_query = self._expand_major_acronym(major_query)
         
         # Special handling for language programs
-        if re.search(r'\b(language\s+program|chinese\s+language|foundation|foundation\s+program)\b', expanded_query.lower()):
-            # Search by category/keywords for language programs
-            majors = self.db_service.search_majors(
+        language_patterns = [
+            r'\b(language\s+program|language\s+course|chinese\s+language|foundation|foundation\s+program|foundation\s+course|preparatory|preparatory\s+course|preparatory\s+non\s+degree|non-?degree\s+language)\b'
+        ]
+        is_language_query = any(re.search(pattern, expanded_query.lower()) for pattern in language_patterns)
+        
+        if is_language_query:
+            print(f"DEBUG: resolve_major_ids - detected language query: '{major_query}', degree_level={degree_level}")
+            
+            # CRITICAL: For language programs, search by keywords FIRST (foundation, preparatory, chinese language, etc.)
+            # Keywords field contains terms like "foundation", "preparatory", "chinese language course"
+            language_keywords_to_search = ["language", "foundation", "preparatory", "chinese language", "non-degree", "non degree"]
+            all_majors = []
+            
+            # Search by keywords for each language-related term
+            for keyword in language_keywords_to_search:
+                keyword_majors = self.db_service.search_majors(
+                    university_id=university_id,
+                    keywords=keyword,  # Search in keywords field
+                    degree_level=degree_level,  # Also filter by degree_level if provided
+                    teaching_language=teaching_language,
+                    limit=200
+                )
+                all_majors.extend(keyword_majors)
+                print(f"DEBUG: resolve_major_ids - found {len(keyword_majors)} majors with keyword '{keyword}'")
+            
+            # Also search by category if degree_level is "Language"
+            if degree_level == "Language":
+                category_majors = self.db_service.search_majors(
+                    university_id=university_id,
+                    degree_level="Language",
+                    category="Non-degree/Language Program",
+                    teaching_language=teaching_language,
+                    limit=200
+                )
+                all_majors.extend(category_majors)
+                print(f"DEBUG: resolve_major_ids - found {len(category_majors)} majors by category")
+            
+            # Remove duplicates (same major ID)
+            seen_ids = set()
+            majors = []
+            for m in all_majors:
+                if m.id not in seen_ids:
+                    seen_ids.add(m.id)
+                    majors.append(m)
+            
+            print(f"DEBUG: resolve_major_ids - found {len(majors)} unique Language/language-related majors (by keywords/category)")
+            
+            # If we found majors by keywords/category, return them
+            if majors:
+                print(f"DEBUG: resolve_major_ids - returning {len(majors)} language-related majors found by keywords/category")
+                # For language programs, return ALL IDs (no limit) to allow duration checking and full comparison
+                return [m.id for m in majors]
+            else:
+                # Fallback: if no majors found by keywords, try searching by degree_level only
+                if degree_level == "Language":
+                    fallback_majors = self.db_service.search_majors(
+                        university_id=university_id,
+                        degree_level="Language",
+                        teaching_language=teaching_language,
+                        limit=200
+                    )
+                    print(f"DEBUG: resolve_major_ids - fallback: found {len(fallback_majors)} Language majors by degree_level only")
+                    return [m.id for m in fallback_majors]
+            
+            # If degree_level is not "Language", search by keywords (same approach as above)
+            # This handles cases where user says "language program" but degree_level is not set to "Language"
+            all_majors = []
+            for keyword in language_keywords_to_search:
+                keyword_majors = self.db_service.search_majors(
+                    university_id=university_id,
+                    keywords=keyword,
+                    degree_level=degree_level,
+                    teaching_language=teaching_language,
+                    limit=50
+                )
+                all_majors.extend(keyword_majors)
+            
+            # Also search by category
+            category_majors = self.db_service.search_majors(
                 university_id=university_id,
-                degree_level=degree_level or "Language",
+                degree_level=degree_level,
                 teaching_language=teaching_language,
-                limit=10
+                category="Non-degree/Language Program",
+                limit=50
             )
-            # Filter by category or keywords containing "language"
-            language_majors = [
-                m for m in majors 
-                if (hasattr(m, 'category') and m.category and 'language' in str(m.category).lower()) or
-                   (hasattr(m, 'keywords') and m.keywords and 'language' in str(m.keywords).lower())
-            ]
+            all_majors.extend(category_majors)
+            
+            # Remove duplicates
+            seen_ids = set()
+            language_majors = []
+            for m in all_majors:
+                if m.id not in seen_ids:
+                    seen_ids.add(m.id)
+                    language_majors.append(m)
+            
             if language_majors:
+                print(f"DEBUG: resolve_major_ids - found {len(language_majors)} language majors by keywords/category")
                 return [m.id for m in language_majors[:limit]]
         
         # Use _fuzzy_match_major for resolution
@@ -4454,23 +5739,11 @@ Provide a comprehensive, positive answer using ALL relevant information from the
             else:
                 original_major_query = state.major_query
                 state.major_query = self._normalize_unicode_text(state.major_query)
-                
-                # Check if it's a degree word using fuzzy matching
-                matched_degree = self.router._fuzzy_match_degree_level(state.major_query)
-                if matched_degree:
-                    # It's a degree word, not a major - clear major_query and set degree_level
-                    print(f"DEBUG: major_query '{state.major_query}' is a degree word ({matched_degree}), clearing major_query")
-                    if not state.degree_level:
-                        state.degree_level = matched_degree
+                # Strip degree phrases if present
+                state.major_query = self._strip_degree_from_major_query(state.major_query)
+                # If cleaned value is empty, set to None
+                if not state.major_query or not state.major_query.strip():
                     state.major_query = None
-                else:
-                    # Preserve major_query - it's a valid major
-                    state.major_query = self._normalize_unicode_text(state.major_query)
-                    # Strip degree phrases if present
-            state.major_query = self._strip_degree_from_major_query(state.major_query)
-            # If cleaned value is empty, set to None
-            if not state.major_query or not state.major_query.strip():
-                state.major_query = None
 
         print(f"DEBUG: Final state after normalization: {state.to_dict() if state else 'None'}")
         
@@ -4498,8 +5771,68 @@ Provide a comprehensive, positive answer using ALL relevant information from the
         
         print(f"DEBUG: DB query returned {len(db_results)} results")
         
+        # ========== CHECK FOR MULTIPLE PROGRAMS: Show university list with majors ==========
+        # For language/foundation programs or when multiple universities have programs, show list
+        if db_results and len(db_results) > 1 and state and state.degree_level == "Language":
+            # Group by university and major
+            from collections import defaultdict
+            university_programs = defaultdict(list)
+            for result in db_results:
+                if hasattr(result, 'university') and hasattr(result, 'major'):
+                    uni_name = result.university.name
+                    major_name = result.major.name
+                    deadline = result.application_deadline.strftime('%Y-%m-%d') if result.application_deadline else 'N/A'
+                    # Get duration from major
+                    duration_str = ""
+                    if result.major.duration_years:
+                        dur = result.major.duration_years
+                        if dur < 0.5:
+                            duration_str = f" ({int(dur * 12)} months)"
+                        elif dur < 1.0:
+                            duration_str = f" ({int(dur * 12)} months)"
+                        elif dur == 1.0:
+                            duration_str = " (1 year)"
+                        else:
+                            duration_str = f" ({dur} years)"
+                    
+                    key = (uni_name, major_name)
+                    if key not in [p['key'] for p in university_programs[uni_name]]:
+                        university_programs[uni_name].append({
+                            'key': key,
+                            'major': major_name,
+                            'deadline': deadline,
+                            'duration': duration_str
+                        })
+            
+            # If multiple universities or multiple programs per university, show list
+            if len(university_programs) > 1 or any(len(progs) > 1 for progs in university_programs.values()):
+                response_parts = ["I found multiple language programs. Please choose one to see specific details:\n"]
+                idx = 1
+                for uni_name, programs in sorted(university_programs.items()):
+                    for prog in programs:
+                        response_parts.append(f"{idx}. {uni_name} - {prog['major']}{prog['duration']} (Deadline: {prog['deadline']})")
+                        idx += 1
+                
+                response_parts.append("\nPlease specify which program you'd like information about (e.g., '1' or 'Nanjing University - Chinese Language Program').")
+                
+                return {
+                    "response": "\n".join(response_parts),
+                    "used_db": True,
+                    "used_tavily": False,
+                    "sources": []
+                }
+        
         # ========== MAJOR VALIDATION: Check if returned majors match user's major_query ==========
-        if state and state.major_query and db_results and len(db_results) > 0:
+        # CRITICAL: Skip validation for language programs - they're matched by keywords/category, not exact name
+        # Also skip if we already resolved major_ids (means we found matches via keywords/category)
+        is_language_query = (
+            state and state.major_query and any(
+                kw in state.major_query.lower() 
+                for kw in ["language", "foundation", "preparatory", "chinese language", "non-degree"]
+            )
+        ) or (state and hasattr(state, '_resolved_major_ids') and state._resolved_major_ids and state.degree_level == "Language")
+        
+        if state and state.major_query and db_results and len(db_results) > 0 and not is_language_query:
             # Check if any returned intake has a major that matches the user's query
             user_major_lower = state.major_query.lower().strip()
             matched_majors = []
@@ -4577,6 +5910,17 @@ Provide a comprehensive, positive answer using ALL relevant information from the
         if fallback_result:
             fallback_type = fallback_result.get("_fallback_type")
             
+            if fallback_type == "duration" and len(db_results) > 0:
+                # Duration filter returned 0 results, but programs exist with other durations
+                available_durations = fallback_result.get("_available_durations", [])
+                durations_str = ", ".join(available_durations) if available_durations else "different durations"
+                return {
+                    "response": f"I found language programs, but not with the duration you specified. Available durations: {durations_str}. Which duration do you prefer?",
+                    "used_db": True,
+                    "used_tavily": False,
+                    "sources": []
+                }
+            
             if fallback_type == "intake_term" and len(db_results) > 0:
                 # Intake term removal yielded results - ask user to choose term
                 available_terms = fallback_result.get("_available_terms", [])
@@ -4597,10 +5941,9 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                 state_snapshot = PartnerQueryState()
                 state_snapshot.__dict__.update(state.__dict__)
                 state_snapshot.teaching_language = None  # Clear only this slot
+                # Set pending with snapshot - this will also cache the state with pending info
                 self._set_pending(partner_id, conversation_id, "teaching_language", state_snapshot)
-                
-                # Cache the state
-                self._set_state_cache(partner_id, conversation_id, state)
+                # Note: _set_pending already calls _set_cached_state, so we don't need to call it again
                 
                 print(f"DEBUG: Fallback teaching_language - available_languages={available_languages}, setting pending")
                 
@@ -4611,8 +5954,34 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                     "sources": []
                 }
             
+            elif fallback_type == "missing_intake_term":
+                # For deadline queries, ask for intake_term instead of suggesting unrelated majors
+                return {
+                    "response": "Which intake term are you interested in? (March or September)",
+                    "used_db": True,
+                    "used_tavily": False,
+                    "sources": []
+                }
+            
             elif fallback_type == "no_results" and len(db_results) == 0:
                 # Still no results after fallbacks - intelligent message
+                # For deadline queries, don't suggest unrelated majors - ask for missing fields instead
+                is_deadline_query = state and hasattr(state, 'wants_deadline') and state.wants_deadline
+                if is_deadline_query:
+                    # For deadline queries, ask for missing fields
+                    missing_fields = []
+                    if not state.intake_term:
+                        missing_fields.append("intake term (March/September)")
+                    if not state.degree_level:
+                        missing_fields.append("degree level (Language/Bachelor/Master/PhD)")
+                    if missing_fields:
+                        return {
+                            "response": f"Please provide: {', '.join(missing_fields)}",
+                            "used_db": True,
+                            "used_tavily": False,
+                            "sources": []
+                        }
+                
                 # Check if major is missing and offer suggestions
                 if not state.major_query:
                     # Offer top majors for degree/intake
@@ -4664,10 +6033,9 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                         state_snapshot = PartnerQueryState()
                         state_snapshot.__dict__.update(state.__dict__)
                         state_snapshot.teaching_language = None  # Clear only this slot
+                        # Set pending with snapshot - this will also cache the state with pending info
                         self._set_pending(partner_id, conversation_id, "teaching_language", state_snapshot)
-                        
-                        # Cache the state
-                        self._set_state_cache(partner_id, conversation_id, state)
+                        # Note: _set_pending already calls _set_cached_state, so we don't need to call it again
                         
                         return {
                             "response": f"I found programs available in {langs_str}. Which do you prefer?",
@@ -4695,10 +6063,9 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                         state_snapshot = PartnerQueryState()
                         state_snapshot.__dict__.update(state.__dict__)
                         state_snapshot.teaching_language = None  # Clear only this slot
+                        # Set pending with snapshot - this will also cache the state with pending info
                         self._set_pending(partner_id, conversation_id, "teaching_language", state_snapshot)
-                        
-                        # Cache the state
-                        self._set_state_cache(partner_id, conversation_id, state)
+                        # Note: _set_pending already calls _set_cached_state, so we don't need to call it again
                         
                         return {
                             "response": f"I found programs available in {langs_str}. Which do you prefer?",
@@ -4708,10 +6075,32 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                         }
         
         # ========== STAGE C: Format Response ==========
+        # Store university_ids and intake_ids from current results for context preservation
+        if db_results and state and partner_id and conversation_id:
+            # Extract unique university_ids from results
+            university_ids = []
+            intake_ids = []
+            for result in db_results:
+                if hasattr(result, 'university_id') and result.university_id:
+                    if result.university_id not in university_ids:
+                        university_ids.append(result.university_id)
+                if hasattr(result, 'id'):
+                    intake_ids.append(result.id)
+            
+            if university_ids:
+                state._previous_university_ids = university_ids
+                print(f"DEBUG: Stored _previous_university_ids: {university_ids} for context preservation")
+            if intake_ids:
+                state._previous_intake_ids = intake_ids
+                print(f"DEBUG: Stored _previous_intake_ids: {intake_ids} for context preservation")
+            # Cache the state with previous IDs
+            self._set_cached_state(partner_id, conversation_id, state, None)
+        
         # Build DB context (small, field-aware)
         req_focus = route_plan.get("req_focus", {})
         list_mode = state.wants_list if state else False
-        db_context = self.build_db_context(db_results, req_focus, list_mode)
+        intent = state.intent if state else "general"
+        db_context = self.build_db_context(db_results, req_focus, list_mode, intent=intent)
         
         # For list queries with many results, use deterministic formatting
         if list_mode and len(db_results) > 5:
@@ -4754,6 +6143,29 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                 duration_preference=None,
                 user_message=user_message
             )
+        
+        # Check if there are 3+ universities - if so, ask user to choose instead of showing all details
+        if db_results and intent in [self.router.INTENT_ADMISSION_REQUIREMENTS, "REQUIREMENTS", "ADMISSION_REQUIREMENTS"]:
+            unique_universities = set()
+            for result in db_results:
+                if hasattr(result, 'university') and result.university:
+                    unique_universities.add(result.university.name)
+                elif hasattr(result, 'university_id') and result.university_id:
+                    # Try to get university name from ID
+                    from app.models import University
+                    uni = self.db.query(University).filter(University.id == result.university_id).first()
+                    if uni:
+                        unique_universities.add(uni.name)
+            
+            if len(unique_universities) >= 3:
+                # Ask user to choose a university
+                university_list = "\n".join([f"- {uni}" for uni in sorted(unique_universities)])
+                return {
+                    "response": f"I found information for {len(unique_universities)} universities. Please choose one to see detailed requirements:\n\n{university_list}",
+                    "used_db": True,
+                    "used_tavily": False,
+                    "sources": []
+                }
         
         # For single result or small results, use LLM formatting
         try:
