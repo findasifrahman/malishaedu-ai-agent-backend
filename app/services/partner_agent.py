@@ -959,6 +959,10 @@ Output ONLY valid JSON, no other text:"""
             # Check for CSCA/CSC scholarship specifically
             if re.search(r'\b(csca|csc|china\s+scholarship\s+council)\b', lower):
                 result["wants_csca_scholarship"] = True
+                # Preserve scholarship focus for CSC/CSCA
+                result["scholarship_focus"] = {"any": True, "csc": True, "university": False}
+                # Avoid mis-parsing "CSCA/CSC" as a university name
+                result["university_raw"] = None
         if re.search(r'\b(document|documents|required\s+documents?|doc\s+list|paper|papers|materials|what\s+doc|what\s+documents?)\b', lower):
             result["wants_documents"] = True
             result["intent"] = "documents_only"
@@ -1240,6 +1244,11 @@ Output ONLY valid JSON, no other text:"""
             state.wants_deadline = snapshot.get("wants_deadline", False)
             state.wants_list = snapshot.get("wants_list", False)
             state.wants_earliest = snapshot.get("wants_earliest", False)
+            # CRITICAL: Preserve LIST_UNIVERSITIES intent if it was in the snapshot
+            if snapshot.get("intent") == self.router.INTENT_LIST_UNIVERSITIES:
+                state.intent = self.router.INTENT_LIST_UNIVERSITIES
+                state.wants_list = True
+                print(f"DEBUG: Preserved LIST_UNIVERSITIES intent from snapshot")
             state.city = snapshot.get("city")
             state.province = snapshot.get("province")
             state.country = snapshot.get("country")
@@ -1425,6 +1434,13 @@ Output ONLY valid JSON, no other text:"""
                             # Store filtered intakes in state for use in run_db
                             state._duration_filtered_intakes = filtered_intakes
                             print(f"DEBUG: Duration reply - filtered to {len(filtered_intakes)} intakes matching duration={duration_parsed}")
+                            # CRITICAL: Preserve LIST_UNIVERSITIES intent and wants_list/wants_fees from snapshot
+                            if snapshot.get("intent") == self.router.INTENT_LIST_UNIVERSITIES:
+                                state.intent = self.router.INTENT_LIST_UNIVERSITIES
+                                state.wants_list = True
+                                if snapshot.get("wants_fees"):
+                                    state.wants_fees = True
+                                print(f"DEBUG: Preserved LIST_UNIVERSITIES intent and wants_list=True from snapshot")
                             self._consume_pending(partner_id, conversation_id)
                         else:
                             print(f"DEBUG: Duration reply - no intakes match duration={duration_parsed}, keeping pending")
@@ -3312,6 +3328,9 @@ Output ONLY valid JSON, no other text:"""
             if (has_fee_filter or has_scholarship_filter or has_requirement_filter) and sql_params.get("major_ids"):
                 # Get program intakes filtered by criteria, then group by university
                 filters = {}
+                # If we have prior university context, reuse it (consistency across turns)
+                if state and hasattr(state, '_previous_university_ids') and state._previous_university_ids:
+                    filters["university_ids"] = state._previous_university_ids
                 if sql_params.get("university_ids"):
                     filters["university_ids"] = sql_params["university_ids"]
                     # CRITICAL: Filter major_ids to only include majors that belong to these universities
@@ -3365,6 +3384,15 @@ Output ONLY valid JSON, no other text:"""
                     if state and hasattr(state, 'scholarship_focus') and state.scholarship_focus and state.scholarship_focus.csc:
                         filters["scholarship_type"] = "CSC"
                         print(f"DEBUG: LIST_UNIVERSITIES with CSCA scholarship - adding scholarship_type=CSC filter")
+                    # If scholarship filter is on, return raw intakes to preserve scholarship details (no aggregation)
+                    intakes, _ = self.db_service.find_program_intakes(
+                        filters=filters,
+                        limit=sql_params.get("limit", 200),
+                        offset=0,
+                        order_by="tuition"
+                    )
+                    print(f"DEBUG: LIST_UNIVERSITIES with scholarship - returning {len(intakes)} intakes (no aggregation) to keep scholarship details")
+                    return intakes
                 
                 # Age requirement filter (e.g., "40 year old can study" means max_age >= 40)
                 # Check latest_user_message first, then state if available
@@ -5432,6 +5460,12 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                         intake_info += f"\n  Written Test Required: Yes"
                 
                 if include_cost:
+                    # Normalize fee fields for aggregated university-fee results (LIST_UNIVERSITIES with wants_fees)
+                    if intake.get('tuition_per_year') is None and intake.get('min_tuition_per_year') is not None:
+                        intake['tuition_per_year'] = intake.get('min_tuition_per_year')
+                    if intake.get('tuition_per_semester') is None and intake.get('min_tuition_per_semester') is not None:
+                        intake['tuition_per_semester'] = intake.get('min_tuition_per_semester')
+
                     currency = intake.get('currency', 'CNY')
 
                     tuition = None
@@ -7285,7 +7319,13 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                 
         # ========== POST-QUERY: Check for mixed teaching languages ==========
         # Use DBQueryService to check distinct languages before asking
-        if db_results and not state.teaching_language and not state.is_clarifying:
+        # CRITICAL: Skip teaching_language check for language programs (they're Chinese language programs by default)
+        is_language_program = (
+            (state and state.degree_level == "Language") or
+            (state and state.major_query and any(kw in state.major_query.lower() for kw in ["language", "foundation", "preparatory", "chinese language", "non-degree"]))
+        )
+        
+        if db_results and not state.teaching_language and not state.is_clarifying and not is_language_program:
             # Check if we have enough info to query distinct languages
             if state.degree_level or state.major_query or state.university_query or state.intake_term:
                 filters_for_lang_check = {}
