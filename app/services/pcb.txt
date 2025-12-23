@@ -6819,82 +6819,21 @@ Provide a comprehensive, positive answer using ALL relevant information from the
         ) or (state and hasattr(state, '_resolved_major_ids') and state._resolved_major_ids and state.degree_level == "Language")
         
         # Check if user just accepted a major suggestion (from conversation history)
-        # Look through ENTIRE conversation history for acceptance patterns
         user_accepted_major = False
         if conversation_history and len(conversation_history) >= 2:
-            # Look through all messages to find if user accepted a major suggestion
-            for i, msg in enumerate(conversation_history):
+            # Check if previous user message was an acceptance (yes, ok, etc.)
+            prev_user_msg = None
+            for msg in reversed(conversation_history[-3:]):
                 if msg.get('role') == 'user':
-                    user_msg = msg.get('content', '').lower()
-                    acceptance_patterns = [r'\b(yes|ok|okay|sure|go ahead|that\'?s fine|sounds good)\b']
-                    if any(re.search(pattern, user_msg) for pattern in acceptance_patterns):
-                        # Check if the previous assistant message asked about a major
-                        if i > 0 and conversation_history[i-1].get('role') == 'assistant':
-                            prev_assistant = conversation_history[i-1].get('content', '')
-                            if 'Would you like to see details for' in prev_assistant and 'programs?' in prev_assistant:
-                                user_accepted_major = True
-                                print(f"DEBUG: Skipping major validation - user accepted a major suggestion earlier in conversation (message {i})")
-                                break
+                    prev_user_msg = msg.get('content', '').lower()
+                    break
+            if prev_user_msg:
+                acceptance_patterns = [r'\b(yes|ok|okay|sure|go ahead|that\'?s fine|sounds good)\b']
+                user_accepted_major = any(re.search(pattern, prev_user_msg) for pattern in acceptance_patterns)
+                if user_accepted_major:
+                    print(f"DEBUG: Skipping major validation - user just accepted a major suggestion")
         
-        # Also skip validation if the major was resolved via keywords (CSE -> Computer Science and Technology via keywords)
-        # Check if any result has a major that matches via keywords
-        # IMPORTANT: Check the ORIGINAL user query from conversation history, not the accepted major name
-        major_matched_via_keywords = False
-        if state and state.major_query and db_results and len(db_results) > 0:
-            # Get the original user query from conversation history (e.g., "CSE", not "Computer Science and Technology")
-            original_user_query = None
-            if conversation_history:
-                # Look for the first user message that contains a major query
-                for msg in conversation_history:
-                    if msg.get('role') == 'user':
-                        content = msg.get('content', '').lower()
-                        # Look for common major abbreviations/acronyms
-                        major_abbrevs = ['cse', 'cs', 'bba', 'mba', 'eee', 'ee', 'me', 'ce', 'it']
-                        for abbrev in major_abbrevs:
-                            if abbrev in content:
-                                original_user_query = abbrev
-                                break
-                        if original_user_query:
-                            break
-                        # If no abbreviation found, use the first major-related word
-                        words = content.split()
-                        for word in words:
-                            if len(word) <= 5 and word.isalpha():  # Likely an acronym
-                                original_user_query = word
-                                break
-                        if original_user_query:
-                            break
-            
-            # Use original query if found, otherwise use current major_query
-            user_major_lower = (original_user_query or state.major_query).lower().strip()
-            
-            for result in db_results:
-                if hasattr(result, 'major') and result.major:
-                    # Check if the major has keywords that match the user's query
-                    major_keywords = getattr(result.major, 'keywords', None)
-                    if major_keywords:
-                        # Parse keywords (can be JSON array, comma-separated string, or list)
-                        if isinstance(major_keywords, str):
-                            try:
-                                keywords = json.loads(major_keywords)
-                            except:
-                                keywords = [k.strip() for k in major_keywords.split(',') if k.strip()]
-                        elif isinstance(major_keywords, list):
-                            keywords = major_keywords
-                        else:
-                            keywords = []
-                        
-                        # Check if user's query matches any keyword
-                        for keyword in keywords:
-                            keyword_lower = str(keyword).lower().strip()
-                            if user_major_lower == keyword_lower or user_major_lower in keyword_lower or keyword_lower in user_major_lower:
-                                major_matched_via_keywords = True
-                                print(f"DEBUG: Major '{result.major.name}' matched via keyword '{keyword}' (user query: '{user_major_lower}') - skipping validation")
-                                break
-                    if major_matched_via_keywords:
-                        break
-        
-        if state and state.major_query and db_results and len(db_results) > 0 and not is_language_query and not user_accepted_major and not major_matched_via_keywords:
+        if state and state.major_query and db_results and len(db_results) > 0 and not is_language_query and not user_accepted_major:
             # Check if any returned intake has a major that matches the user's query
             user_major_lower = state.major_query.lower().strip()
             matched_majors = []
@@ -6922,45 +6861,13 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                     user_words = set(user_major_clean.split())
                     word_overlap = len(user_words.intersection(major_words)) / max(len(user_words), 1)
                     
-                    # CRITICAL: Also check keywords field for matching (CSE should match Computer Science and Technology via keywords)
-                    keyword_match = False
-                    major_keywords = getattr(result.major, 'keywords', None)
-                    if major_keywords:
-                        # Parse keywords (can be JSON array, comma-separated string, or list)
-                        if isinstance(major_keywords, str):
-                            try:
-                                keywords = json.loads(major_keywords)
-                            except:
-                                keywords = [k.strip() for k in major_keywords.split(',') if k.strip()]
-                        elif isinstance(major_keywords, list):
-                            keywords = major_keywords
-                        else:
-                            keywords = []
-                        
-                        # Check if user's query matches any keyword
-                        for keyword in keywords:
-                            keyword_clean = re_module.sub(r'[^\w\s&]', '', str(keyword).lower())
-                            if user_major_clean == keyword_clean or user_major_clean in keyword_clean or keyword_clean in user_major_clean:
-                                keyword_match = True
-                                print(f"DEBUG: Major validation - matched via keyword '{keyword}' for major '{result.major.name}'")
-                                break
-                    
-                    # CRITICAL: If the major name exactly matches the user's query (after normalization), it's a match
-                    # This handles cases where user accepted "Computer Science and Technology" and we're checking against "Computer Science and Technology" programs
-                    exact_name_match = (user_major_clean == major_name_clean or 
-                                       user_major_clean == major_name_cn_clean or
-                                       major_name_clean.startswith(user_major_clean) or
-                                       user_major_clean.startswith(major_name_clean))
-                    
                     is_match = (
-                        exact_name_match or  # Exact or near-exact name match (highest priority)
                         similarity_name >= 0.7 or similarity_cn >= 0.7 or
                         word_overlap >= 0.5 or
-                        keyword_match or  # Match via keywords field
                         (user_major_clean in major_name_clean and len(user_major_clean) >= 4)  # Only if query is substantial
                     )
                     
-                    print(f"DEBUG: Major validation - user='{user_major_lower}', major='{major_name}', exact_match={exact_name_match}, similarity={similarity_name:.2f}, word_overlap={word_overlap:.2f}, keyword_match={keyword_match}, is_match={is_match}")
+                    print(f"DEBUG: Major validation - user='{user_major_lower}', major='{major_name}', similarity={similarity_name:.2f}, word_overlap={word_overlap:.2f}, is_match={is_match}")
                     
                     if is_match:
                         matched_majors.append(result.major.name)

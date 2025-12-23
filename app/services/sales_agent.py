@@ -13,6 +13,7 @@ from difflib import SequenceMatcher
 from app.models import University, Major, ProgramIntake, Lead
 import json
 import re
+import os
 
 
 @dataclass
@@ -65,6 +66,298 @@ class StudentProfileState:
             "wechat": self.wechat,
             "name": self.name
         }
+
+
+class FAQService:
+    """Service for matching user questions to FAQ entries"""
+    
+    # FAQ keyword fast-path triggers
+    FAQ_KEYWORDS = [
+        'living cost', 'monthly cost', 'living expense', 'safe', 'safety', 'security',
+        'service charge', 'service fee', 'hidden charge', 'hidden fee', 'refund',
+        'documents', 'document', 'required', 'IELTS', 'HSK', 'part-time', 'part time',
+        'process time', 'duration', 'how long', 'accommodation', 'dormitory', 'dorm',
+        'scholarship', 'scholarships', 'halal', 'food', 'payment', 'assist', 'help',
+        'students', 'agency', 'consultancy', 'agreement', 'partner', 'partnered', 'partners',
+        'universities', 'work with', 'connected with'
+    ]
+    
+    def __init__(self, faq_text: Optional[str] = None, docx_path: Optional[str] = None):
+        """
+        Initialize FAQService with FAQ content.
+        
+        Args:
+            faq_text: Raw FAQ text (for direct initialization)
+            docx_path: Path to FAQ docx file (future support)
+        """
+        self.faq_pairs: List[Dict[str, str]] = []
+        
+        if faq_text:
+            self.faq_pairs = self._parse_faq_text(faq_text)
+        elif docx_path and os.path.exists(docx_path):
+            # Future: support docx parsing
+            # For now, if docx_path provided but file doesn't exist, fail gracefully
+            try:
+                # Placeholder for docx parsing - would use python-docx library
+                pass
+            except Exception as e:
+                print(f"Warning: Could not load FAQ from docx: {e}")
+        else:
+            # Load default FAQ from embedded text
+            self.faq_pairs = self._parse_faq_text(self._get_default_faq_text())
+    
+    def _get_default_faq_text(self) -> str:
+        """Get default FAQ text embedded in code"""
+        return """Q: Which universities are best for Chinese-taught bachelor programs?
+A: "Best" depends on your major, city, budget, and scholarship goal. MalishaEdu recommends MOE-recognized public universities with strong programs in your field and good international student support.
+
+Q: How many scholarships are available?
+A: Scholarship quotas change every intake and vary by university and student profile. Common options include Chinese Government Scholarship (CSC), provincial scholarships, university scholarships, and enterprise scholarships.
+
+Q: What are the requirements to maintain a scholarship?
+A: Most scholarships require good academic performance, regular attendance (usually 80%+), good behavior, and no rule violations. Reviews are conducted semester-wise or yearly.
+
+Q: What requirements are needed to get a scholarship?
+A: Eligible nationality and age, strong academic results, good health (medical form), complete documents, and meeting language requirements (HSK or IELTS/EPC depending on program).
+
+Q: What are the job opportunities after graduation?
+A: Graduates typically work in their home country or multinational companies. Working in China after graduation depends on work permit rules, employer sponsorship, and local regulations.
+
+Q: How are the university rankings?
+A: Rankings depend on systems like QS, THE, or ARWU. MalishaEdu also evaluates program strength, city, internships, labs, and graduate outcomes.
+
+Q: Can I work while studying?
+A: Part-time work is regulated. Students must obtain university approval and complete local permission steps before working.
+
+Q: What is the yearly tuition fee?
+A: Tuition varies by university and major. MalishaEdu confirms official tuition before application.
+
+Q: What is the accommodation like?
+A: Most universities offer international dormitories (shared or single). Facilities and prices vary by campus.
+
+Q: Is the application fee refundable?
+A: Usually non-refundable after submission. Policy is confirmed before payment.
+
+Q: Is HSK required?
+A: Yes for Chinese-taught programs. Required level depends on university/major. Some offer Chinese language preparatory programs.
+
+Q: Do I need to take any exam before applying?
+A: Generally no entrance exam. Some competitive programs may require interviews.
+
+Q: How is the international student support?
+A: International Offices support registration, residence permits, orientation, and student services.
+
+Q: What is the duration of the program?
+A: Most bachelor programs are 4 years.
+
+Q: Is it better to study in a public or private university?
+A: Public universities are generally preferred for recognition and scholarships.
+
+Q: What documents are required for application?
+A: Passport, photo, academic certificate & transcript, medical form, police clearance (if required), study plan, language proof.
+
+Q: What is the total cost for applying?
+A: Includes application fee, documentation, medical tests, courier, visa-related costs. Study cost depends on city and scholarship.
+
+Q: What documents are required for scholarships?
+A: Degree certificates, transcripts, study plan, recommendation letters (for higher levels), passport, medical form, language proof.
+
+Q: Is halal food available?
+A: Available in many universities/cities; varies by location.
+
+Q: How many universities are you directly connected with?
+A: MalishaEdu works with a wide network of universities and authorized partners; options depend on intake.
+
+Q: What services do you provide?
+A: Program selection, document checking, application submission, scholarship assistance, admission follow-up, visa guidance, pre-departure support.
+
+Q: What is your service charge?
+A: Depends on program and services selected; shared clearly before processing.
+
+Q: Are there any hidden charges?
+A: No. All official fees and service charges are disclosed.
+
+Q: Will you assist with everything?
+A: Yes, end-to-end assistance. Students must provide genuine documents and attend appointments if required.
+
+Q: How many students have gone through your agency so far?
+A: Updated numbers can be shared privately as figures change each intake.
+
+Q: How can I make the payment?
+A: Payments via official MalishaEdu channels with invoice/receipt provided.
+
+Q: Which universities are best for English-taught bachelor programs?
+A: Depends on major, budget, and intake. MalishaEdu shortlists MOE-recognized universities offering English-taught programs.
+
+Q: Do I need to study Chinese language?
+A: Not mandatory, but recommended for daily life and cultural adaptation.
+
+Q: If needed, how long does the Chinese course take?
+A: Usually one semester to one academic year.
+
+Q: Is IELTS required?
+A: Many universities accept IELTS/TOEFL; some accept MOI/EPC.
+
+Q: Can I work part-time while studying?
+A: Possible with university approval and local permission.
+
+Q: How long does it take to receive the admission letter?
+A: Typically a few weeks, depending on intake and document completeness.
+
+Q: Will the degree be issued in English?
+A: Usually English or bilingual for English-taught programs, confirmed per university.
+
+Q: Is China safe for Bangladeshi students?
+A: Yes. China is generally safe for international students. Universities have campus security and student management systems.
+
+Q: After going to China, if I face problems, will your agency still help me?
+A: Yes. MalishaEdu provides post-arrival support and coordination with universities.
+
+Q: English medium or Chinese medium—which is more beneficial?
+A: English-taught programs are easier initially; Chinese-taught programs offer more scholarships and long-term opportunities.
+
+Q: Which universities are easier to get scholarships from?
+A: Provincial public universities are often more flexible than top-tier universities.
+
+Q: How long will the whole process take?
+A: Usually 6–10 weeks from application to visa approval.
+
+Q: What is the monthly living cost in China?
+A: On average USD 150–400 per month, depending on city and lifestyle.
+
+Q: If I fail one subject, will my scholarship be cancelled?
+A: Not automatically. Warnings or probation may apply; repeated failures can affect renewal.
+
+Q: Can I change university after admission?
+A: Possible but requires approvals and valid reasons.
+
+Q: Is Mandarin very hard for beginners?
+A: With regular study, basic communication is achievable within 6–12 months.
+
+Q: If I take a gap year, will it be a problem?
+A: Usually acceptable with proper explanation and documents.
+
+Q: I don't have IELTS or HSK, can I apply?
+A: Yes. MOI/EPC may be accepted, or Chinese preparatory programs are available.
+
+Q: How competitive is the CSC Scholarship?
+A: Highly competitive; selection depends on profile and quota.
+
+Q: Can I apply for more than one scholarship?
+A: Yes, but only one can be accepted if awarded.
+
+Q: How many international students do you send each year?
+A: MalishaEdu has been operating since 2012 and facilitates placements for thousands of students globally each year.
+
+Q: Which universities are you partnered with?
+A: We work with 250+ Chinese universities for admissions support.
+
+Q: Do you have direct agreements with universities?
+A: Yes, agreements are updated yearly based on policy and scholarship rules.
+
+Q: Are you a registered consultancy?
+A: Yes. Guangzhou MalishaEdu Co., Ltd. is a registered consultancy firm in China.
+
+Q: Do you sign formal agreements with partners?
+A: Yes. All partnerships are governed by formal agreements."""
+    
+    def _parse_faq_text(self, faq_text: str) -> List[Dict[str, str]]:
+        """Parse FAQ text into question-answer pairs"""
+        pairs = []
+        lines = faq_text.split('\n')
+        current_q = None
+        current_a = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            if line.startswith('Q:'):
+                # Save previous Q-A pair if exists
+                if current_q and current_a:
+                    pairs.append({
+                        'question': current_q,
+                        'answer': ' '.join(current_a).strip()
+                    })
+                # Start new question
+                current_q = line[2:].strip()  # Remove 'Q:'
+                current_a = []
+            elif line.startswith('A:'):
+                # Start answer
+                answer_text = line[2:].strip()  # Remove 'A:'
+                if answer_text:
+                    current_a.append(answer_text)
+            elif current_q and current_a:
+                # Continuation of answer
+                current_a.append(line)
+        
+        # Save last pair
+        if current_q and current_a:
+            pairs.append({
+                'question': current_q,
+                'answer': ' '.join(current_a).strip()
+            })
+        
+        return pairs
+    
+    def _normalize_text(self, text: str) -> str:
+        """Normalize text for matching: lowercase, remove punctuation, collapse whitespace"""
+        # Lowercase
+        text = text.lower()
+        # Remove punctuation except spaces
+        text = re.sub(r'[^\w\s]', ' ', text)
+        # Collapse whitespace
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()
+    
+    def _should_try_faq_match(self, user_text: str) -> bool:
+        """Check if user text should trigger FAQ matching (keyword fast-path)"""
+        user_lower = user_text.lower()
+        return any(keyword in user_lower for keyword in self.FAQ_KEYWORDS)
+    
+    def match(self, user_text: str, threshold: float = 0.62) -> Tuple[Optional[Dict[str, str]], float]:
+        """
+        Match user text to best FAQ entry.
+        
+        Args:
+            user_text: User's question/text
+            threshold: Minimum similarity score (default 0.62)
+        
+        Returns:
+            Tuple of (best_match_dict, score) or (None, 0.0) if no match above threshold
+        """
+        if not self.faq_pairs:
+            return None, 0.0
+        
+        user_normalized = self._normalize_text(user_text)
+        best_match = None
+        best_score = 0.0
+        
+        for pair in self.faq_pairs:
+            question_normalized = self._normalize_text(pair['question'])
+            # Calculate similarity
+            similarity = SequenceMatcher(None, user_normalized, question_normalized).ratio()
+            
+            # Also check if user text contains key words from question
+            question_words = set(question_normalized.split())
+            user_words = set(user_normalized.split())
+            common_words = question_words.intersection(user_words)
+            
+            # Boost score if there are common meaningful words (length > 3)
+            meaningful_common = [w for w in common_words if len(w) > 3]
+            if meaningful_common:
+                word_boost = len(meaningful_common) / max(len(question_words), len(user_words), 1)
+                similarity = max(similarity, word_boost * 0.8)
+            
+            if similarity > best_score:
+                best_score = similarity
+                best_match = pair
+        
+        if best_score >= threshold:
+            return best_match, best_score
+        
+        return None, 0.0
 
 
 class SalesAgent:
@@ -472,12 +765,22 @@ Style Guidelines:
 """
 
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, faq_service: Optional[FAQService] = None):
         self.db = db
         self.db_service = DBQueryService(db)
         self.rag_service = RAGService()
         self.tavily_service = TavilyService()
         self.openai_service = OpenAIService()
+        
+        # Initialize FAQ service (fail gracefully if not available)
+        try:
+            if faq_service:
+                self.faq_service = faq_service
+            else:
+                self.faq_service = FAQService()
+        except Exception as e:
+            print(f"Warning: FAQ service initialization failed: {e}. Continuing without FAQ support.")
+            self.faq_service = None
         
         # Load all partner universities at startup
         self.all_universities = self._load_all_universities()
@@ -1480,6 +1783,118 @@ Return the JSON object:"""
         else:
             return 'general'
     
+    def _is_program_specific_query(self, user_message: str, student_state: StudentProfileState) -> bool:
+        """
+        Determine if user query is program-specific (requires DB lookup) vs general FAQ question.
+        
+        Returns True if query mentions:
+        - Specific university name
+        - Specific major/subject with intent to study
+        - Tuition/cost for specific program
+        - Deadline for specific program
+        - List universities/majors FOR a specific program
+        - Comparison queries
+        
+        Returns False for general FAQ questions like:
+        - "Which universities are you partnered with?" (partnership question)
+        - "How many universities do you work with?" (general info)
+        """
+        user_lower = user_message.lower()
+        
+        # EXCLUDE general partnership/FAQ questions first
+        faq_keywords = [
+            'partnered with', 'partners with', 'work with', 'connected with',
+            'how many universities', 'how many students', 'which universities are you',
+            'what universities do you', 'do you have', 'are you'
+        ]
+        if any(keyword in user_lower for keyword in faq_keywords):
+            return False  # This is a general FAQ question, not program-specific
+        
+        # Check for specific university mentions
+        if student_state.preferred_universities:
+            return True
+        
+        # Check for program-specific keywords combined with specific entities
+        # Only match if asking about universities FOR a specific program/major/degree
+        program_specific_patterns = [
+            r'tuition.*(?:for|at|in).*(?:university|program|major)',
+            r'cost.*(?:for|at|in).*(?:university|program|major)',
+            r'fee.*(?:for|at|in).*(?:university|program|major)',
+            r'deadline.*(?:for|at|in).*(?:university|program|major)',
+            r'(?:list|show|tell me about|which|what).*(?:universities|majors|programs).*(?:for|offering|with).*(?:master|bachelor|phd|degree|major|program)',
+            r'(?:list|show|tell me about|which|what).*(?:universities|majors|programs).*(?:in|at|for).*(?:computer|engineering|business|medicine|science)',
+            r'compare.*(?:universities|programs|majors)',
+            r'best.*(?:university|universities).*(?:for|offering|with)',
+            r'cheapest.*(?:university|program)',
+            r'lowest.*(?:cost|tuition|fee)',
+        ]
+        
+        for pattern in program_specific_patterns:
+            if re.search(pattern, user_lower):
+                return True
+        
+        # Check if user mentions specific major AND degree level (intent to study)
+        if student_state.major and student_state.degree_level:
+            # If asking about cost/tuition/deadline for this specific program
+            if any(term in user_lower for term in ['cost', 'tuition', 'fee', 'deadline', 'requirement', 'document']):
+                return True
+        
+        # Check for intake-specific queries
+        if student_state.intake_term or student_state.intake_year:
+            if any(term in user_lower for term in ['cost', 'tuition', 'fee', 'deadline', 'program', 'intake']):
+                return True
+        
+        # If asking "which universities" or "list universities" without program context, it's FAQ
+        if re.search(r'(?:which|what|list|show).*universities', user_lower):
+            # Check if it's asking about partnerships or general info (FAQ)
+            if any(term in user_lower for term in ['partner', 'work', 'connected', 'have', 'you']):
+                return False  # FAQ question
+            # Otherwise, if no program context, still treat as FAQ (general question)
+            if not (student_state.major or student_state.degree_level):
+                return False  # General question, not program-specific
+        
+        return False
+    
+    def _build_faq_cta(self, student_state: StudentProfileState) -> str:
+        """Build CTA after FAQ answer to collect missing lead fields"""
+        cta_parts = []
+        
+        # Check missing fields
+        missing_nationality = not student_state.nationality
+        missing_contact = not (student_state.phone or student_state.email or student_state.whatsapp or student_state.wechat)
+        missing_degree = not student_state.degree_level
+        missing_major = not student_state.major
+        
+        # Ask for nationality if missing
+        if missing_nationality:
+            cta_parts.append("your nationality")
+        
+        # Ask for contact if missing
+        if missing_contact:
+            if missing_nationality:
+                cta_parts.append("your contact information (phone, email, WhatsApp, or WeChat)")
+            else:
+                cta_parts.append("your contact information (phone, email, WhatsApp, or WeChat)")
+        
+        # Ask for degree level or major if both missing (only one question)
+        if missing_degree and missing_major:
+            cta_parts.append("your preferred degree level (Bachelor's, Master's, PhD, or Language program)")
+        elif missing_degree:
+            cta_parts.append("your preferred degree level")
+        elif missing_major:
+            cta_parts.append("your preferred major/subject")
+        
+        # Limit to max 2 questions
+        cta_parts = cta_parts[:2]
+        
+        if not cta_parts:
+            return "If you'd like personalized guidance for your specific situation, please share your study preferences (degree level, major, intake) and contact information."
+        
+        if len(cta_parts) == 1:
+            return f"To help you better, could you please share {cta_parts[0]}?"
+        else:
+            return f"To help you better, could you please share {cta_parts[0]} and {cta_parts[1]}?"
+    
     def _get_major_ids_by_fuzzy_match(self, major_name: str, degree_level: Optional[str] = None) -> List[int]:
         """
         Helper to get major IDs by fuzzy matching major name.
@@ -2227,6 +2642,50 @@ Return the JSON object:"""
                             elif is_partner:
                                 # It's a partner - don't mark as non-partner
                                 break
+        
+        # Step 0.8: FAQ Routing - Check if this is a general FAQ question (not program-specific)
+        # Only route to FAQ if:
+        # 1. FAQ service is available
+        # 2. Query is NOT program-specific (doesn't mention specific university/major/intake with cost/deadline)
+        # 3. FAQ match found above threshold OR keyword fast-path triggered
+        faq_match = None
+        faq_score = 0.0
+        is_program_specific = self._is_program_specific_query(user_message, student_state)
+        
+        print(f"DEBUG: FAQ routing - is_program_specific={is_program_specific}, faq_service_available={self.faq_service is not None}")
+        
+        if self.faq_service and not is_program_specific:
+            # Check keyword fast-path first
+            should_try_faq = self.faq_service._should_try_faq_match(user_message)
+            print(f"DEBUG: FAQ keyword fast-path triggered: {should_try_faq}")
+            
+            if should_try_faq:
+                faq_match, faq_score = self.faq_service.match(user_message, threshold=0.62)
+                print(f"DEBUG: FAQ match attempt (threshold=0.62): match={faq_match is not None}, score={faq_score:.2f}")
+            
+            # If no keyword match but still might be FAQ, try matching anyway (lower threshold)
+            if not faq_match:
+                faq_match, faq_score = self.faq_service.match(user_message, threshold=0.55)
+                print(f"DEBUG: FAQ match attempt (threshold=0.55): match={faq_match is not None}, score={faq_score:.2f}")
+        
+        # If FAQ match found and not program-specific, return FAQ answer + CTA
+        if faq_match and not is_program_specific:
+            print(f"DEBUG: FAQ match found (score={faq_score:.2f}): {faq_match['question'][:50]}...")
+            faq_answer = faq_match['answer']
+            cta = self._build_faq_cta(student_state)
+            
+            # Compose response: FAQ answer + CTA
+            response_text = f"{faq_answer}\n\n{cta}"
+            
+            return {
+                'response': response_text,
+                'db_context': '',
+                'rag_context': None,
+                'tavily_context': None,
+                'lead_collected': lead_collected,
+                'show_lead_form': False,
+                'lead_form_prefill': {}
+            }
         
         # Step 1: Query Database
         # Allow database queries if:
@@ -3991,18 +4450,10 @@ IMPORTANT:
                 
                 if comparison_intakes:
                     # Fix 3: Use deterministic formatter for list queries (>3 results)
+                    # Note: This is handled in generate_response, not here
+                    # _query_database_with_state only returns (db_context, matched_programs)
                     if len(comparison_intakes) > 3:
-                        print(f"DEBUG: Using deterministic formatter for list query ({len(comparison_intakes)} intakes)")
-                        response_text = self._format_list_page(comparison_intakes, 0, 12, len(comparison_intakes), sort_by_fees=True)
-                        return {
-                            'response': response_text,
-                            'db_context': '',
-                            'rag_context': rag_context,
-                            'tavily_context': None,
-                            'lead_collected': use_db,
-                            'show_lead_form': False,
-                            'lead_form_prefill': {}
-                        }
+                        print(f"DEBUG: Large comparison query ({len(comparison_intakes)} intakes) - will be formatted in generate_response")
                     
                     # For <=3 results, use LLM with compact context
                     # Format as comparative chart

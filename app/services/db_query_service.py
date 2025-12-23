@@ -516,6 +516,7 @@ class DBQueryService:
         intake_year: Optional[int] = None,
         duration_years_target: Optional[float] = None,
         duration_constraint: Optional[str] = None,
+        major_ids: Optional[List[int]] = None,  # New: filter by major IDs
         upcoming_only: bool = True,
         limit: int = 10
     ) -> List[Dict[str, Any]]:
@@ -987,7 +988,7 @@ class DBQueryService:
     def find_program_intakes(
         self,
         filters: Optional[Dict[str, Any]] = None,
-        limit: int = 24,
+        limit: int = 48,
         offset: int = 0,
         order_by: str = "deadline"  # "deadline", "start_date", "tuition"
     ) -> Tuple[List[ProgramIntake], int]:
@@ -1019,37 +1020,99 @@ class DBQueryService:
             )
         
         if filters:
+            # DETAILED LOGGING: Track each filter step
+            base_count = query.count()
+            print(f"DEBUG: find_program_intakes - Base query count (before filters): {base_count}")
+            
             if filters.get("university_id"):
                 query = query.filter(ProgramIntake.university_id == filters["university_id"])
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After university_id={filters['university_id']}: {count_after} intakes")
             elif filters.get("university_ids"):
                 # Filter by list of university IDs (IN clause)
-                query = query.filter(ProgramIntake.university_id.in_(filters["university_ids"]))
+                uni_ids = filters["university_ids"]
+                query = query.filter(ProgramIntake.university_id.in_(uni_ids))
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After university_ids={uni_ids} ({len(uni_ids)} universities): {count_after} intakes")
+                
+                # Check which majors exist for these universities
+                if filters.get("major_ids"):
+                    major_ids = filters["major_ids"]
+                    # Check how many ProgramIntakes exist for these university_ids (without major filter)
+                    intakes_for_unis = self.db.query(ProgramIntake).filter(
+                        ProgramIntake.university_id.in_(uni_ids)
+                    ).count()
+                    print(f"DEBUG: find_program_intakes - Total intakes for {len(uni_ids)} universities: {intakes_for_unis}")
+                    
+                    # Check which majors belong to these universities
+                    majors_for_unis = self.db.query(Major).filter(
+                        Major.university_id.in_(uni_ids)
+                    ).all()
+                    major_ids_for_unis = [m.id for m in majors_for_unis]
+                    print(f"DEBUG: find_program_intakes - Major IDs that belong to these {len(uni_ids)} universities: {major_ids_for_unis} ({len(major_ids_for_unis)} majors)")
+                    
+                    # Check overlap between requested major_ids and majors in these universities
+                    overlap = [mid for mid in major_ids if mid in major_ids_for_unis]
+                    print(f"DEBUG: find_program_intakes - Overlap between requested major_ids={major_ids} and majors in universities: {overlap} ({len(overlap)} matches)")
+                    
+                    if len(overlap) == 0:
+                        print(f"DEBUG: find_program_intakes - WARNING: None of the {len(major_ids)} requested major_ids belong to the {len(uni_ids)} universities!")
+                        # Show which majors were requested
+                        requested_majors = self.db.query(Major).filter(Major.id.in_(major_ids)).all()
+                        print(f"DEBUG: find_program_intakes - Requested majors: {[(m.id, m.name, m.university_id) for m in requested_majors[:5]]}")
+            
             if filters.get("major_ids"):
                 # Filter by list of major IDs (IN clause)
-                query = query.filter(ProgramIntake.major_id.in_(filters["major_ids"]))
+                major_ids = filters["major_ids"]
+                count_before = query.count()
+                query = query.filter(ProgramIntake.major_id.in_(major_ids))
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After major_ids={major_ids} ({len(major_ids)} majors): {count_before} -> {count_after} intakes")
+                
+                # Check how many ProgramIntakes exist for these major_ids (without other filters)
+                intakes_for_majors = self.db.query(ProgramIntake).filter(
+                    ProgramIntake.major_id.in_(major_ids)
+                ).count()
+                print(f"DEBUG: find_program_intakes - Total intakes for {len(major_ids)} majors (no other filters): {intakes_for_majors}")
             elif filters.get("major_id"):
                 query = query.filter(ProgramIntake.major_id == filters["major_id"])
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After major_id={filters['major_id']}: {count_after} intakes")
             if filters.get("major_text"):
                 # Search in major name
                 query = query.filter(Major.name.ilike(f"%{filters['major_text']}%"))
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After major_text='{filters['major_text']}': {count_after} intakes")
             if filters.get("degree_level"):
+                count_before = query.count()
                 query = query.filter(
                     or_(
                         ProgramIntake.degree_type.ilike(f"%{filters['degree_level']}%"),
                         Major.degree_level.ilike(f"%{filters['degree_level']}%")
                     )
                 )
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After degree_level='{filters['degree_level']}': {count_before} -> {count_after} intakes")
             if filters.get("teaching_language"):
+                count_before = query.count()
                 query = query.filter(
                     or_(
                         ProgramIntake.teaching_language.ilike(f"%{filters['teaching_language']}%"),
                         Major.teaching_language.ilike(f"%{filters['teaching_language']}%")
                     )
                 )
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After teaching_language='{filters['teaching_language']}': {count_before} -> {count_after} intakes")
             if filters.get("intake_term"):
+                count_before = query.count()
                 query = query.filter(ProgramIntake.intake_term == filters["intake_term"])
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After intake_term={filters['intake_term']}: {count_before} -> {count_after} intakes")
             if filters.get("intake_year"):
+                count_before = query.count()
                 query = query.filter(ProgramIntake.intake_year == filters["intake_year"])
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After intake_year={filters['intake_year']}: {count_before} -> {count_after} intakes")
             if filters.get("city"):
                 query = query.filter(University.city.ilike(f"%{filters['city']}%"))
             if filters.get("province"):
@@ -1082,6 +1145,32 @@ class DBQueryService:
                 if budget_conditions:
                     query = query.filter(or_(*budget_conditions))
             
+            # Free tuition filter (tuition_per_year = 0 or NULL, tuition_per_semester = 0 or NULL)
+            if filters.get("free_tuition") is True:
+                count_before = query.count()
+                # Filter for programs where both tuition fields are 0 or NULL
+                query = query.filter(
+                    or_(
+                        # Both are 0
+                        and_(
+                            or_(ProgramIntake.tuition_per_year == 0, ProgramIntake.tuition_per_year.is_(None)),
+                            or_(ProgramIntake.tuition_per_semester == 0, ProgramIntake.tuition_per_semester.is_(None))
+                        ),
+                        # tuition_per_year is 0 or NULL, tuition_per_semester is NULL
+                        and_(
+                            or_(ProgramIntake.tuition_per_year == 0, ProgramIntake.tuition_per_year.is_(None)),
+                            ProgramIntake.tuition_per_semester.is_(None)
+                        ),
+                        # tuition_per_year is NULL, tuition_per_semester is 0 or NULL
+                        and_(
+                            ProgramIntake.tuition_per_year.is_(None),
+                            or_(ProgramIntake.tuition_per_semester == 0, ProgramIntake.tuition_per_semester.is_(None))
+                        )
+                    )
+                )
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After free_tuition filter: {count_before} -> {count_after} intakes")
+            
             # Scholarship filter
             if filters.get("has_scholarship"):
                 query = query.join(ProgramIntakeScholarship, ProgramIntake.id == ProgramIntakeScholarship.program_intake_id)
@@ -1104,13 +1193,48 @@ class DBQueryService:
                         ProgramIntake.bank_statement_amount <= filters["bank_statement_amount"]
                     )
                 )
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After bank_statement_amount filter: {count_after} intakes")
+            if filters.get("bank_statement_required") is not None:
+                if filters["bank_statement_required"] is False:
+                    # Filter for programs that don't require bank statement (NULL or False)
+                    query = query.filter(
+                        or_(
+                            ProgramIntake.bank_statement_required.is_(None),
+                            ProgramIntake.bank_statement_required == False
+                        )
+                    )
+                else:
+                    query = query.filter(ProgramIntake.bank_statement_required == True)
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After bank_statement_required={filters['bank_statement_required']} filter: {count_after} intakes")
+            if filters.get("max_age") is not None:
+                # Filter for programs where age_max >= max_age (allows older students)
+                query = query.filter(
+                    or_(
+                        ProgramIntake.age_max.is_(None),
+                        ProgramIntake.age_max >= filters["max_age"]
+                    )
+                )
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After max_age>={filters['max_age']} filter: {count_after} intakes")
             if filters.get("hsk_required") is not None:
                 query = query.filter(ProgramIntake.hsk_required == filters["hsk_required"])
+            if filters.get("english_test_required") is not None:
+                query = query.filter(ProgramIntake.english_test_required == filters["english_test_required"])
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After english_test_required={filters['english_test_required']} filter: {count_after} intakes")
             if filters.get("inside_china_allowed") is not None:
-                query = query.filter(ProgramIntake.inside_china_allowed == filters["inside_china_allowed"])
+                query = query.filter(ProgramIntake.inside_china_applicants_allowed == filters["inside_china_allowed"])
         
         # Get total count before pagination
         total_count = query.count()
+        
+        # Check if query uses distinct (from scholarship joins)
+        # When using DISTINCT, ORDER BY expressions must appear in SELECT list
+        uses_distinct = False
+        if filters.get("has_scholarship") or filters.get("scholarship_type"):
+            uses_distinct = True
         
         # Ordering
         if order_by == "deadline":
@@ -1121,14 +1245,42 @@ class DBQueryService:
         elif order_by == "start_date":
             query = query.order_by(ProgramIntake.program_start_date.asc().nullslast())
         elif order_by == "tuition":
-            query = query.order_by(
-                func.coalesce(ProgramIntake.tuition_per_year, ProgramIntake.tuition_per_semester).asc().nullslast()
-            )
+            # When using DISTINCT, we need to use a subquery approach
+            # because ORDER BY expressions must appear in SELECT list
+            tuition_expr = func.coalesce(ProgramIntake.tuition_per_year, ProgramIntake.tuition_per_semester)
+            if uses_distinct:
+                # Use subquery: first get IDs ordered by tuition, then fetch full objects
+                # When using DISTINCT, we need to order by the expression that's in SELECT
+                # Create a subquery that selects IDs with tuition ordering
+                tuition_label = tuition_expr.label('_tuition_sort')
+                subquery = query.with_entities(ProgramIntake.id, tuition_label).distinct()
+                # Order by the same expression (must match what's in SELECT for DISTINCT)
+                subquery = subquery.order_by(tuition_expr.asc().nullslast())
+                subquery = subquery.offset(offset).limit(limit)
+                
+                # Get the ordered IDs
+                ordered_ids = [row[0] for row in subquery.all()]
+                
+                # Fetch full ProgramIntake objects in the same order
+                if ordered_ids:
+                    # Create a mapping to preserve order
+                    id_to_order = {intake_id: idx for idx, intake_id in enumerate(ordered_ids)}
+                    intakes = self.db.query(ProgramIntake).filter(ProgramIntake.id.in_(ordered_ids)).all()
+                    # Sort by the original order
+                    intakes.sort(key=lambda x: id_to_order.get(x.id, len(ordered_ids)))
+                else:
+                    intakes = []
+            else:
+                query = query.order_by(tuition_expr.asc().nullslast())
+                intakes = query.offset(offset).limit(limit).all()
         else:
             query = query.order_by(ProgramIntake.application_deadline.asc().nullslast())
+            intakes = query.offset(offset).limit(limit).all()
         
-        # Pagination
-        intakes = query.offset(offset).limit(limit).all()
+        # Pagination (only if not already handled above)
+        if order_by != "tuition" or not uses_distinct:
+            if 'intakes' not in locals():
+                intakes = query.offset(offset).limit(limit).all()
         
         return intakes, total_count
     
