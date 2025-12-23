@@ -118,29 +118,14 @@ class PartnerRouter:
             elif re.search(r'\bnext\s+intake\b', normalized, re.IGNORECASE):
                 state.wants_earliest = True
             # Don't set PAGINATION intent - continue to other intent detection
-        elif re.search(r'\b(next\s+page|show\s+more|more\s+results|continue|page\s*\d+|prev|previous|back|page\s+1|first\s+page)\b', normalized):
-            # FIX: Require explicit pagination phrases with "page" or "results" context
-            # Do NOT match bare "next" - must be "next page", "next page 2", "show more", "more results"
-            pagination_patterns = [
-                r'\bnext\s+page\s*\d*\b',  # "next page" or "next page 2"
-                r'\bshow\s+more\b',
-                r'\bmore\s+results\b',
-                r'\bpage\s*\d+\b',  # "page 2", "page 3"
-                r'\bcontinue\b',
-                r'\bprev\b',
-                r'\bprevious\b',
-                r'\bback\b',
-                r'\bfirst\s+page\b',
-            ]
-            is_pagination = any(re.search(pattern, normalized) for pattern in pagination_patterns)
-            
+        elif re.search(r'\b(next|more|show more|next page|page \d+|continue|prev|previous|back|page 1|first page)\b', normalized):
             # Check if it's a standalone pagination command (not part of a larger query)
             pagination_only_patterns = [
-                r'^(next\s+page|show\s+more|more\s+results|continue|page\s*\d+|prev|previous|back|page\s+1|first\s+page)$',
-                r'^(next\s+page|show\s+more|more\s+results|continue|page\s*\d+|prev|previous|back|page\s+1|first\s+page)\s*$',
-                r'^(show\s+more|next\s+page|previous\s+page|more\s+results)',
+                r'^(next|more|show more|next page|continue|prev|previous|back|page \d+|page 1|first page)$',
+                r'^(next|more|show more|next page|continue|prev|previous|back|page \d+|page 1|first page)\s*$',
+                r'^(show\s+more|next\s+page|previous\s+page)',
             ]
-            is_standalone_pagination = any(re.match(pattern, normalized.strip()) for pattern in pagination_only_patterns) or is_pagination
+            is_standalone_pagination = any(re.match(pattern, normalized.strip()) for pattern in pagination_only_patterns)
             
             if is_standalone_pagination:
                 state.intent = self.INTENT_PAGINATION

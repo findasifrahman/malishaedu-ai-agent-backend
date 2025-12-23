@@ -956,9 +956,9 @@ class DBQueryService:
             # Scholarship type filter (CSC vs university)
             if filters.get("scholarship_type"):
                 if filters["scholarship_type"].lower() == "csc":
-                    query = query.filter(Scholarship.scholarship_type.ilike("%CSC%"))
+                    query = query.filter(Scholarship.name.ilike("%CSC%"))
                 elif filters["scholarship_type"].lower() == "university":
-                    query = query.filter(~Scholarship.scholarship_type.ilike("%CSC%"))
+                    query = query.filter(~Scholarship.name.ilike("%CSC%"))
         
         # Order by nearest deadline
         query = query.order_by(ProgramIntake.application_deadline.asc(), ProgramIntake.program_start_date.asc())
@@ -1180,9 +1180,9 @@ class DBQueryService:
                     query = query.join(ProgramIntakeScholarship, ProgramIntake.id == ProgramIntakeScholarship.program_intake_id)
                     query = query.join(Scholarship, ProgramIntakeScholarship.scholarship_id == Scholarship.id)
                 if filters["scholarship_type"].lower() == "csc":
-                    query = query.filter(Scholarship.scholarship_type.ilike("%CSC%"))
+                    query = query.filter(Scholarship.name.ilike("%CSC%"))
                 elif filters["scholarship_type"].lower() == "university":
-                    query = query.filter(~Scholarship.scholarship_type.ilike("%CSC%"))
+                    query = query.filter(~Scholarship.name.ilike("%CSC%"))
                 query = query.distinct()
             
             # Requirements filters
@@ -1226,6 +1226,19 @@ class DBQueryService:
                 print(f"DEBUG: find_program_intakes - After english_test_required={filters['english_test_required']} filter: {count_after} intakes")
             if filters.get("inside_china_allowed") is not None:
                 query = query.filter(ProgramIntake.inside_china_applicants_allowed == filters["inside_china_allowed"])
+            
+            # Application fee filter (no application fee = 0 or NULL)
+            if filters.get("application_fee") is False:
+                count_before = query.count()
+                # Filter for programs where application_fee is 0 or NULL
+                query = query.filter(
+                    or_(
+                        ProgramIntake.application_fee == 0,
+                        ProgramIntake.application_fee.is_(None)
+                    )
+                )
+                count_after = query.count()
+                print(f"DEBUG: find_program_intakes - After application_fee=False (no application fee) filter: {count_before} -> {count_after} intakes")
         
         # Get total count before pagination
         total_count = query.count()
@@ -1292,7 +1305,7 @@ class DBQueryService:
         query = self.db.query(
             ProgramIntake.id,
             Scholarship.name,
-            Scholarship.scholarship_type
+            Scholarship.name
         ).join(
             ProgramIntakeScholarship, ProgramIntake.id == ProgramIntakeScholarship.program_intake_id
         ).join(

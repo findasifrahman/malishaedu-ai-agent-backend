@@ -61,6 +61,7 @@ class PartnerQueryState:
     
     # Fees flags
     wants_fees: bool = False
+    wants_free_tuition: bool = False  # Filter for programs with zero tuition (tuition_per_year = 0 or NULL AND tuition_per_semester = 0 or NULL)
     budget_max: Optional[float] = None
     
     # Scholarship flags
@@ -80,9 +81,9 @@ class PartnerQueryState:
     # Other
     wants_earliest: bool = False
     
-    # Clarification mode
-    is_clarifying: bool = False  # True if we're in clarification mode
-    pending_slot: Optional[str] = None  # Which slot we're waiting for (e.g. "degree_level", "intake_term")
+    # Clarification state
+    is_clarifying: bool = False  # Whether the agent is currently asking for clarification
+    pending_slot: Optional[str] = None  # The slot name that is pending clarification (e.g., "degree_level", "major_or_university")
     
     # Legacy fields (for backward compatibility)
     university: Optional[str] = None  # Alias for university_query
@@ -113,6 +114,7 @@ class PartnerQueryState:
                 "country": self.req_focus.country,
             },
             "wants_fees": self.wants_fees,
+            "wants_free_tuition": self.wants_free_tuition,
             "budget_max": self.budget_max,
             "wants_scholarship": self.wants_scholarship,
             "scholarship_focus": {

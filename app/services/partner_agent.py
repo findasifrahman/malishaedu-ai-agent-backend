@@ -44,6 +44,10 @@ class PendingState:
 class PartnerAgent:
     """Partner agent for answering questions about MalishaEdu universities and programs"""
     
+    # CLASS-LEVEL cache to persist across requests (since agent is instantiated per request)
+    _class_state_cache: Dict[Tuple[Optional[int], str], Dict[str, Any]] = {}
+    _class_state_cache_ttl: float = 1800.0  # 30 minutes TTL
+    
     # List query caps to prevent huge context
     MAX_LIST_UNIVERSITIES = 12
     MAX_LIST_INTAKES = 24
@@ -93,10 +97,7 @@ CRITICAL RULES:
         # Last pagination key by partner (for stable fallback)
         self._last_pagination_key_by_partner: Dict[Optional[int], Tuple[Optional[int], str]] = {}
     
-        # Unified state cache: keyed by (partner_id, conversation_id) -> {"state": PartnerQueryState, "pending": PendingInfo, "ts": float}
-        # PendingInfo = {"slot": str, "snapshot": dict}
-        self._state_cache: Dict[Tuple[Optional[int], str], Dict[str, Any]] = {}
-        self._state_cache_ttl: float = 1800.0  # 30 minutes TTL
+        # Note: State cache is now class-level (PartnerAgent._class_state_cache) to persist across requests
         
         # Legacy pending slot cache (for backward compatibility during migration)
         self._pending_slot_cache: Dict[Tuple[Optional[int], str], Dict[str, Any]] = {}
@@ -317,16 +318,16 @@ CRITICAL RULES:
             print(f"DEBUG: _get_cached_state - conversation_id is None, returning None")
             return None
         key = (partner_id, conversation_id)
-        print(f"DEBUG: _get_cached_state - key={key}, cache_keys={list(self._state_cache.keys())}")
-        if key in self._state_cache:
-            cached = self._state_cache[key]
+        print(f"DEBUG: _get_cached_state - key={key}, cache_keys={list(self._class_state_cache.keys())}")
+        if key in self._class_state_cache:
+            cached = self._class_state_cache[key]
             age = time.time() - cached.get("ts", 0)
-            if age < self._state_cache_ttl:
+            if age < self._class_state_cache_ttl:
                 print(f"DEBUG: _get_cached_state - found cached state (age={age:.1f}s, pending={cached.get('pending') is not None})")
                 return cached
             else:
-                print(f"DEBUG: _get_cached_state - cached state expired (age={age:.1f}s > {self._state_cache_ttl}s)")
-                del self._state_cache[key]
+                print(f"DEBUG: _get_cached_state - cached state expired (age={age:.1f}s > {self._class_state_cache_ttl}s)")
+                del self._class_state_cache[key]
         else:
             print(f"DEBUG: _get_cached_state - key not found in cache")
         return None
@@ -337,7 +338,7 @@ CRITICAL RULES:
         if not conversation_id:
             return
         key = (partner_id, conversation_id)
-        self._state_cache[key] = {
+        self._class_state_cache[key] = {
             "state": state,
             "pending": pending,
             "ts": time.time()
@@ -379,7 +380,7 @@ CRITICAL RULES:
                 "budget_max": snapshot.budget_max,
                 "duration_years_target": snapshot.duration_years_target,
                 "duration_constraint": snapshot.duration_constraint,
-                "_duration_fallback_intakes": getattr(snapshot, '_duration_fallback_intakes', None),
+                "_duration_fallback_intake_ids": getattr(snapshot, '_duration_fallback_intake_ids', None),
                 "_duration_fallback_available": getattr(snapshot, '_duration_fallback_available', None),
                 "_university_candidates": getattr(snapshot, '_university_candidates', None),
                 "_university_candidate_ids": getattr(snapshot, '_university_candidate_ids', None),
@@ -461,7 +462,7 @@ RULES:
 - For deadline questions (e.g., "application deadline", "when is the deadline"), set wants_deadline=true and intent can be GENERAL if no other intent is clear.
 - CRITICAL: If user asks "which universities" or "list universities" (even with fee comparison like "lowest fees"), set intent="LIST_UNIVERSITIES" (NOT FEES). Set wants_fees=true if fees are mentioned.
 - For fee-related questions (e.g., "tuition fee", "tuition", "fee", "cost", "price", "bank statement amount"), set wants_fees=true and intent=FEES (unless it's a "which universities" query).
-- For scholarship questions (e.g., "scholarship", "scholarship info", "scholarship opportunity"), set wants_scholarship=true and intent=SCHOLARSHIP.
+- For scholarship questions (e.g., "scholarship", "scholarship info", "scholarship opportunity", "requiring CSC/CSCA", "requiring CSC", "requiring CSCA"), set wants_scholarship=true and intent=SCHOLARSHIP. Do NOT set wants_requirements=true for CSC/CSCA scholarship queries - "requiring CSC/CSCA" means scholarship requirement, not document requirements.
 - For accommodation questions (e.g., "accommodation", "accommodation facility", "housing", "dormitory"), set wants_fees=true and intent=FEES (accommodation info is part of fees).
 - For "offered majors", "offered subjects", "available majors", "list of majors", set intent=LIST_PROGRAMS.
 - For city/province: Extract city names (e.g., "Guangzhou", "Beijing", "Shanghai", "Shenzhen", "Hangzhou", "Nanjing", "Chengdu", "Xian", "Wuhan", "Tianjin", "Dalian", "Qingdao") and province names (e.g., "Guangdong", "Jiangsu", "Zhejiang", "Sichuan", "Shaanxi", "Hubei", "Shandong", "Hunan", "Beijing", "Shanghai", "Tianjin"). Handle common typos (e.g., "guangzou" -> "Guangzhou", "guangjou" -> "Guangzhou"). City/province is NOT a university or major - it's a location filter.
@@ -581,8 +582,9 @@ Output ONLY valid JSON, no other text:"""
         
         text_lower = text.lower()
         
-        # Acronym expansion map (includes ECE, BBA, LLB, etc.)
+        # Acronym expansion map (includes ECE, BBA, LLB, MBBS, MD, MPhil, etc.)
         acronym_map = {
+            # Computer Science & Engineering
             "cse": "computer science",
             "cs": "computer science",
             "ce": "computer engineering",
@@ -597,22 +599,69 @@ Output ONLY valid JSON, no other text:"""
             "nlp": "natural language processing",
             "bme": "biomedical engineering",
             "mse": "materials science engineering",
+            # Sciences
             "chem": "chemistry",
             "bio": "biology",
             "phy": "physics",
             "math": "mathematics",
             "econ": "economics",
             "fin": "finance",
+            # Business & Management
             "bba": "bachelor of business administration",
             "mba": "master of business administration",
+            "bcom": "bachelor of commerce",
+            "mcom": "master of commerce",
+            # Law
             "llb": "bachelor of laws",
+            "llm": "master of laws",
+            "jd": "juris doctor",
+            # Medicine & Health Sciences
+            "mbbs": "bachelor of medicine and bachelor of surgery",
+            "md": "doctor of medicine",
+            "ms": "master of surgery",
+            "dm": "doctor of medicine",
+            "mch": "master of surgery",
+            "bds": "bachelor of dental surgery",
+            "mds": "master of dental surgery",
+            "bpharm": "bachelor of pharmacy",
+            "mpharm": "master of pharmacy",
+            "bpt": "bachelor of physiotherapy",
+            "mpt": "master of physiotherapy",
+            "bsc nursing": "bachelor of science in nursing",
+            "msc nursing": "master of science in nursing",
+            "bvsc": "bachelor of veterinary science",
+            "mvsc": "master of veterinary science",
+            # Arts & Humanities
+            "ba": "bachelor of arts",
+            "ma": "master of arts",
+            "bsc": "bachelor of science",
+            "msc": "master of science",
+            "btech": "bachelor of technology",
+            "mtech": "master of technology",
+            "bed": "bachelor of education",
+            "med": "master of education",
+            # Research Degrees
+            "mphil": "master of philosophy",
+            "phd": "doctor of philosophy",
+            "dphil": "doctor of philosophy",
+            "dsc": "doctor of science",
+            "dlitt": "doctor of letters",
+            # Architecture & Design
+            "barch": "bachelor of architecture",
+            "march": "master of architecture",
+            # Other Professional Degrees
+            "ca": "chartered accountant",
+            "cpa": "certified public accountant",
+            "cfa": "chartered financial analyst",
         }
         
         # Check if text is short (<=6 chars) or all-caps-like (mostly uppercase)
+        # Also check for longer medical/law acronyms (MBBS, MPhil, etc.)
         is_short = len(text.replace(' ', '')) <= 6
         is_caps_like = len([c for c in text if c.isupper()]) > len([c for c in text if c.islower()]) if text else False
+        is_long_acronym = len(text.replace(' ', '')) <= 8 and text.replace(' ', '').isupper()  # For MBBS, MPhil, etc.
         
-        if is_short or is_caps_like:
+        if is_short or is_caps_like or is_long_acronym:
             for abbrev, expansion in acronym_map.items():
                 # Match whole word only (case-insensitive)
                 pattern = r'\b' + re.escape(abbrev) + r'\b'
@@ -986,11 +1035,11 @@ Output ONLY valid JSON, no other text:"""
             result["wants_list"] = True
             result["intent"] = "list_programs"
         # Fee comparison can be combined with list queries (set wants_fees flag)
-        # Also detect "free tuition" queries
+        # Also detect "free tuition" queries - includes "no fee", "zero fee" as free tuition indicators
         if re.search(r'\b(cheapest|lowest|lowest\s+fees?|lowest\s+tuition|less\s+fee|low\s+fee|lowest\s+cost|less\s+cost|compare|comparison|free\s+tuition|tuition\s+free|zero\s+tuition|no\s+tuition|tuition\s+is\s+free|tuition\s+0|tuition\s+zero)\b', lower):
             result["wants_fees"] = True
-            # Check if it's a "free tuition" query
-            if re.search(r'\b(free\s+tuition|tuition\s+free|zero\s+tuition|no\s+tuition|tuition\s+is\s+free|tuition\s+0|tuition\s+zero)\b', lower):
+            # Check if it's a "free tuition" query - includes "no fee", "zero fee", "without fee"
+            if re.search(r'\b(free\s+tuition|tuition\s+free|zero\s+tuition|no\s+tuition|tuition\s+is\s+free|tuition\s+0|tuition\s+zero|no\s+fee|zero\s+fee|without\s+fee|no\s+fees|zero\s+fees|without\s+fees)\b', lower):
                 result["wants_free_tuition"] = True
             # Only set fees_compare if not already a list intent
             if result.get("intent") not in ["list_universities", "list_programs"]:
@@ -1061,11 +1110,24 @@ Output ONLY valid JSON, no other text:"""
             cleaned = re.sub(r'\b(english|chinese|taught|in|at|for|the|a|an|and|or|of|to|from|china)\b', '', cleaned, flags=re.IGNORECASE)
             cleaned = re.sub(r'\s+', ' ', cleaned).strip()
             
-            # If cleaned text has meaningful content, treat as major
+                # If cleaned text has meaningful content, treat as major
             if cleaned and len(cleaned.split()) >= 1:
-                # Check if it's not just a city/province
-                city_province_keywords = ["guangzhou", "beijing", "shanghai", "guangdong", "jiangsu", "zhejiang"]
-                if cleaned.lower() not in city_province_keywords:
+                # Check if it's not a city/province by querying the database
+                # This is more accurate than a hardcoded list
+                is_city_or_province = False
+                try:
+                    # Use DBQueryService to check if it's a city/province
+                    from app.services.db_query_service import DBQueryService
+                    db_service = DBQueryService(self.db)
+                    cities = db_service.search_universities(city=cleaned, is_partner=True, limit=1)
+                    provinces = db_service.search_universities(province=cleaned, is_partner=True, limit=1)
+                    if cities or provinces:
+                        is_city_or_province = True
+                        print(f"DEBUG: '{cleaned}' detected as city/province, not treating as major")
+                except Exception as e:
+                    print(f"DEBUG: Error checking city/province: {e}")
+                
+                if not is_city_or_province:
                     result["major_raw"] = cleaned
         
         # Expand acronyms if major_raw is a known acronym
@@ -1203,7 +1265,7 @@ Output ONLY valid JSON, no other text:"""
                         if major_match:
                             accepted_major = major_match.group(1).strip()
                             print(f"DEBUG: Extracted accepted major from previous message: '{accepted_major}'")
-                            break
+                    break
         
         # Also check if user is directly typing a major name (e.g., "Computer Science and Technology" after seeing a list)
         # This handles cases where user types the exact major name from a numbered list
@@ -1217,7 +1279,7 @@ Output ONLY valid JSON, no other text:"""
                     accepted_major = latest_user_message.strip()
                     print(f"DEBUG: Detected major selection from list: '{accepted_major}'")
                     break
-        
+            
         # Check if user is clearly changing intent (e.g., "now change to", "instead", "admission requirements")
         intent_change_keywords = ["now change to", "instead", "admission requirements", "fee calculation", "calculate fees", "actually i want", "not scholarship"]
         is_intent_change = any(kw in latest_user_message.lower() for kw in intent_change_keywords)
@@ -1411,10 +1473,14 @@ Output ONLY valid JSON, no other text:"""
                     state.duration_years_target = duration_parsed
                     state.duration_constraint = "approx"  # Use approx for language programs
                     
-                    # CRITICAL: Use stored intakes from duration fallback instead of re-querying
-                    stored_intakes = snapshot.get("_duration_fallback_intakes", [])
-                    if stored_intakes:
-                        print(f"DEBUG: Duration reply - using {len(stored_intakes)} stored intakes from previous query, filtering by duration={duration_parsed}")
+                    # CRITICAL: Use stored intake IDs from duration fallback and re-query to avoid detached session errors
+                    stored_intake_ids = snapshot.get("_duration_fallback_intake_ids", [])
+                    if stored_intake_ids:
+                        print(f"DEBUG: Duration reply - re-querying {len(stored_intake_ids)} intakes by ID from previous query, filtering by duration={duration_parsed}")
+                        # Re-query intakes from database using stored IDs to avoid detached session errors
+                        from app.models import ProgramIntake
+                        stored_intakes = self.db.query(ProgramIntake).filter(ProgramIntake.id.in_(stored_intake_ids)).all()
+                        
                         # Filter stored intakes by duration
                         filtered_intakes = []
                         for intake in stored_intakes:
@@ -1485,61 +1551,81 @@ Output ONLY valid JSON, no other text:"""
                         return state
             elif pending_slot == "university_choice":
                 # User selected a university from a list
-                # First check against stored candidates from snapshot
-                candidates = snapshot.get("_university_candidates", [])
-                candidate_ids = snapshot.get("_university_candidate_ids", [])
-                
-                user_input_lower = latest_user_message.strip().lower()
-                matched_index = None
-                
-                # Try to match against candidates first
-                if candidates:
-                    for i, candidate in enumerate(candidates):
-                        candidate_lower = candidate.lower().strip()
-                        # Exact match
-                        if user_input_lower == candidate_lower:
-                            matched_index = i
-                            break
-                        # Partial match (user input contains candidate or vice versa)
-                        if user_input_lower in candidate_lower or candidate_lower in user_input_lower:
-                            matched_index = i
-                            break
-                
-                if matched_index is not None and matched_index < len(candidate_ids):
-                    # Matched a candidate
-                    selected_uni_name = candidates[matched_index]
-                    selected_uni_id = candidate_ids[matched_index]
-                    state.university_query = selected_uni_name
-                    state._resolved_university_id = selected_uni_id
-                    print(f"DEBUG: User selected university '{state.university_query}' (ID: {state._resolved_university_id}) from candidates")
-                    # Preserve context: major, degree, intake from snapshot (already restored above)
-                    self._consume_pending(partner_id, conversation_id)
-                else:
-                    # Not in candidates - try fuzzy matching
-                    uni = self.parse_university_query(latest_user_message)
-                    if uni:
-                        matched, uni_dict, _ = self._fuzzy_match_university(uni)
-                        if matched and uni_dict:
-                            state.university_query = uni_dict.get("name")
-                            state._resolved_university_id = uni_dict.get("id")
-                            print(f"DEBUG: User selected university '{state.university_query}' (ID: {state._resolved_university_id}) via fuzzy match")
-                            self._consume_pending(partner_id, conversation_id)
-                        else:
-                            # Could not match - keep pending
-                            print(f"DEBUG: Could not match university from '{latest_user_message}', keeping pending")
-                            return state
+                # First check if user selected by number (1, 2, 3, etc.)
+                num_match = re.match(r'^(\d+)$', latest_user_message.strip())
+                if num_match:
+                    # User selected by number - get the candidate from the list
+                    selected_num = int(num_match.group(1))
+                    candidates = snapshot.get("_university_candidates", [])
+                    candidate_ids = snapshot.get("_university_candidate_ids", [])
+                    if 1 <= selected_num <= len(candidates):
+                        selected_uni_name = candidates[selected_num - 1]
+                        selected_uni_id = candidate_ids[selected_num - 1] if selected_num <= len(candidate_ids) else None
+                        state.university_query = selected_uni_name
+                        if selected_uni_id:
+                            state._resolved_university_id = selected_uni_id
+                        print(f"DEBUG: User selected university #{selected_num}: '{selected_uni_name}' (ID: {state._resolved_university_id})")
+                        # Preserve context: major, degree, intake from snapshot (already restored above)
+                        self._consume_pending(partner_id, conversation_id)
                     else:
-                        # Try fuzzy matching on the raw message
-                        matched, uni_dict, _ = self._fuzzy_match_university(latest_user_message)
-                        if matched and uni_dict:
-                            state.university_query = uni_dict.get("name")
-                            state._resolved_university_id = uni_dict.get("id")
-                            print(f"DEBUG: User selected university '{state.university_query}' (ID: {state._resolved_university_id}) via fuzzy match on raw message")
-                            self._consume_pending(partner_id, conversation_id)
+                        print(f"DEBUG: Invalid selection number {selected_num}, keeping pending")
+                        return state
+                else:
+                    # User typed the university name - try to match against candidates
+                    candidates = snapshot.get("_university_candidates", [])
+                    candidate_ids = snapshot.get("_university_candidate_ids", [])
+                    
+                    user_input_lower = latest_user_message.strip().lower()
+                    matched_index = None
+                    
+                    # Try to match against candidates first
+                    if candidates:
+                        for i, candidate in enumerate(candidates):
+                            candidate_lower = candidate.lower().strip()
+                            # Exact match
+                            if user_input_lower == candidate_lower:
+                                matched_index = i
+                                break
+                            # Partial match (user input contains candidate or vice versa)
+                            if user_input_lower in candidate_lower or candidate_lower in user_input_lower:
+                                matched_index = i
+                                break
+                    
+                    if matched_index is not None and matched_index < len(candidate_ids):
+                        # Matched a candidate
+                        selected_uni_name = candidates[matched_index]
+                        selected_uni_id = candidate_ids[matched_index]
+                        state.university_query = selected_uni_name
+                        state._resolved_university_id = selected_uni_id
+                        print(f"DEBUG: User selected university '{state.university_query}' (ID: {state._resolved_university_id}) from candidates")
+                        # Preserve context: major, degree, intake from snapshot (already restored above)
+                        self._consume_pending(partner_id, conversation_id)
+                    else:
+                        # Not in candidates - try fuzzy matching
+                        uni = self.parse_university_query(latest_user_message)
+                        if uni:
+                            matched, uni_dict, _ = self._fuzzy_match_university(uni)
+                            if matched and uni_dict:
+                                state.university_query = uni_dict.get("name")
+                                state._resolved_university_id = uni_dict.get("id")
+                                print(f"DEBUG: User selected university '{state.university_query}' (ID: {state._resolved_university_id}) via fuzzy match")
+                                self._consume_pending(partner_id, conversation_id)
+                            else:
+                                # Could not match - keep pending
+                                print(f"DEBUG: Could not match university from '{latest_user_message}', keeping pending")
+                                return state
                         else:
-                            # Could not match - keep pending
-                            print(f"DEBUG: Could not match university from '{latest_user_message}', keeping pending")
-                            return state
+                            # Try fuzzy matching on the raw message
+                            matched, uni_dict, _ = self._fuzzy_match_university(latest_user_message)
+                            if matched and uni_dict:
+                                state.university_query = uni_dict.get("name")
+                                state._resolved_university_id = uni_dict.get("id")
+                                print(f"DEBUG: User selected university '{state.university_query}' (ID: {state._resolved_university_id}) via fuzzy match on raw message")
+                                self._consume_pending(partner_id, conversation_id)
+                            else:
+                                # Could not match - keep pending
+                                print(f"DEBUG: Could not match university from '{latest_user_message}', keeping pending")
+                                return state
             elif pending_slot == "major_or_university":
                 # Parse multiple values from the same message (e.g., "mARCH, Physics")
                 major = self.parse_major_query(latest_user_message)
@@ -2030,6 +2116,7 @@ Output ONLY valid JSON, no other text:"""
             prev_wants_list = False
             prev_wants_fees = False
             prev_wants_free_tuition = False
+            prev_scholarship_focus = None
             if partner_id and conversation_id:
                 cached = self._get_cached_state(partner_id, conversation_id)
                 if cached and cached.get("state"):
@@ -2046,20 +2133,38 @@ Output ONLY valid JSON, no other text:"""
                     if hasattr(prev_cached_state, 'wants_free_tuition') and prev_cached_state.wants_free_tuition:
                         prev_wants_free_tuition = True
                         print(f"DEBUG: Found previous wants_free_tuition=True in cache")
+                    # CRITICAL: Preserve scholarship_focus from cached state
+                    if hasattr(prev_cached_state, 'scholarship_focus') and prev_cached_state.scholarship_focus:
+                        prev_scholarship_focus = prev_cached_state.scholarship_focus
+                        print(f"DEBUG: Found previous scholarship_focus in cache: csc={getattr(prev_scholarship_focus, 'csc', False)}")
             
-            # Also check conversation history for "which university" patterns and "free tuition"
+            # Also check conversation history for "which university" patterns, "free tuition", and "CSC scholarship"
             is_list_query_from_history = False
             is_free_tuition_from_history = False
+            is_csc_from_history = False
             for msg in reversed(conversation_history[-6:]):  # Check last 6 messages
                 content = msg.get('content', '').lower()
                 if 'which university' in content or 'list universities' in content or 'which universities' in content or 'offers free' in content:
                     is_list_query_from_history = True
                     print(f"DEBUG: Detected list query from conversation history: '{content[:50]}...'")
-                if 'free tuition' in content or 'tuition free' in content or 'zero tuition' in content or 'free tution' in content:
+                # Check for free tuition indicators including "no fee", "zero fee", "without fee"
+                free_tuition_patterns = [
+                    'free tuition', 'tuition free', 'zero tuition', 'free tution', 
+                    'no fee', 'zero fee', 'without fee', 'no fees', 'zero fees', 'without fees'
+                ]
+                if any(pattern in content for pattern in free_tuition_patterns):
                     is_free_tuition_from_history = True
                     print(f"DEBUG: Detected free tuition query from conversation history: '{content[:50]}...'")
+                # Check for CSC/CSCA scholarship indicators
+                csc_patterns = [
+                    'csc scholarship', 'csca scholarship', 'china scholarship council', 
+                    'csc', 'csca', 'offering csc', 'with csc'
+                ]
+                if any(pattern in content for pattern in csc_patterns):
+                    is_csc_from_history = True
+                    print(f"DEBUG: Detected CSC scholarship from conversation history: '{content[:50]}...'")
                 if is_list_query_from_history:
-                    break
+                                break
             
             print(f"DEBUG: Calling llm_extract_state() for fresh query...")
             extracted = self.llm_extract_state(conversation_history, date.today(), prev_state)
@@ -2092,11 +2197,65 @@ Output ONLY valid JSON, no other text:"""
                 state.intent = extracted.get("intent", "GENERAL")
             state.confidence = extracted.get("confidence", 0.5)
             
+            # CRITICAL: Preserve free_tuition flag from conversation history regardless of intent path
+            # This ensures "no fee" requirement persists through slot replies like "March" or "1 year"
+            if is_free_tuition_from_history:
+                state.wants_free_tuition = True
+                state.wants_fees = True  # Also set wants_fees for free tuition queries
+                print(f"DEBUG: Preserved wants_free_tuition=True from conversation history (applying to all query paths)")
+            
             # Map extracted fields to state
             state.degree_level = extracted.get("degree_level")
             state.major_query = extracted.get("major_raw")  # Will be resolved later
             state.university_query = extracted.get("university_raw")  # Will be resolved later
             state.intake_term = extracted.get("intake_term")
+            
+            # CRITICAL: If major_query contains acronyms like LLB, BBA, MBA, infer degree_level
+            # This prevents unnecessary clarification for degree level when it's already implied
+            if state.major_query and not state.degree_level:
+                major_lower = state.major_query.lower()
+                # Check if it's a known acronym that implies degree level
+                if major_lower in ['llb', 'bba', 'bcom'] or any(major_lower.startswith(acr) for acr in ['llb ', 'bba ', 'bcom ']):
+                    state.degree_level = "Bachelor"
+                    print(f"DEBUG: Inferred degree_level=Bachelor from major_query acronym: '{state.major_query}'")
+                elif major_lower in ['mba', 'llm', 'mcom'] or any(major_lower.startswith(acr) for acr in ['mba ', 'llm ', 'mcom ']):
+                    state.degree_level = "Master"
+                    print(f"DEBUG: Inferred degree_level=Master from major_query acronym: '{state.major_query}'")
+                else:
+                    # Expand acronym and check if expanded version contains degree level keywords
+                    expanded_major = self._expand_major_acronym(state.major_query)
+                    if expanded_major != state.major_query:
+                        expanded_lower = expanded_major.lower()
+                        if expanded_lower.startswith('bachelor of'):
+                            state.degree_level = "Bachelor"
+                            print(f"DEBUG: Inferred degree_level=Bachelor from expanded major_query: '{expanded_major}'")
+                        elif expanded_lower.startswith('master of'):
+                            state.degree_level = "Master"
+                            print(f"DEBUG: Inferred degree_level=Master from expanded major_query: '{expanded_major}'")
+            
+            # CRITICAL: Preserve scholarship_focus from cached state if available
+            if prev_scholarship_focus:
+                state.scholarship_focus = prev_scholarship_focus
+                print(f"DEBUG: Preserved scholarship_focus from cached state: csc={getattr(state.scholarship_focus, 'csc', False)}")
+            
+            # CRITICAL: Extract CSC/CSCA scholarship flag from parse_query_rules OR conversation history
+            # This must happen BEFORE setting wants_requirements to avoid false positives
+            parsed_rules = self.parse_query_rules(latest_user_message)
+            # Check both latest message and conversation history for CSC
+            if parsed_rules.get("wants_csca_scholarship") or is_csc_from_history:
+                # Initialize scholarship_focus if not already set
+                if not hasattr(state, 'scholarship_focus') or not state.scholarship_focus:
+                    from app.services.slot_schema import ScholarshipFocus
+                    state.scholarship_focus = ScholarshipFocus(any=True, csc=True, university=False)
+                else:
+                    # Preserve existing scholarship_focus but set CSC flag
+                    state.scholarship_focus.csc = True
+                state.wants_scholarship = True
+                # CRITICAL: For CSC/CSCA queries, this is a scholarship query, NOT a requirements query
+                # The word "requiring" in "requiring CSC/CSCA" refers to scholarship requirement, not document requirements
+                state.wants_requirements = False
+                source = "conversation history" if is_csc_from_history and not parsed_rules.get("wants_csca_scholarship") else "parse_query_rules"
+                print(f"DEBUG: Detected CSC/CSCA scholarship requirement from {source} - set wants_scholarship=True, wants_requirements=False, scholarship_focus.csc=True")
             state.intake_year = extracted.get("intake_year")
             # Parse teaching_language from extracted or from latest message if not extracted
             state.teaching_language = extracted.get("teaching_language")
@@ -2105,19 +2264,41 @@ Output ONLY valid JSON, no other text:"""
                 state.teaching_language = self.parse_teaching_language(latest_user_message)
             
             # Extract city and province (with fuzzy matching fallback from parse_query_rules)
+            # BUT: Check if LLM extracted a university first - if so, don't treat it as a city
             state.city = extracted.get("city")
             state.province = extracted.get("province")
+            
+            # CRITICAL: If LLM extracted a city, check if it's actually a university name
+            # This prevents "Nanchang University" from being treated as just "Nanchang" city
+            if state.city:
+                # Try to match the city name as a university (in case it's "Nanchang" from "Nanchang University")
+                city_name = state.city  # Store original city name before checking
+                matched, uni_dict, _ = self._fuzzy_match_university(city_name)
+                if matched and uni_dict:
+                    # It's actually a university, not a city
+                    state.university_query = uni_dict.get("name")
+                    state._resolved_university_id = uni_dict.get("id")
+                    state.city = None  # Clear city since it's actually a university
+                    print(f"DEBUG: LLM extracted '{city_name}' as city, but it's actually a university: {state.university_query}")
+                else:
+                    print(f"DEBUG: Extracted city from LLM: {state.city}")
+            
             # Fallback: if LLM didn't extract city/province, try parse_query_rules (handles typos and "in X" patterns)
             if not state.city and not state.province:
                 rules = self.parse_query_rules(latest_user_message)
                 if rules.get("city"):
-                    state.city = rules.get("city")
-                    print(f"DEBUG: Extracted city from parse_query_rules: {state.city}")
+                    # Also check if parse_query_rules city is actually a university
+                    matched, uni_dict, _ = self._fuzzy_match_university(rules.get("city"))
+                    if matched and uni_dict:
+                        state.university_query = uni_dict.get("name")
+                        state._resolved_university_id = uni_dict.get("id")
+                        print(f"DEBUG: parse_query_rules extracted '{rules.get('city')}' as city, but it's actually a university: {state.university_query}")
+                    else:
+                        state.city = rules.get("city")
+                        print(f"DEBUG: Extracted city from parse_query_rules: {state.city}")
                 if rules.get("province"):
                     state.province = rules.get("province")
                     print(f"DEBUG: Extracted province from parse_query_rules: {state.province}")
-            elif state.city:
-                print(f"DEBUG: Extracted city from LLM: {state.city}")
             elif state.province:
                 print(f"DEBUG: Extracted province from LLM: {state.province}")
             
@@ -2164,21 +2345,25 @@ Output ONLY valid JSON, no other text:"""
                 print(f"DEBUG: Deadline query detected - will preserve intake_term and intake_year filters if provided")
             state.duration_years_target = extracted.get("duration_years")
             state.wants_earliest = extracted.get("wants_earliest", False)
-            state.wants_scholarship = extracted.get("wants_scholarship", False)
-            state.wants_requirements = extracted.get("wants_requirements", False)
+            # CRITICAL: Only set wants_scholarship from extracted if CSC/CSCA was NOT detected
+            # If CSC/CSCA was detected above (from parsed_rules OR conversation history), wants_scholarship is already set to True
+            if not parsed_rules.get("wants_csca_scholarship") and not is_csc_from_history:
+                state.wants_scholarship = extracted.get("wants_scholarship", False)
+            # Otherwise, it's already set to True above
+            # CRITICAL: Only set wants_requirements if CSC/CSCA was NOT detected
+            # If CSC/CSCA was detected above (from parsed_rules OR conversation history), wants_requirements is already set to False
+            if not parsed_rules.get("wants_csca_scholarship") and not is_csc_from_history:
+                state.wants_requirements = extracted.get("wants_requirements", False)
+            # Otherwise, it's already set to False above
             # CRITICAL: Only set wants_fees from extracted if not already set from history/cache
             if not hasattr(state, 'wants_fees') or not state.wants_fees:
                 state.wants_fees = extracted.get("wants_fees", False)
-            # CRITICAL: Only set wants_free_tuition from extracted if not already set from history/cache
+            # CRITICAL: Only set wants_free_tuition from extracted/rules if not already set from history/cache
             if not hasattr(state, 'wants_free_tuition') or not state.wants_free_tuition:
-                # Check rules_result for wants_free_tuition
+                # Check rules_result for wants_free_tuition (includes "no fee", "zero fee" patterns)
                 if rules_result.get("wants_free_tuition"):
                     state.wants_free_tuition = True
-            state.wants_deadline = extracted.get("wants_deadline", False)
-            # Fallback: parse from latest message if LLM didn't extract it
-            if not state.wants_deadline:
-                rules = self.parse_query_rules(latest_user_message)
-                state.wants_deadline = rules.get("wants_deadline", False)
+                    print(f"DEBUG: Set wants_free_tuition=True from parse_query_rules")
             
             # CRITICAL: For slot replies like "September", preserve wants_deadline from previous context
             # This happens BEFORE context preservation, so we check cached state here too
@@ -2205,6 +2390,10 @@ Output ONLY valid JSON, no other text:"""
                 print(f"DEBUG: Deadline query detected - will preserve intake_term and intake_year filters if provided")
             state.page_action = extracted.get("page_action", "none")
             
+            # CRITICAL: Initialize has_university_pattern early to avoid UnboundLocalError
+            # This variable is used in multiple places to detect university switches
+            has_university_pattern = False
+            
             # CONTEXT PRESERVATION: Always preserve key fields (major, university, teaching_language, intake, degree_level)
             # unless user explicitly changes them or changes intent in a way that doesn't make sense
             # Check if user is changing intent (e.g., "what about fees?", "does it require bank_statement?")
@@ -2215,6 +2404,9 @@ Output ONLY valid JSON, no other text:"""
             # Check if this is a list query that should preserve context
             # Check both current state and previous cached state for list intent
             is_list_query = state.intent in [self.router.INTENT_LIST_PROGRAMS, self.router.INTENT_LIST_UNIVERSITIES]
+            
+            # Initialize cached to None to avoid UnboundLocalError when conversation_id is None
+            cached = None
             
             # Always try to preserve context from cached state if available (even if prev_state is None)
             if partner_id and conversation_id:
@@ -2247,6 +2439,31 @@ Output ONLY valid JSON, no other text:"""
                     user_changed_university = False
                     user_changed_degree = False
                     user_changed_intake = False
+                    
+                    # CRITICAL: Check for explicit university changes in short messages like "What about LNPU?"
+                    # This must happen BEFORE context preservation to ensure new university is used
+                    # Always check for university patterns in short messages (likely university switches)
+                    has_university_pattern = False
+                    is_short_message = len(latest_user_message.split()) <= 5
+                    if is_short_message:
+                        # Check for patterns like "what about X", "how about X", "X university", etc.
+                        uni_patterns = [
+                            r'\b(what|how)\s+about\s+([A-Z][A-Z0-9]+|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b',
+                            r'\b([A-Z][A-Z0-9]+|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(university|institute|college)\b',
+                            r'^([A-Z][A-Z0-9]+|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*[?]?$',  # Just "LNPU?" or "HIT?"
+                        ]
+                        for pattern in uni_patterns:
+                            match = re.search(pattern, latest_user_message, re.IGNORECASE)
+                            if match:
+                                potential_uni = match.group(2) if match.lastindex >= 2 else match.group(1)
+                                # Try to resolve it
+                                matched, uni_dict, _ = self._fuzzy_match_university(potential_uni)
+                                if matched and uni_dict:
+                                    state.university_query = uni_dict.get("name")
+                                    state._resolved_university_id = uni_dict.get("id")
+                                    has_university_pattern = True
+                                    print(f"DEBUG: Detected explicit university change to '{state.university_query}' from message: '{latest_user_message}'")
+                            break
                     
                     # Check if current message explicitly mentions changes to key fields
                     if latest_user_message:
@@ -2286,6 +2503,10 @@ Output ONLY valid JSON, no other text:"""
                                 if not state.major_query or state.major_query.lower() != prev_cached_state.major_query.lower():
                                     state.major_query = prev_cached_state.major_query
                                     print(f"DEBUG: Preserved major_query: {state.major_query}")
+                            # CRITICAL: Also preserve _resolved_major_ids if available
+                            if not user_changed_major and hasattr(prev_cached_state, '_resolved_major_ids') and prev_cached_state._resolved_major_ids:
+                                state._resolved_major_ids = prev_cached_state._resolved_major_ids
+                                print(f"DEBUG: Preserved _resolved_major_ids: {state._resolved_major_ids}")
                             # Preserve degree_level unless user explicitly changed it
                             if not user_changed_degree and hasattr(prev_cached_state, 'degree_level') and prev_cached_state.degree_level:
                                 if not state.degree_level or state.degree_level.lower() != prev_cached_state.degree_level.lower():
@@ -2350,6 +2571,15 @@ Output ONLY valid JSON, no other text:"""
                             if hasattr(prev_cached_state, '_resolved_university_id') and prev_cached_state._resolved_university_id:
                                 state._resolved_university_id = prev_cached_state._resolved_university_id
                                 print(f"DEBUG: Preserved _resolved_university_id ({context_type}): {state._resolved_university_id}")
+                            # Preserve city and province context
+                            if hasattr(prev_cached_state, 'city') and prev_cached_state.city:
+                                if not state.city or state.city.lower() != prev_cached_state.city.lower():
+                                    state.city = prev_cached_state.city
+                                    print(f"DEBUG: Preserved city ({context_type}): {state.city}")
+                            if hasattr(prev_cached_state, 'province') and prev_cached_state.province:
+                                if not state.province or state.province.lower() != prev_cached_state.province.lower():
+                                    state.province = prev_cached_state.province
+                                    print(f"DEBUG: Preserved province ({context_type}): {state.province}")
                     else:
                         # ALWAYS preserve context for all queries unless user explicitly changed fields
                         # Use the same logic as above - preserve unless user changed it
@@ -2492,8 +2722,16 @@ Output ONLY valid JSON, no other text:"""
                 "accommodation": ["accommodation", "housing", "dormitory", "dorm"]
             }
             latest_lower = latest_user_message.lower()
+            # CRITICAL: Check if this is a CSC/CSCA scholarship query first
+            # "requiring CSC/CSCA" means scholarship requirement, NOT document requirements
+            is_csca_query = re.search(r'\b(requiring|require|requires|required)\s+(csca|csc|china\s+scholarship\s+council)\b', latest_lower)
+            
             for req_type, keywords in req_keywords.items():
                 if any(kw in latest_lower for kw in keywords):
+                    # Skip if this is a CSC/CSCA scholarship query - "requiring CSC/CSCA" is about scholarship, not documents
+                    if is_csca_query and req_type in ["documents", "requirements"]:
+                        print(f"DEBUG: Skipping requirements detection - this is a CSC/CSCA scholarship query, not a document requirements query")
+                        continue
                     state.wants_requirements = True
                     # Update req_focus if not already set
                     if not hasattr(state, 'req_focus') or not state.req_focus:
@@ -2542,8 +2780,9 @@ Output ONLY valid JSON, no other text:"""
             has_university_pattern = False
             if is_short_message:
                 # Check for patterns like "what about X", "how about X", "X university", etc.
+                # IMPORTANT: Match full university names including "University", "Institute", "College"
                 uni_patterns = [
-                    r'\b(what|how)\s+about\s+([A-Z][A-Z0-9]+|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b',
+                    r'\b(what|how)\s+about\s+([A-Z][A-Z0-9]+|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s+(?:University|Institute|College))?)\b',
                     r'\b([A-Z][A-Z0-9]+|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(university|institute|college)\b',
                     r'^([A-Z][A-Z0-9]+|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*[?]?$',  # Just "LNPU?" or "HIT?"
                 ]
@@ -2557,8 +2796,13 @@ Output ONLY valid JSON, no other text:"""
                             state.university_query = uni_dict.get("name")
                             state._resolved_university_id = uni_dict.get("id")
                             has_university_pattern = True
+                            # CRITICAL: Clear city/province if university was detected (university takes priority)
+                            if state.city or state.province:
+                                print(f"DEBUG: Clearing city/province ({state.city}/{state.province}) because university was detected: {state.university_query}")
+                                state.city = None
+                                state.province = None
                             print(f"DEBUG: Detected explicit university change to '{state.university_query}' from message: '{latest_user_message}'")
-                    break
+                            break
             
             # DETERMINISTIC RESOLUTION: Resolve university_raw and major_raw to IDs
             # Only resolve if we didn't already resolve it from pattern matching above
@@ -2568,6 +2812,11 @@ Output ONLY valid JSON, no other text:"""
                     # Store resolved university_id (will be used in build_sql_params)
                     state.university_query = uni_dict.get("name")  # Keep name for reference
                     state._resolved_university_id = uni_dict.get("id")  # Store ID for SQL
+                    # CRITICAL: Clear city/province if university was detected (university takes priority)
+                    if state.city or state.province:
+                        print(f"DEBUG: Clearing city/province ({state.city}/{state.province}) because university was detected: {state.university_query}")
+                        state.city = None
+                        state.province = None
                     print(f"DEBUG: Resolved university_query '{state.university_query}' to university_id: {state._resolved_university_id}")
                 else:
                     print(f"DEBUG: Could not resolve university_query '{state.university_query}' to a university_id")
@@ -2655,6 +2904,10 @@ Output ONLY valid JSON, no other text:"""
         # CRITICAL: Apply semantic stoplist BEFORE determine_missing_fields
         # This prevents "scholarship", "info", "fees" from being treated as major_query
         if state and state.major_query:
+            # CRITICAL: Don't clear major_query if we have resolved major IDs from context
+            # This preserves major_query that was established in previous conversation turns
+            has_resolved_major_ids = hasattr(state, '_resolved_major_ids') and state._resolved_major_ids
+            
             # Normalize dots in acronyms (e.g., "B.B.A." -> "BBA")
             original_major = state.major_query
             normalized_major = state.major_query.replace('.', '').strip().upper()
@@ -2667,22 +2920,34 @@ Output ONLY valid JSON, no other text:"""
             expanded_major = self._expand_major_acronym(state.major_query)
             is_known_acronym = expanded_major.lower() != state.major_query.lower()
             
+            # Check if it's a language program major (these should NOT be cleared even if they match degree level)
+            is_language_major = any(kw in state.major_query.lower() for kw in [
+                "chinese language", "language program", "language course", "foundation", "preparatory"
+            ])
+            
             if self._is_semantic_stopword(state.major_query):
                 print(f"DEBUG: Clearing major_query '{state.major_query}' - semantic stopword")
                 state.major_query = None
-            # Check if it's a degree word, BUT skip this check if it's a known major acronym
-            elif not is_known_acronym:
-                # Only check for degree words if it's NOT a known acronym
+            # Check if it's a degree word, BUT skip this check if:
+            # 1. It's a known major acronym
+            # 2. We have resolved major IDs from context (preserve context)
+            # 3. It's a language program major (e.g., "chinese language" is valid even though it contains "language")
+            elif not is_known_acronym and not has_resolved_major_ids and not is_language_major:
+                # Only check for degree words if it's NOT a known acronym, NOT from context, and NOT a language major
                 matched_degree = self.router._fuzzy_match_degree_level(state.major_query)
                 if matched_degree:
                     print(f"DEBUG: Clearing major_query '{state.major_query}' - it's a degree word ({matched_degree})")
                     if not state.degree_level:
                         state.degree_level = matched_degree
                     state.major_query = None
-            else:
+            elif is_known_acronym:
                 # It's a known acronym - use the expanded version for better matching
                 print(f"DEBUG: Major query '{state.major_query}' is a known acronym, expanded to '{expanded_major}'")
                 state.major_query = expanded_major
+            elif has_resolved_major_ids:
+                print(f"DEBUG: Preserving major_query '{state.major_query}' - has resolved major IDs from context")
+            elif is_language_major:
+                print(f"DEBUG: Preserving major_query '{state.major_query}' - it's a language program major")
         
         # Check if clarification is needed using determine_missing_fields
         try:
@@ -2814,18 +3079,18 @@ Output ONLY valid JSON, no other text:"""
                         clarifying_question = f"I found language programs with different durations. Which duration do you prefer: {', '.join(duration_options)}?"
                         print(f"DEBUG: Asking for duration clarification: {clarifying_question}")
                         
-                        # CRITICAL: Store the intakes we found for duration selection
+                        # CRITICAL: Store the intake IDs we found for duration selection (not objects to avoid detached session errors)
                         if temp_intakes:
-                            # Store intakes in state for duration selection
-                            state._duration_fallback_intakes = temp_intakes
+                            # Store intake IDs in state for duration selection (not objects to avoid detached session errors)
+                            state._duration_fallback_intake_ids = [intake.id for intake in temp_intakes]
                             state._duration_fallback_available = duration_options
-                            print(f"DEBUG: Stored {len(temp_intakes)} intakes for duration clarification")
+                            print(f"DEBUG: Stored {len(temp_intakes)} intake IDs for duration clarification")
                         else:
                             print(f"DEBUG: WARNING - No intakes found for duration clarification")
                         
                         # Set pending slot with snapshot (this also caches the state with pending info)
                         self._set_pending(partner_id, conversation_id, "duration", state)
-                        print(f"DEBUG: Set pending slot='duration' and cached state with {len(getattr(state, '_duration_fallback_intakes', []))} intakes")
+                        print(f"DEBUG: Set pending slot='duration' and cached state with {len(getattr(state, '_duration_fallback_intake_ids', []))} intake IDs")
                         
                         return {
                             "intent": state.intent,
@@ -3021,7 +3286,17 @@ Output ONLY valid JSON, no other text:"""
             # Intake_term is optional but preferred
             # teaching_language: will be asked AFTER DB check if both exist (handled separately)
         
-        elif intent == self.router.INTENT_ADMISSION_REQUIREMENTS:
+        elif intent == self.router.INTENT_ADMISSION_REQUIREMENTS or intent == "REQUIREMENTS":
+            # CRITICAL: For REQUIREMENTS queries, degree_level is required when we have university + major
+            # This ensures we can filter programs correctly
+            # Check if we have university + major but missing degree_level FIRST (before checking has_target)
+            if state.university_query and state.major_query and not state.degree_level:
+                # Have university and major, but missing degree_level - MUST ask for it
+                missing_slots.append("degree_level")
+                question_parts.append("degree level (Language/Bachelor/Master/PhD)")
+                question = "Please provide: " + ", ".join(question_parts)
+                return missing_slots, question
+            
             # Need: either university_query OR (major_query + degree_level) OR program_intake from last list
             has_target = (
                 state.university_query or
@@ -3029,8 +3304,16 @@ Output ONLY valid JSON, no other text:"""
                 self.last_selected_program_intake_id
             )
             if not has_target:
-                missing_slots.append("target")
-                return missing_slots, "Which program should I check? (university name OR major+degree+intake)"
+                # Check what's missing
+                if state.university_query and not state.major_query and not state.degree_level:
+                    # Have university, but missing major and degree_level
+                    missing_slots.append("major_and_degree")
+                    question_parts.append("major/subject and degree level (Language/Bachelor/Master/PhD)")
+                    question = "Please provide: " + ", ".join(question_parts)
+                    return missing_slots, question
+                else:
+                    missing_slots.append("target")
+                    return missing_slots, "Which program should I check? (university name OR major+degree+intake)"
         
         elif intent in [self.router.INTENT_FEES, self.router.INTENT_COMPARISON]:
             # CRITICAL: For fee comparison queries with "which universities" or city filter, 
@@ -3259,7 +3542,7 @@ Output ONLY valid JSON, no other text:"""
         
         return sql_params
     
-    def run_db(self, route_plan: Dict[str, Any], latest_user_message: Optional[str] = None) -> List[Any]:
+    def run_db(self, route_plan: Dict[str, Any], latest_user_message: Optional[str] = None, conversation_history: Optional[List[Dict[str, str]]] = None) -> List[Any]:
         """
         Stage B: Run DB queries based on sql_plan.
         Returns list of results (ProgramIntake, University, or Major objects).
@@ -3325,7 +3608,21 @@ Output ONLY valid JSON, no other text:"""
             has_scholarship_filter = state and state.wants_scholarship
             has_requirement_filter = state and state.wants_requirements
             
-            if (has_fee_filter or has_scholarship_filter or has_requirement_filter) and sql_params.get("major_ids"):
+            # Check for "no application fee" requirement in conversation (independent of wants_fees flag)
+            has_no_application_fee_requirement = False
+            application_fee_pattern = r'\b(no|zero|free|without)\s+application\s+fee\b'
+            if latest_user_message and re.search(application_fee_pattern, latest_user_message.lower()):
+                has_no_application_fee_requirement = True
+            elif conversation_history:
+                for msg in reversed(conversation_history):
+                    if msg.get('role') == 'user':
+                        content = msg.get('content', '').lower()
+                        if re.search(application_fee_pattern, content):
+                            has_no_application_fee_requirement = True
+                            print(f"DEBUG: Detected 'no application fee' requirement from conversation history")
+                            break
+            
+            if (has_fee_filter or has_scholarship_filter or has_requirement_filter or has_no_application_fee_requirement) and sql_params.get("major_ids"):
                 # Get program intakes filtered by criteria, then group by university
                 filters = {}
                 # If we have prior university context, reuse it (consistency across turns)
@@ -3372,9 +3669,12 @@ Output ONLY valid JSON, no other text:"""
                 
                 # CRITICAL: Add filters based on user requirements
                 # Free tuition filter
+                print(f"DEBUG: Checking wants_free_tuition - state={state is not None}, hasattr={hasattr(state, 'wants_free_tuition') if state else False}, value={getattr(state, 'wants_free_tuition', None) if state else None}")
                 if state and hasattr(state, 'wants_free_tuition') and state.wants_free_tuition:
                     filters["free_tuition"] = True
                     print(f"DEBUG: LIST_UNIVERSITIES with free tuition - adding free_tuition filter")
+                else:
+                    print(f"DEBUG: LIST_UNIVERSITIES - NOT adding free_tuition filter (state.wants_free_tuition={getattr(state, 'wants_free_tuition', 'NOT_SET') if state else 'NO_STATE'})")
                 
                 # Scholarship filter
                 if has_scholarship_filter:
@@ -3424,6 +3724,51 @@ Output ONLY valid JSON, no other text:"""
                             filters["bank_statement_amount"] = max_amount_cny
                             print(f"DEBUG: LIST_UNIVERSITIES with bank statement amount - adding bank_statement_amount<={max_amount_cny} CNY filter")
                 
+                # Interview required filter
+                if state and hasattr(state, 'req_focus') and state.req_focus:
+                    if latest_user_message:
+                        content = latest_user_message.lower()
+                        if re.search(r'\b(no|doesn\'?t|don\'?t|not)\s+(require|need|want)\s+interview\b', content):
+                            filters["interview_required"] = False
+                            print(f"DEBUG: LIST_UNIVERSITIES with no interview requirement - adding interview_required=False filter")
+                
+                # HSK filter
+                if state and hasattr(state, 'req_focus') and state.req_focus:
+                    if latest_user_message:
+                        content = latest_user_message.lower()
+                        if re.search(r'\b(no|doesn\'?t|don\'?t|not)\s+(require|need|want)\s+hsk\b', content):
+                            filters["hsk_required"] = False
+                            print(f"DEBUG: LIST_UNIVERSITIES with no HSK requirement - adding hsk_required=False filter")
+                        # Check for "hsk score below X" or "hsk below X"
+                        hsk_score_match = re.search(r'\bhsk\s+(?:score\s+)?(?:below|under|less\s+than|maximum|max)\s+(\d+)\b', content)
+                        if hsk_score_match:
+                            max_score = int(hsk_score_match.group(1))
+                            filters["hsk_min_score"] = max_score
+                            print(f"DEBUG: LIST_UNIVERSITIES with HSK score requirement - adding hsk_min_score<={max_score} filter")
+                
+                # English test filter
+                if state and hasattr(state, 'req_focus') and state.req_focus:
+                    if latest_user_message:
+                        content = latest_user_message.lower()
+                        if re.search(r'\b(no|doesn\'?t|don\'?t|not)\s+(require|need|want)\s+(?:ielts|toefl|english\s+test)\b', content):
+                            filters["english_test_required"] = False
+                            print(f"DEBUG: LIST_UNIVERSITIES with no English test requirement - adding english_test_required=False filter")
+                
+                # Application fee filter
+                # Use the flag we already detected above to avoid duplicate checking
+                if has_no_application_fee_requirement:
+                    filters["application_fee"] = False
+                    print(f"DEBUG: LIST_UNIVERSITIES with no application fee - adding application_fee=False filter")
+                
+                # Accommodation fee filter (lowest)
+                if state and hasattr(state, 'req_focus') and state.req_focus:
+                    if latest_user_message:
+                        content = latest_user_message.lower()
+                        accommodation_match = re.search(r'\b(lowest|minimum|min)\s+accommodation\s+fee\b', content)
+                        if accommodation_match:
+                            # This will be handled by sorting, but we can add a max filter if needed
+                            print(f"DEBUG: LIST_UNIVERSITIES with lowest accommodation fee - will sort by accommodation_fee")
+                
                 # Get intakes sorted by tuition (lowest first) or by deadline if no fee filter
                 intakes, total_count = self.db_service.find_program_intakes(
                     filters=filters,
@@ -3434,7 +3779,16 @@ Output ONLY valid JSON, no other text:"""
                 
                 print(f"DEBUG: LIST_UNIVERSITIES with fees - found {len(intakes)} intakes with all filters")
                 
+                # CRITICAL: Check if free_tuition filter is active
+                has_free_tuition_filter = filters.get("free_tuition") is True
+                
+                # If 0 results with free_tuition filter, return early - don't try fallbacks
+                if len(intakes) == 0 and has_free_tuition_filter:
+                    print(f"DEBUG: LIST_UNIVERSITIES with free_tuition filter - 0 results found, returning empty (no fallback)")
+                    return []
+                
                 # If 0 results, try relaxing filters (especially intake_term/intake_year and upcoming_only)
+                # BUT: Do NOT remove free_tuition filter if it was set
                 if len(intakes) == 0:
                     print(f"DEBUG: LIST_UNIVERSITIES with fees - 0 results, trying fallback with relaxed filters...")
                     fallback_filters = filters.copy()
@@ -3623,7 +3977,20 @@ Output ONLY valid JSON, no other text:"""
                 
                 return results
         
-        elif intent in [self.router.INTENT_LIST_PROGRAMS, self.router.INTENT_FEES, 
+        elif intent == self.router.INTENT_LIST_PROGRAMS:
+            # CRITICAL: For LIST_PROGRAMS (list of majors), query majors table directly, not program_intakes
+            # This shows all available majors regardless of intake availability
+            print(f"DEBUG: LIST_PROGRAMS intent - querying majors table directly")
+            majors_list = self._get_majors_for_list_query(
+                university_id=sql_params.get("university_id"),
+                university_ids=sql_params.get("university_ids"),
+                degree_level=sql_params.get("degree_level"),
+                teaching_language=sql_params.get("teaching_language")
+            )
+            print(f"DEBUG: LIST_PROGRAMS - found {len(majors_list)} majors")
+            return majors_list
+        
+        elif intent in [self.router.INTENT_FEES, 
                         self.router.INTENT_ADMISSION_REQUIREMENTS, self.router.INTENT_SCHOLARSHIP,
                         self.router.INTENT_COMPARISON, self.router.INTENT_PROGRAM_DETAILS, "general", "GENERAL", "REQUIREMENTS"]:
             # Use efficient find_program_intakes method
@@ -3967,7 +4334,16 @@ Output ONLY valid JSON, no other text:"""
         is_fees_intent = intent in ["FEES", "fees_only"]
         
         for idx, result in enumerate(results[:10]):  # Limit to 10 for context
-            if isinstance(result, dict) and "university" in result:
+            # Check if this is a major dictionary (from _get_majors_for_list_query)
+            if isinstance(result, dict) and "name" in result and "university_name" in result:
+                # Major dictionary from LIST_PROGRAMS query
+                context_parts.append(f"Major {idx+1}: {result.get('name')}")
+                context_parts.append(f"  University: {result.get('university_name')}")
+                if result.get('degree_level'):
+                    context_parts.append(f"  Degree Level: {result.get('degree_level')}")
+                context_parts.append("")
+            
+            elif isinstance(result, dict) and "university" in result:
                 # From list_universities_by_filters
                 uni = result["university"]
                 context_parts.append(f"University {idx+1}: {uni.name}")
@@ -4359,7 +4735,13 @@ CONTENT REQUIREMENTS:
 - For REQUIREMENTS/ADMISSION intents: Only show detailed document lists and admission process if there are LESS than 3 universities in the results
 - For REQUIREMENTS/ADMISSION intents: If there are 3 or more universities, ask the user to choose a specific university first
 - For LIST_UNIVERSITIES with fee comparison (wants_fees=True): DO NOT ask user to choose. Instead, COMPARE all universities and show which has the LOWEST fees. Show fee breakdown for all universities sorted by lowest fees first.
+- For LIST_UNIVERSITIES: If there are MORE than 3 universities, show ONLY university names with teaching language and major/degree_level, then ask user to choose one for specific details
+- For LIST_UNIVERSITIES: If there are 3 or LESS universities, show ALL universities with their actual names, teaching languages, and major/degree_level. DO NOT use placeholders like "University A", "University B", "University C". Use the actual university names from the DATABASE CONTEXT.
+- For LIST_UNIVERSITIES with CSC/CSCA scholarship requirement: Show which universities require CSC/CSCA scholarship and provide scholarship details. Focus on scholarship information, NOT document requirements. Only show documents if specifically asked. Show ALL universities found in the DATABASE CONTEXT, do not limit to 2.
+- For LIST_PROGRAMS: Show ALL majors (even if 30-40), grouped by teaching language if multiple languages exist (don't ask user to choose language)
+- For GENERAL queries: If multiple teaching languages exist and list < 4, show both Chinese and English taught programs separately (don't ask user to choose)
 - Focus on the most relevant information based on the user's question (e.g., if they ask about fees, prioritize fee information)
+- CRITICAL: ALWAYS use actual university names from the DATABASE CONTEXT. NEVER use placeholders like "University A", "University B", "University C", etc.
 
 Provide a comprehensive, positive answer using ALL relevant information from the DATABASE CONTEXT above, focusing on the intent-specific fields. Format it clearly with markdown for easy reading.
 """
@@ -4672,6 +5054,17 @@ Provide a comprehensive, positive answer using ALL relevant information from the
         # Expand major acronyms first
         expanded_query = self._expand_major_acronym(major_query)
         
+        # CRITICAL: For acronyms like BBA/MBA, also try the base term without degree prefix
+        # "BBA" -> "bachelor of business administration" but also try "business administration"
+        # This helps match majors named "Business Administration" (without "bachelor of")
+        base_query = expanded_query
+        if expanded_query != major_query:  # Only if expansion happened
+            # Remove degree prefixes like "bachelor of", "master of", "doctor of"
+            base_query = re.sub(r'^(bachelor|master|doctor|phd)\s+of\s+', '', expanded_query.lower(), flags=re.IGNORECASE).strip()
+            # If base_query is different and shorter, use it as an alternative search term
+            if base_query != expanded_query.lower() and len(base_query) < len(expanded_query):
+                print(f"DEBUG: resolve_major_ids - expanded '{major_query}' to '{expanded_query}', also trying base term '{base_query}'")
+        
         # Special handling for language programs
         language_patterns = [
             r'\b(language\s+program|language\s+course|chinese\s+language|foundation|foundation\s+program|foundation\s+course|preparatory|preparatory\s+course|preparatory\s+non\s+degree|non-?degree\s+language)\b'
@@ -4773,6 +5166,12 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                 return [m.id for m in language_majors[:limit]]
         
         # Use _fuzzy_match_major for resolution
+        # Try expanded query first, then base query if expansion happened
+        matched = False
+        best_match = None
+        all_matches = []
+        
+        # First try with expanded query
         matched, best_match, all_matches = self._fuzzy_match_major(
             expanded_query,
             university_id=university_id,
@@ -4780,8 +5179,37 @@ Provide a comprehensive, positive answer using ALL relevant information from the
             top_k=10  # Get more candidates, then filter by confidence
         )
         
+        # If no match and we have a base query (from acronym expansion), try that too
+        if not matched and base_query != expanded_query.lower():
+            print(f"DEBUG: resolve_major_ids - no match with expanded query '{expanded_query}', trying base query '{base_query}'")
+            base_matched, base_best, base_all = self._fuzzy_match_major(
+                base_query,
+                university_id=university_id,
+                degree_level=degree_level,
+                top_k=10
+            )
+            # Use base query results if they're better or if expanded query had no results
+            if base_matched or (not matched and base_all):
+                matched = base_matched
+                best_match = base_best
+                all_matches = base_all
+                print(f"DEBUG: resolve_major_ids - base query '{base_query}' found {len(base_all)} matches")
+        
         if not matched or not all_matches:
             return []
+        
+        # Check if the match was via keywords (CSE -> Computer Science and Technology via keywords)
+        # This is stored in the match_type, but we need to check the match_type from _fuzzy_match_major
+        # For now, we'll check if the best match has high confidence (>=0.95) which indicates keyword match
+        # Or we can check if the query is a short acronym (CSE, CS, BBA, etc.) and it matched
+        matched_via_keywords = False
+        if best_match and all_matches:
+            best_score = all_matches[0][1] if all_matches else 0.0
+            # If it's a short acronym (3-4 chars) and matched with high confidence (>=0.95), likely via keywords
+            is_short_acronym = len(expanded_query.replace(' ', '')) <= 4
+            if is_short_acronym and best_score >= 0.95:
+                matched_via_keywords = True
+                print(f"DEBUG: resolve_major_ids - '{major_query}' matched via keywords (acronym match with high confidence)")
         
         # Filter by confidence threshold and limit to top 3
         high_confidence_matches = [
@@ -6754,7 +7182,7 @@ Provide a comprehensive, positive answer using ALL relevant information from the
         # Run DB query using route_plan
         # Pass latest user message for REQUIREMENTS intent to check if major was mentioned
         latest_user_msg = user_message_normalized if 'user_message_normalized' in locals() else user_message
-        db_results = self.run_db(route_plan, latest_user_message=latest_user_msg)
+        db_results = self.run_db(route_plan, latest_user_message=latest_user_msg, conversation_history=conversation_history)
         
         # Check if result is a fallback dict
         fallback_result = None
@@ -6765,6 +7193,51 @@ Provide a comprehensive, positive answer using ALL relevant information from the
         
         print(f"DEBUG: DB query returned {len(db_results)} results")
         
+        # ========== HANDLE EMPTY RESULTS FOR LIST_PROGRAMS ==========
+        # If LIST_PROGRAMS returns 0 results, try querying majors table directly
+        # This handles "list majors" queries where user wants to see available majors, not specific program intakes
+        if len(db_results) == 0 and state and state.intent == self.router.INTENT_LIST_PROGRAMS:
+            print(f"DEBUG: LIST_PROGRAMS returned 0 results, trying to query majors table directly")
+            # Check if user is asking for a list of majors (not specific program intakes)
+            user_msg_lower = latest_user_msg.lower() if latest_user_msg else user_message_normalized.lower() if 'user_message_normalized' in locals() else user_message.lower()
+            is_list_majors_query = any(phrase in user_msg_lower for phrase in [
+                "list of majors", "list majors", "show majors", "majors of", "majors for",
+                "available majors", "offered majors", "subjects", "programs offered"
+            ])
+            
+            if is_list_majors_query or (state.university_query and state.degree_level):
+                # Query majors table directly
+                majors_list = self._get_majors_for_list_query(
+                    university_id=state._resolved_university_id if hasattr(state, '_resolved_university_id') and state._resolved_university_id else None,
+                    degree_level=state.degree_level,
+                    teaching_language=state.teaching_language
+                )
+                
+                if majors_list:
+                    # Format the list of majors
+                    university_name = majors_list[0].get("university_name", state.university_query or "the university")
+                    major_names = [m.get("name") for m in majors_list if m.get("name")]
+                    
+                    if major_names:
+                        # Remove duplicates while preserving order
+                        seen = set()
+                        unique_majors = []
+                        for major in major_names:
+                            if major not in seen:
+                                seen.add(major)
+                                unique_majors.append(major)
+                        
+                        majors_text = "\n".join([f"{idx+1}. {major}" for idx, major in enumerate(unique_majors)])
+                        intake_str = f" for {state.intake_term} intake" if state.intake_term else ""
+                        degree_str = f" {state.degree_level}" if state.degree_level else ""
+                        
+            return {
+                            "response": f"Here are the {degree_str} majors available at {university_name}{intake_str}:\n\n{majors_text}\n\nIf you want details about a specific major (fees, requirements, deadlines), please let me know which one interests you.",
+                            "used_db": True,
+                "used_tavily": False,
+                "sources": []
+            }
+
         # ========== HANDLE EMPTY RESULTS FOR LIST_UNIVERSITIES ==========
         # If LIST_UNIVERSITIES with fees/free_tuition returns empty results, provide helpful message
         if len(db_results) == 0 and state and state.intent == self.router.INTENT_LIST_UNIVERSITIES:
@@ -6785,10 +7258,10 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                 filter_str = " with " + ", ".join(filter_parts) if filter_parts else ""
                 return {
                     "response": f"I couldn't find any universities{filter_str} matching your criteria. Try adjusting your filters (e.g., different intake term, degree level, or location).",
-                    "used_db": True,
-                    "used_tavily": False,
-                    "sources": []
-                }
+                            "used_db": True,
+                            "used_tavily": False,
+                            "sources": []
+                        }
         
         # ========== CHECK FOR MULTIPLE PROGRAMS: Show university list with majors ==========
         # For language/foundation programs or when multiple universities have programs, show list
@@ -6811,7 +7284,7 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                             duration_str = f" ({int(dur * 12)} months)"
                         elif dur == 1.0:
                             duration_str = " (1 year)"
-                        else:
+                    else:
                             duration_str = f" ({dur} years)"
                     
                     key = (uni_name, major_name)
@@ -6823,16 +7296,32 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                             'duration': duration_str
                         })
             
+            # Count total unique programs
+            total_programs = sum(len(progs) for progs in university_programs.values())
+            
+            # Check if we should show all results instead of asking for selection
+            # If intent is FEES and results < 4, show fees for all instead of asking to choose
+            should_show_all = (
+                state.intent == "FEES" and total_programs < 4
+            )
+            
             # If multiple universities or multiple programs per university, show list
-            if len(university_programs) > 1 or any(len(progs) > 1 for progs in university_programs.values()):
+            # UNLESS we should show all (FEES intent with <4 results)
+            if (len(university_programs) > 1 or any(len(progs) > 1 for progs in university_programs.values())) and not should_show_all:
                 response_parts = ["I found multiple language programs. Please choose one to see specific details:\n"]
                 idx = 1
+                example_program = None  # Store first program for example
                 for uni_name, programs in sorted(university_programs.items()):
                     for prog in programs:
-                        response_parts.append(f"{idx}. {uni_name} - {prog['major']}{prog['duration']} (Deadline: {prog['deadline']})")
+                        program_line = f"{idx}. {uni_name} - {prog['major']}{prog['duration']} (Deadline: {prog['deadline']})"
+                        response_parts.append(program_line)
+                        if idx == 1:  # Use first program as example
+                            example_program = f"{uni_name} - {prog['major']}"
                         idx += 1
                 
-                response_parts.append("\nPlease specify which program you'd like information about (e.g., '1' or 'Nanjing University - Chinese Language Program').")
+                # Use actual first program for example instead of hardcoded "Nanjing University"
+                example_text = f"'1' or '{example_program}'" if example_program else "'1'"
+                response_parts.append(f"\nPlease specify which program you'd like information about (e.g., {example_text}).")
                 
                 return {
                     "response": "\n".join(response_parts),
@@ -6860,7 +7349,7 @@ Provide a comprehensive, positive answer using ALL relevant information from the
             for i, msg in enumerate(conversation_history):
                 if msg.get('role') == 'user':
                     user_msg = msg.get('content', '').lower()
-                    acceptance_patterns = [r'\b(yes|ok|okay|sure|go ahead|that\'?s fine|sounds good)\b']
+                    acceptance_patterns = [r'\b(yes|ok|okay|sure|go ahead|that\'?s fine|sounds good|show me|provide)\b']
                     if any(re.search(pattern, user_msg) for pattern in acceptance_patterns):
                         # Check if the previous assistant message asked about a major
                         if i > 0 and conversation_history[i-1].get('role') == 'assistant':
@@ -6870,37 +7359,52 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                                 print(f"DEBUG: Skipping major validation - user accepted a major suggestion earlier in conversation (message {i})")
                                 break
         
-        # Also skip validation if the major was resolved via keywords (CSE -> Computer Science and Technology via keywords)
-        # Check if any result has a major that matches via keywords
-        # IMPORTANT: Check the ORIGINAL user query from conversation history, not the accepted major name
+        # CRITICAL: Skip validation if the major was matched via keywords (CSE -> Computer Science and Technology via keywords)
+        # Check if the major_query is a short acronym (CSE, CS, BBA, etc.) and if results contain majors with those keywords
         major_matched_via_keywords = False
         if state and state.major_query and db_results and len(db_results) > 0:
-            # Get the original user query from conversation history (e.g., "CSE", not "Computer Science and Technology")
-            original_user_query = None
-            if conversation_history:
-                # Look for the first user message that contains a major query
-                for msg in conversation_history:
-                    if msg.get('role') == 'user':
-                        content = msg.get('content', '').lower()
-                        # Look for common major abbreviations/acronyms
-                        major_abbrevs = ['cse', 'cs', 'bba', 'mba', 'eee', 'ee', 'me', 'ce', 'it']
-                        for abbrev in major_abbrevs:
-                            if abbrev in content:
-                                original_user_query = abbrev
-                                break
-                        if original_user_query:
-                            break
-                        # If no abbreviation found, use the first major-related word
-                        words = content.split()
-                        for word in words:
-                            if len(word) <= 5 and word.isalpha():  # Likely an acronym
-                                original_user_query = word
-                                break
-                        if original_user_query:
-                            break
+            # Check if major_query is a short acronym (3-5 chars, all caps or mixed case)
+            major_query_clean = state.major_query.strip().replace('.', '').replace(' ', '')
+            is_short_acronym = len(major_query_clean) <= 5 and (
+                major_query_clean.isupper() or 
+                (major_query_clean[0].isupper() if major_query_clean else False)
+            )
             
-            # Use original query if found, otherwise use current major_query
-            user_major_lower = (original_user_query or state.major_query).lower().strip()
+            if is_short_acronym:
+                # Check if any result major has keywords that match the acronym
+                for result in db_results:
+                    if hasattr(result, 'major') and result.major:
+                        major = result.major
+                        # Check keywords field
+                        keywords = major.keywords if isinstance(major.keywords, list) else (
+                            json.loads(major.keywords) if isinstance(major.keywords, str) else []
+                        )
+                        # Normalize keywords
+                        keywords_lower = [str(k).lower().strip() for k in keywords]
+                        major_query_lower = major_query_clean.lower()
+                        
+                        # Check if the acronym matches any keyword
+                        if major_query_lower in keywords_lower or any(major_query_lower in k for k in keywords_lower):
+                            major_matched_via_keywords = True
+                            print(f"DEBUG: Skipping major validation - '{state.major_query}' matched '{major.name}' via keywords")
+                            break
+                    if major_matched_via_keywords:
+                        break
+        
+        # Skip validation if language query, user accepted major, or matched via keywords
+        # ALSO skip if major_ids were already resolved (means we found matches, don't ask again)
+        has_resolved_major_ids = state and hasattr(state, '_resolved_major_ids') and state._resolved_major_ids
+        if is_language_query or user_accepted_major or major_matched_via_keywords or has_resolved_major_ids:
+            print(f"DEBUG: Skipping major validation - is_language_query={is_language_query}, user_accepted_major={user_accepted_major}, major_matched_via_keywords={major_matched_via_keywords}, has_resolved_major_ids={has_resolved_major_ids}")
+            # Continue to response generation without validation
+        elif state and state.major_query and db_results and len(db_results) > 0:
+            # Check if any returned intake has a major that matches the user's query
+            user_major_lower = state.major_query.lower().strip()
+            matched_majors = []
+            unmatched_count = 0
+            
+            # Import re at function level to avoid scoping issues
+            import re as re_module
             
             for result in db_results:
                 if hasattr(result, 'major') and result.major:
@@ -6928,7 +7432,13 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                     if major_matched_via_keywords:
                         break
         
-        if state and state.major_query and db_results and len(db_results) > 0 and not is_language_query and not user_accepted_major and not major_matched_via_keywords:
+        # Skip validation if language query, user accepted major, or matched via keywords
+        # ALSO skip if major_ids were already resolved (means we found matches, don't ask again)
+        has_resolved_major_ids = state and hasattr(state, '_resolved_major_ids') and state._resolved_major_ids
+        if is_language_query or user_accepted_major or major_matched_via_keywords or has_resolved_major_ids:
+            print(f"DEBUG: Skipping major validation - is_language_query={is_language_query}, user_accepted_major={user_accepted_major}, major_matched_via_keywords={major_matched_via_keywords}, has_resolved_major_ids={has_resolved_major_ids}")
+            # Continue to response generation without validation
+        elif state and state.major_query and db_results and len(db_results) > 0:
             # Check if any returned intake has a major that matches the user's query
             user_major_lower = state.major_query.lower().strip()
             matched_majors = []
@@ -7008,7 +7518,7 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                 major_cache = self._get_majors_cached()
                 _, _, closest_matches = self._fuzzy_match_major(
                     state.major_query,
-                degree_level=state.degree_level,
+                            degree_level=state.degree_level,
                     top_k=10  # Get more to deduplicate
                 )
                 # Deduplicate by major name to avoid showing "Applied Physics" 5 times
@@ -7077,17 +7587,17 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                 # CRITICAL: Store the fallback intakes in cached state so we can use them when user selects a duration
                 # Store them in a special field that will be used when user replies with duration
                 if state and partner_id and conversation_id and fallback_intakes:
-                    # Store the intakes in the state for later use
-                    state._duration_fallback_intakes = fallback_intakes
+                    # Store the intake IDs in the state for later use (not objects to avoid detached session errors)
+                    state._duration_fallback_intake_ids = [intake.id for intake in fallback_intakes]
                     state._duration_fallback_available = available_durations
                     # Set pending slot for duration clarification
                     state_snapshot = PartnerQueryState()
                     state_snapshot.__dict__.update(state.__dict__)
-                    state_snapshot._duration_fallback_intakes = fallback_intakes
+                    state_snapshot._duration_fallback_intake_ids = [intake.id for intake in fallback_intakes]
                     state_snapshot._duration_fallback_available = available_durations
                     self._set_pending(partner_id, conversation_id, "duration", state_snapshot)
                     self._set_cached_state(partner_id, conversation_id, state, None)
-                    print(f"DEBUG: Duration fallback - stored {len(fallback_intakes)} intakes for duration clarification")
+                    print(f"DEBUG: Duration fallback - stored {len(fallback_intakes)} intake IDs for duration clarification")
                 
                 return {
                     "response": f"I found language programs with different durations. Which duration do you prefer: {durations_str}?",
@@ -7115,10 +7625,10 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                             "intent": state.intent,
                             "state": state,
                             "needs_clarification": False,
-                            "sql_plan": None,
+                            "sql_plan": sql_params,
                             "req_focus": {}
                         }
-                        intakes = self.run_db(route_plan, sql_params, state, partner_id, conversation_id)
+                        intakes = self.run_db(route_plan, latest_user_message=None, conversation_history=None)
                         if intakes and len(intakes) > 0:
                             # Format and return results using the same method as normal flow
                             db_context = self.build_db_context(intakes, state.req_focus if hasattr(state, 'req_focus') else {}, list_mode=False, intent=state.intent)
@@ -7159,26 +7669,32 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                     }
             
             elif fallback_type == "teaching_language" and len(db_results) > 0:
-                # Teaching language removal yielded results - ask which language
-                available_languages = fallback_result.get("_available_languages", [])
-                langs_str = " or ".join(sorted(available_languages)) if available_languages else "English or Chinese"
-                
-                # Set pending state for teaching language clarification
-                state_snapshot = PartnerQueryState()
-                state_snapshot.__dict__.update(state.__dict__)
-                state_snapshot.teaching_language = None  # Clear only this slot
-                # Set pending with snapshot - this will also cache the state with pending info
-                self._set_pending(partner_id, conversation_id, "teaching_language", state_snapshot)
-                # Note: _set_pending already calls _set_cached_state, so we don't need to call it again
-                
-                print(f"DEBUG: Fallback teaching_language - available_languages={available_languages}, setting pending")
-                
-                return {
-                    "response": f"I found programs available in {langs_str}. Which do you prefer?",
-                    "used_db": True,
-                    "used_tavily": False,
-                    "sources": []
-                }
+                # CRITICAL: Only ask for teaching language if we have MORE than 3 results
+                # If ≤3 results, show all without asking (user can see languages in results)
+                if len(db_results) > 3:
+                    # Teaching language removal yielded results - ask which language
+                    available_languages = fallback_result.get("_available_languages", [])
+                    langs_str = " or ".join(sorted(available_languages)) if available_languages else "English or Chinese"
+                    
+                    # Set pending state for teaching language clarification
+                    state_snapshot = PartnerQueryState()
+                    state_snapshot.__dict__.update(state.__dict__)
+                    state_snapshot.teaching_language = None  # Clear only this slot
+                    # Set pending with snapshot - this will also cache the state with pending info
+                    self._set_pending(partner_id, conversation_id, "teaching_language", state_snapshot)
+                    # Note: _set_pending already calls _set_cached_state, so we don't need to call it again
+                    
+                    print(f"DEBUG: Fallback teaching_language - available_languages={available_languages}, results={len(db_results)} (>3), setting pending")
+                    
+                    return {
+                        "response": f"I found programs available in {langs_str}. Which do you prefer?",
+                        "used_db": True,
+                        "used_tavily": False,
+                        "sources": []
+                    }
+                else:
+                    # ≤3 results - don't ask, just use the fallback results (showing all languages)
+                    print(f"DEBUG: Fallback teaching_language - results={len(db_results)} (≤3), using results without asking for language preference")
             
             elif fallback_type == "missing_intake_term":
                 # For deadline queries, ask for intake_term instead of suggesting unrelated majors
@@ -7279,6 +7795,7 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                                                 "used_tavily": False,
                                                 "sources": []
                                             }
+        
                                     else:
                                         # Multiple universities - ask user to choose and set pending slot
                                         uni_names = [uni.name for uni in location_universities[:5]]
@@ -7302,20 +7819,22 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                                             "used_tavily": False,
                                             "sources": []
                                         }
-                            
-                            return {
-                                "response": f"I couldn't find an upcoming intake matching those filters. Available majors for {state.degree_level or 'your criteria'}: {', '.join(unique_majors)}. Tell me a major name or say 'show available majors'.",
-                                "used_db": True,
-                                "used_tavily": False,
-                                "sources": []
-                            }
-                
-                return {
-                    "response": "I couldn't find an upcoming intake matching those filters. Tell me a nearby major name (or say 'show available majors').",
-                    "used_db": True,
-                    "used_tavily": False,
-                    "sources": []
-                }
+                                else:
+                                    # No universities found in the location
+                                    return {
+                                        "response": f"I couldn't find any universities in {location_str} matching your criteria. Available majors for {state.degree_level or 'your criteria'}: {', '.join(unique_majors)}. Tell me a major name or say 'show available majors'.",
+                                        "used_db": True,
+                                        "used_tavily": False,
+                                        "sources": []
+                                    }
+                            else:
+                                # No city/province, show majors list
+                                return {
+                                    "response": f"I couldn't find an upcoming intake matching those filters. Available majors for {state.degree_level or 'your criteria'}: {', '.join(unique_majors)}. Tell me a major name or say 'show available majors'.",
+                                    "used_db": True,
+                                    "used_tavily": False,
+                                    "sources": []
+                                }
                 
         # ========== POST-QUERY: Check for mixed teaching languages ==========
         # Use DBQueryService to check distinct languages before asking
@@ -7325,7 +7844,19 @@ Provide a comprehensive, positive answer using ALL relevant information from the
             (state and state.major_query and any(kw in state.major_query.lower() for kw in ["language", "foundation", "preparatory", "chinese language", "non-degree"]))
         )
         
-        if db_results and not state.teaching_language and not state.is_clarifying and not is_language_program:
+        # CRITICAL: Only ask for teaching language clarification if:
+        # 1. Not a LIST_UNIVERSITIES intent (for list queries, show all languages without asking)
+        # 2. OR if LIST_UNIVERSITIES and >3 universities (for ≤3, show all with languages)
+        # 3. Not already clarifying something else
+        # 4. Not a language program (language programs don't need teaching language clarification)
+        should_ask_teaching_language = (
+            not state.teaching_language and 
+            not state.is_clarifying and 
+            not is_language_program and
+            state.intent != self.router.INTENT_LIST_UNIVERSITIES  # For LIST_UNIVERSITIES, handle differently
+        )
+        
+        if db_results and should_ask_teaching_language:
             # Check if we have enough info to query distinct languages
             if state.degree_level or state.major_query or state.university_query or state.intake_term:
                 filters_for_lang_check = {}
@@ -7342,10 +7873,13 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                 try:
                     distinct_languages = self.db_service.get_distinct_teaching_languages(filters_for_lang_check)
                     
-                    if len(distinct_languages) >= 2:
-                        # Mixed teaching languages - ask clarification
+                    # CRITICAL: Only ask for teaching language clarification if:
+                    # 1. There are 2+ distinct languages
+                    # 2. AND we have MORE than 3 results (if ≤3, show all without asking)
+                    if len(distinct_languages) >= 2 and len(db_results) > 3:
+                        # Mixed teaching languages - ask clarification (only for non-LIST_UNIVERSITIES intents)
                         langs_str = " or ".join(sorted(distinct_languages))
-                        print(f"DEBUG: Mixed teaching languages detected: {distinct_languages}, asking clarification")
+                        print(f"DEBUG: Mixed teaching languages detected: {distinct_languages}, results={len(db_results)} (>3), asking clarification")
                         
                         # Set pending state for teaching language (use unified cache)
                         # Create a copy of state with teaching_language=None for the snapshot
@@ -7376,7 +7910,8 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                         elif hasattr(result, 'major') and result.major and result.major.teaching_language:
                             teaching_languages.add(str(result.major.teaching_language))
                     
-                    if len(teaching_languages) > 1:
+                    # CRITICAL: Only ask if we have MORE than 3 results (if ≤3, show all without asking)
+                    if len(teaching_languages) > 1 and len(db_results) > 3:
                         langs_str = " or ".join(sorted(teaching_languages))
                         # Create a copy of state with teaching_language=None for the snapshot
                         state_snapshot = PartnerQueryState()
@@ -7386,12 +7921,15 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                         self._set_pending(partner_id, conversation_id, "teaching_language", state_snapshot)
                         # Note: _set_pending already calls _set_cached_state, so we don't need to call it again
                         
+                        print(f"DEBUG: Fallback method - Mixed teaching languages detected: {teaching_languages}, results={len(db_results)} (>3), asking clarification")
                         return {
                             "response": f"I found programs available in {langs_str}. Which do you prefer?",
                             "used_db": True,
                             "used_tavily": False,
                             "sources": []
                         }
+                    elif len(teaching_languages) > 1:
+                        print(f"DEBUG: Fallback method - Mixed teaching languages detected: {teaching_languages}, results={len(db_results)} (≤3), NOT asking (showing all)")
                     elif len(teaching_languages) == 1:
                         # Auto-fill teaching language
                         state.teaching_language = list(teaching_languages)[0]
@@ -7467,24 +8005,131 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                     user_message=user_message
                 )
         
+        # ========== RULE: LIST_UNIVERSITIES with >3 universities - show names only ==========
+        if db_results and state and state.intent == self.router.INTENT_LIST_UNIVERSITIES:
+            # Extract unique universities from results
+            unique_universities = {}
+            for result in db_results:
+                uni_id = None
+                uni_name = None
+                teaching_lang = None
+                major_name = None
+                degree_level = None
+                
+                if isinstance(result, dict):
+                    uni_id = result.get("university_id")
+                    uni_name = result.get("university_name")
+                    teaching_lang = result.get("teaching_language")
+                    major_name = result.get("major_name") or result.get("sample_intake", {}).get("major_name")
+                    degree_level = result.get("degree_level")
+                elif hasattr(result, 'university') and result.university:
+                    uni_id = result.university_id
+                    uni_name = result.university.name
+                    if hasattr(result, 'major') and result.major:
+                        major_name = result.major.name
+                        degree_level = result.major.degree_level
+                        teaching_lang = result.teaching_language or result.major.teaching_language
+                elif hasattr(result, 'university_id') and result.university_id:
+                    uni_id = result.university_id
+                    from app.models import University
+                    uni = self.db.query(University).filter(University.id == uni_id).first()
+                    if uni:
+                        uni_name = uni.name
+                
+                if uni_id and uni_name:
+                    if uni_id not in unique_universities:
+                        unique_universities[uni_id] = {
+                            "name": uni_name,
+                            "teaching_language": teaching_lang,
+                            "major_name": major_name,
+                            "degree_level": degree_level
+                        }
+            
+            # If >3 universities, show names only and ask user to choose
+            if len(unique_universities) > 3:
+                response_parts = [f"I found {len(unique_universities)} universities matching your criteria. Please choose one to see specific details:\n"]
+                # Store university candidates for selection
+                uni_candidates = []
+                uni_candidate_ids = []
+                sorted_unis = sorted(unique_universities.items(), key=lambda x: x[1]["name"])
+                
+                for idx, (uni_id, uni_info) in enumerate(sorted_unis, 1):
+                    uni_line = f"{idx}. {uni_info['name']}"
+                    if uni_info.get("teaching_language"):
+                        uni_line += f" ({uni_info['teaching_language']}-taught)"
+                    if uni_info.get("major_name"):
+                        uni_line += f" - {uni_info['major_name']}"
+                    elif uni_info.get("degree_level"):
+                        uni_line += f" ({uni_info['degree_level']})"
+                    response_parts.append(uni_line)
+                    # Store candidates for selection
+                    uni_candidates.append(uni_info['name'])
+                    uni_candidate_ids.append(uni_id)
+                
+                response_parts.append("\nPlease specify which university you'd like information about (e.g., '1' or university name).")
+                
+                # Store university candidates in state and set pending slot
+                if state and partner_id and conversation_id:
+                    state._university_candidates = uni_candidates
+                    state._university_candidate_ids = uni_candidate_ids
+                    # CRITICAL: Cache the state BEFORE setting pending slot
+                    self._set_cached_state(partner_id, conversation_id, state, None)
+                    self._set_pending(partner_id, conversation_id, "university_choice", state)
+                    print(f"DEBUG: Set university_choice pending slot with {len(uni_candidates)} candidates: {uni_candidates}")
+                
+                return {
+                    "response": "\n".join(response_parts),
+                    "used_db": True,
+                    "used_tavily": False,
+                    "sources": []
+                }
+        
         # Check if there are 3+ universities - if so, ask user to choose instead of showing all details
         if db_results and intent in [self.router.INTENT_ADMISSION_REQUIREMENTS, "REQUIREMENTS", "ADMISSION_REQUIREMENTS"]:
-            unique_universities = set()
+            unique_universities = {}
             for result in db_results:
+                uni_id = None
+                uni_name = None
                 if hasattr(result, 'university') and result.university:
-                    unique_universities.add(result.university.name)
+                    uni_id = result.university_id
+                    uni_name = result.university.name
                 elif hasattr(result, 'university_id') and result.university_id:
+                    uni_id = result.university_id
                     # Try to get university name from ID
                     from app.models import University
-                    uni = self.db.query(University).filter(University.id == result.university_id).first()
+                    uni = self.db.query(University).filter(University.id == uni_id).first()
                     if uni:
-                        unique_universities.add(uni.name)
+                        uni_name = uni.name
+                
+                if uni_id and uni_name:
+                    if uni_id not in unique_universities:
+                        unique_universities[uni_id] = uni_name
             
             if len(unique_universities) >= 3:
-                # Ask user to choose a university
-                university_list = "\n".join([f"- {uni}" for uni in sorted(unique_universities)])
+                # Store university candidates for selection
+                uni_candidates = []
+                uni_candidate_ids = []
+                sorted_unis = sorted(unique_universities.items(), key=lambda x: x[1])
+                
+                university_list_parts = []
+                for idx, (uni_id, uni_name) in enumerate(sorted_unis, 1):
+                    university_list_parts.append(f"{idx}. {uni_name}")
+                    uni_candidates.append(uni_name)
+                    uni_candidate_ids.append(uni_id)
+                
+                university_list = "\n".join(university_list_parts)
+                
+                # Store university candidates in state and set pending slot
+                if state and partner_id and conversation_id:
+                    state._university_candidates = uni_candidates
+                    state._university_candidate_ids = uni_candidate_ids
+                    # CRITICAL: Cache the state BEFORE setting pending slot
+                    self._set_cached_state(partner_id, conversation_id, state, None)
+                    self._set_pending(partner_id, conversation_id, "university_choice", state)
+                    print(f"DEBUG: Set university_choice pending slot for REQUIREMENTS with {len(uni_candidates)} candidates: {uni_candidates}")
+                
                 return {
-                    "response": f"I found information for {len(unique_universities)} universities. Please choose one to see detailed requirements:\n\n{university_list}",
+                    "response": f"I found information for {len(unique_universities)} universities. Please choose one to see detailed requirements:\n\n{university_list}\n\nPlease specify which university you'd like information about (e.g., '1' or university name).",
                     "used_db": True,
                     "used_tavily": False,
                     "sources": []
@@ -7509,6 +8154,14 @@ Provide a comprehensive, positive answer using ALL relevant information from the
             traceback.print_exc()
             # Fallback response
             formatted_response = "I found information in the database, but encountered an error formatting the response. Please try rephrasing your question."
+        
+        # CRITICAL: Cache the state after generating response to preserve context for follow-up questions
+        if state and partner_id and conversation_id:
+            # Only cache if there's no pending slot (pending slots are cached separately)
+            cached = self._get_cached_state(partner_id, conversation_id)
+            if not cached or not cached.get("pending"):
+                self._set_cached_state(partner_id, conversation_id, state, None)
+                print(f"DEBUG: Cached state after response generation (no pending slot)")
         
         return {
             "response": formatted_response,

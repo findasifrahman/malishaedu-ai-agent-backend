@@ -558,16 +558,12 @@ class TestPartnerAgentRouting:
         """Test: 0 results fallback removes teaching_language and asks which language"""
         # This is tested in run_db fallback logic
         pass
-    
-    def test_earliest_intake_sql_params(self, agent):
-        """Test: 'earliest intake' sets upcoming_only and infers intake_term"""
-        test_state = PartnerQueryState()
-        test_state.wants_earliest = True
-        test_state.degree_level = "Bachelor"
+        state.wants_earliest = True
+        state.degree_level = "Bachelor"
         
-        sql_params = agent.build_sql_params(test_state)
+        sql_params = agent.build_sql_params(state)
         assert sql_params.get("upcoming_only") is True
-        # intake_term should be inferred if missing
+        assert sql_params.get("intake_term") is not None  # Should be inferred
     
     def test_build_sql_params_city_province(self, agent):
         """Test: build_sql_params with city/province sets city/province filters"""
