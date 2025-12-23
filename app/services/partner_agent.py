@@ -7346,12 +7346,16 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                         self._set_pending(partner_id, conversation_id, "teaching_language", state_snapshot)
                         # Note: _set_pending already calls _set_cached_state, so we don't need to call it again
                         
-                return {
+                        return {
                             "response": f"I found programs available in {langs_str}. Which do you prefer?",
-                    "used_db": True,
-                    "used_tavily": False,
-                    "sources": []
-                }
+                            "used_db": True,
+                            "used_tavily": False,
+                            "sources": []
+                        }
+                    elif len(teaching_languages) == 1:
+                        # Auto-fill teaching language
+                        state.teaching_language = list(teaching_languages)[0]
+                        print(f"DEBUG: Auto-filled teaching_language: {state.teaching_language}")
 
         # ========== STAGE C: Format Response ==========
         # Store university_ids and intake_ids from current results for context preservation
