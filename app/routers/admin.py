@@ -1424,7 +1424,17 @@ sql_generator_service = SQLGeneratorService()
 class SQLExecuteRequest(BaseModel):
     sql: str
 
-@router.post("/document-import/generate-sql")
+class SQLValidationResponse(BaseModel):
+    valid: bool
+    errors: List[str]
+    warnings: List[str]
+
+class SQLGenerationResponse(BaseModel):
+    sql: str
+    validation: SQLValidationResponse
+    document_text_preview: str
+
+@router.post("/document-import/generate-sql", response_model=SQLGenerationResponse)
 async def generate_sql_from_document(
     file: UploadFile = File(...),
     current_user: User = Depends(require_admin)
@@ -1432,6 +1442,8 @@ async def generate_sql_from_document(
     """Upload a document and generate SQL script for importing university programs"""
     # Note: We don't need DB session for this endpoint - LLM call can take long time
     # and DB connection may timeout. We only need admin authentication.
+    import asyncio
+    
     try:
         # Read file content
         file_content = await file.read()
@@ -1449,8 +1461,14 @@ async def generate_sql_from_document(
             )
         
         # Generate SQL (this can take a long time with LLM)
+        # Run in thread pool to avoid blocking the event loop
         # We don't need the DB session for this, so errors here won't affect DB connection
-        sql_script = sql_generator_service.generate_sql_from_text(document_text)
+        print("🔄 Starting SQL generation (this may take 60-120 seconds)...")
+        sql_script = await asyncio.to_thread(
+            sql_generator_service.generate_sql_from_text,
+            document_text
+        )
+        print("✅ SQL generation completed")
         
         # Check if SQL generation returned empty or error SQL
         if not sql_script or not sql_script.strip():
@@ -1480,11 +1498,46 @@ async def generate_sql_from_document(
         print(f"✅ SQL generated successfully: {len(sql_script)} characters")
         print(f"📊 Validation: valid={validation['valid']}, errors={len(validation['errors'])}, warnings={len(validation['warnings'])}")
         
-        return {
-            "sql": sql_script,
-            "validation": validation,
-            "document_text_preview": document_text[:500] + "..." if len(document_text) > 500 else document_text
-        }
+        # Prepare response data - ensure it matches SQLGenerationResponse model
+        try:
+            # Create validation dict that matches SQLValidationResponse
+            validation_dict = {
+                "valid": bool(validation.get('valid', False)),
+                "errors": list(validation.get('errors', [])),
+                "warnings": list(validation.get('warnings', []))
+            }
+            
+            # Return dict - FastAPI will validate against response_model
+            response_data = {
+                "sql": sql_script,
+                "validation": validation_dict,
+                "document_text_preview": document_text[:500] + "..." if len(document_text) > 500 else document_text
+            }
+            
+            # Log response size
+            import json
+            try:
+                response_json = json.dumps(response_data)
+                response_size = len(response_json)
+                print(f"📦 Response size: {response_size:,} bytes ({response_size / 1024:.2f} KB)")
+            except Exception as json_error:
+                print(f"⚠️  Warning: Could not serialize response for size check: {json_error}")
+            
+            # Log right before returning
+            print("📤 Sending response to client...")
+            
+            # Return response - FastAPI will serialize it using response_model
+            # Note: If this fails, it might be due to response size or timeout
+            # 18K characters should be fine, but if issues persist, consider streaming
+            return response_data
+        except Exception as response_error:
+            print(f"❌ Error preparing response: {str(response_error)}")
+            import traceback
+            print(traceback.format_exc())
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error preparing response: {str(response_error)}"
+            )
         
     except ValueError as e:
         print(f"❌ ValueError in SQL generation: {str(e)}")
