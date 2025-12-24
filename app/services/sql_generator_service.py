@@ -125,17 +125,17 @@ RULES:
 9) GUARD (CRITICAL): guard AS (SELECT 1 AS ok FROM university_cte), ALL INSERT/UPDATE statements MUST include WHERE EXISTS (SELECT 1 FROM guard). This is MANDATORY for: majors_upsert, majors_update, program_intakes_upsert, program_intakes_update, program_documents_upsert, program_documents_update, scholarships_upsert, program_intake_scholarships_upsert. NO EXCEPTIONS. Example: INSERT INTO majors ... WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...)
 10) INSERTION ORDER (CRITICAL): 
     - Insert majors FIRST, then use those IDs in program_intakes
-    - program_intakes_data must JOIN with majors AFTER majors are inserted/updated
-    - Use: FROM (SELECT id FROM majors WHERE university_id = (SELECT id FROM university_cte) AND ...) m
-    - program_documents_data must use: FROM (SELECT id FROM program_intakes WHERE ...) pi (after program_intakes exist)
-    - program_intake_scholarships_data must use: FROM (SELECT id FROM program_intakes WHERE ...) pi (after program_intakes exist)
-    - DO NOT join directly with CTEs that haven't been materialized yet
+    - program_intakes_data must JOIN with majors FROM THE ACTUAL TABLE (not CTE): FROM majors m WHERE m.university_id = (SELECT id FROM university_cte) AND lower(m.name) IN (...)
+    - After program_intakes are inserted, program_documents_data must use: FROM program_intakes pi WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = '...' AND pi.intake_year = ... (reference actual table, not CTE)
+    - After program_intakes are inserted, program_intake_scholarships_data must use: FROM program_intakes pi WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = '...' AND pi.intake_year = ... (reference actual table, not CTE)
+    - DO NOT join with CTEs that reference data that hasn't been inserted yet. Always reference the actual database tables after INSERTs complete.
+    - CRITICAL: program_intakes_data must use: FROM majors m WHERE m.university_id = (SELECT id FROM university_cte) - this ensures it uses the actual majors table rows, not a CTE
 11) NOTES: Combine all fee notes: "Registration fee: 800 CNY (only first year). Medical fee only for one year. Visa extension fee: 400 CNY per year. CSC deadline: YYYY-MM-DD." (if CSC deadline exists). Include accommodation note if applicable. CRITICAL: medical_insurance_fee MUST be set to numeric value (e.g., 400) if document mentions medical fee amount. Do NOT leave it NULL if document states "Medical: 400CNY" or similar.
 
 EXTRACTION:
 - University: WHERE lower(name)=lower('...')
 - Majors: Check existence first (university_id + lower(name) + degree_level + teaching_language), then INSERT ... WHERE NOT EXISTS or UPDATE. MUST insert majors before using them in program_intakes.
-- Intakes: intake_term='{enum_values[0] if enum_values else "March"}'::intaketerm, intake_year required. JOIN with majors AFTER majors are inserted: FROM (SELECT id FROM majors WHERE ...) m
+- Intakes: intake_term='{enum_values[0] if enum_values else "March"}'::intaketerm, intake_year required. JOIN with majors FROM ACTUAL TABLE: FROM majors m WHERE m.university_id = (SELECT id FROM university_cte) AND lower(m.name) IN (...)
 - Fees: 
   * CNY if RMB/CNY, USD if USD, else CNY
   * accommodation_fee: If document mentions accommodation fee ANYWHERE (even in scholarship section), use LOWER BOUND (e.g., 4500) in numeric field, put FULL TEXT in accommodation_note. DO NOT leave NULL if document mentions accommodation.
@@ -148,8 +148,8 @@ EXTRACTION:
 - Requirements:
   * english_test_required=true if doc mentions "English Proficiency Certificate" or "IELTS" or "TOEFL"
   * english_test_note should include requirements (e.g., "IELTS 6.0 or TOFEL 80 or any other valid English Proficiency certificate")
-- Documents: All from doc, normalized, with rules. "Last Academic Transcript and Certificate(Notarized)" = TWO documents: "Transcript" (rules: "Notarized") AND "Highest Degree Certificate" (rules: "Notarized"). Use: FROM (SELECT id FROM program_intakes WHERE ...) pi (after program_intakes exist)
-- Scholarships: Create and link, only explicit fields. first_year_only should be NULL/false unless doc explicitly states scholarship duration is first year only. Use: FROM (SELECT id FROM program_intakes WHERE ...) pi (after program_intakes exist)
+- Documents: All from doc, normalized, with rules. "Last Academic Transcript and Certificate(Notarized)" = TWO documents: "Transcript" (rules: "Notarized") AND "Highest Degree Certificate" (rules: "Notarized"). Use: FROM program_intakes pi WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = '...' AND pi.intake_year = ... (reference actual table, not CTE)
+- Scholarships: Create and link, only explicit fields. first_year_only should be NULL/false unless doc explicitly states scholarship duration is first year only. Use: FROM program_intakes pi WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = '...' AND pi.intake_year = ... (reference actual table, not CTE)
 
 STYLE: WITH CTEs (university_cte, guard, data), INSERT/UPDATE (guarded), final SELECT with counts+errors. Idempotent. Pure SQL."""
 

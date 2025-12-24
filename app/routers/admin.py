@@ -1884,17 +1884,63 @@ async def execute_generated_sql(
             
             print(f"✅ SQL executed successfully. Returned {len(rows_dict)} row(s)")
             if rows_dict:
-                print(f"📊 First row: {rows_dict[0]}")
+                result_row = rows_dict[0]
+                print(f"📊 Execution results: {result_row}")
+                
+                # Check if program_intakes were actually inserted
+                program_intakes_inserted = result_row.get('program_intakes_inserted', 0) or 0
+                program_intakes_updated = result_row.get('program_intakes_updated', 0) or 0
+                total_intakes = program_intakes_inserted + program_intakes_updated
+                
+                if total_intakes == 0:
+                    print(f"⚠️  WARNING: No program_intakes were inserted or updated!")
+                    print(f"   - majors_inserted: {result_row.get('majors_inserted', 0)}")
+                    print(f"   - majors_updated: {result_row.get('majors_updated', 0)}")
+                    print(f"   - program_intakes_inserted: {program_intakes_inserted}")
+                    print(f"   - program_intakes_updated: {program_intakes_updated}")
+                    print(f"   - documents_inserted: {result_row.get('documents_inserted', 0)}")
+                    print(f"   - scholarships_inserted: {result_row.get('scholarships_inserted', 0)}")
+                    print(f"   - links_inserted: {result_row.get('links_inserted', 0)}")
+                    errors = result_row.get('errors', [])
+                    if errors:
+                        print(f"   - errors: {errors}")
+                else:
+                    print(f"✅ SUCCESS: {total_intakes} program_intake(s) processed ({program_intakes_inserted} inserted, {program_intakes_updated} updated)")
             
             # The final SELECT should return one row with counts and errors
             final_result = rows_dict[0] if rows_dict else None
             
+            # Check if program_intakes were actually inserted/updated
+            program_intakes_inserted = final_result.get('program_intakes_inserted', 0) or 0 if final_result else 0
+            program_intakes_updated = final_result.get('program_intakes_updated', 0) or 0 if final_result else 0
+            total_intakes = program_intakes_inserted + program_intakes_updated
+            
             # Commit transaction
             db.commit()
             
+            # Only show success if program_intakes were actually populated
+            if total_intakes == 0:
+                errors = final_result.get('errors', []) if final_result else []
+                error_msg = "SQL executed but no program_intakes were inserted or updated. "
+                if errors:
+                    error_msg += f"Errors: {', '.join(errors)}"
+                else:
+                    error_msg += "This may indicate that majors were not found, or program_intakes already exist with the same criteria."
+                
+                return {
+                    "success": False,
+                    "message": error_msg,
+                    "results": [{
+                        "type": "SELECT",
+                        "rows": rows_dict,
+                        "row_count": len(rows_dict)
+                    }],
+                    "summary": final_result
+                }
+            
             return {
                 "success": True,
-                "message": "SQL executed successfully",
+                "message": f"SQL executed successfully. {total_intakes} program_intake(s) processed ({program_intakes_inserted} inserted, {program_intakes_updated} updated)",
                 "results": [{
                     "type": "SELECT",
                     "rows": rows_dict,
