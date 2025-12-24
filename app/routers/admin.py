@@ -1435,7 +1435,7 @@ class SQLGenerationResponse(BaseModel):
     validation: SQLValidationResponse
     document_text_preview: str
 
-@router.post("/document-import/generate-sql", response_model=SQLGenerationResponse)
+@router.post("/document-import/generate-sql")
 async def generate_sql_from_document(
     file: UploadFile = File(...),
     current_user: User = Depends(require_admin)
@@ -1538,7 +1538,18 @@ async def generate_sql_from_document(
                 # Return the response data as dict - FastAPI will validate against response_model
                 # Using dict instead of model instance to avoid serialization issues
                 print("✅ Returning response data...")
-                return response_data
+                
+                # Use JSONResponse to ensure response is sent immediately
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    content=response_data,
+                    status_code=200,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Cache-Control": "no-cache, no-store, must-revalidate",
+                        "X-Accel-Buffering": "no"  # Disable nginx buffering
+                    }
+                )
             except Exception as send_error:
                 print(f"❌ Error during response return: {str(send_error)}")
                 import traceback
@@ -1579,6 +1590,20 @@ async def execute_generated_sql(
     db: Session = Depends(get_db)
 ):
     """Execute the generated SQL script (admin only, with safety checks)"""
+    # Debug: log what we received
+    print(f"🔍 Received SQL execution request")
+    print(f"📄 SQL type: {type(request.sql)}")
+    print(f"📄 SQL length: {len(str(request.sql)) if request.sql else 0}")
+    print(f"📄 First 200 chars: {str(request.sql)[:200] if request.sql else 'None'}")
+    
+    # Ensure sql is a string
+    if not isinstance(request.sql, str):
+        print(f"❌ ERROR: SQL is not a string! Type: {type(request.sql)}, Value: {request.sql}")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"SQL must be a string, got {type(request.sql).__name__}"
+        )
+    
     sql = request.sql.strip()
     
     if not sql:

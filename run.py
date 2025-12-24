@@ -9,6 +9,8 @@ if __name__ == "__main__":
         "app.main:app",
         host="0.0.0.0",
         port=int(os.getenv("PORT", 8000)),
-        reload=reload
+        reload=reload,
+        timeout_keep_alive=300,  # Keep connections alive for 5 minutes (Railway paid plan)
+        timeout_graceful_shutdown=30
     )
 
