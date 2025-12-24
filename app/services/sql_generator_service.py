@@ -101,15 +101,15 @@ TABLES:
 - program_intake_scholarships(program_intake_id, scholarship_id, covers_tuition, covers_accommodation, covers_insurance, tuition_waiver_percent, living_allowance_monthly, living_allowance_yearly, first_year_only, renewal_required, deadline, eligibility_note)
 
 RULES:
-1) ENUM: intake_term = '{enum_values[0] if enum_values else "March"}'::intaketerm (use {enum_values_str}). Type: 'intaketerm'
-2) DEADLINE: application_deadline=timestamptz (primary), deadline_type='University'/'CSC' (no dates), extra deadlines in notes
-3) ACCOMMODATION: Keep accommodation_fee NULL unless general for all. Scholarship-specific → eligibility_note/notes
+1) ENUM: intake_term = '{enum_values[0] if enum_values else "March"}'::intaketerm (use EXACT values: {enum_values_str}, case-sensitive). Type: 'intaketerm'. Do NOT use 'MARCH' if enum has 'March'.
+2) DEADLINE: application_deadline=timestamptz (primary deadline, usually university), deadline_type='University' (no dates). If CSC deadline exists, add to notes: "CSC deadline: YYYY-MM-DD."
+3) ACCOMMODATION: Keep accommodation_fee NULL unless general for all. Scholarship-specific accommodation (e.g., Type B: 4500-9000 RMB/year) → program_intake_scholarships.eligibility_note: "Accommodation fee: 4500-9000 RMB/year (paid by student)"
 4) SCHOLARSHIPS: Only set fields from doc. first_year_only/tuition_waiver_percent only if stated. Registration/medical fees are university payments, not scholarship.
 5) ERRORS: errors AS (SELECT NULL::text AS err WHERE false UNION ALL SELECT '...' WHERE ...), final: array_agg(err) AS errors
-6) DOCUMENTS: Extract ALL, normalize: "Transcript"+"Highest Degree Certificate" (both Notarized), "Health Check Up Form", "Non Criminal Record", "Recommendation Letter" (2 from Professors), "Study Plan", "Work Experience Certificate", "Publication" (optional), "Resume", "Award/Extracurricular Certificates"
-7) KEYWORDS: 1-5 items, subject-only. Remove: campus/university/location/intake/year/scholarship names
+6) DOCUMENTS: Extract ALL 12 documents. CRITICAL: "Last Academic Transcript and Certificate(Notarized)" = TWO documents: "Transcript" (rules: "Notarized") AND "Highest Degree Certificate" (rules: "Notarized"). "English Proficiency Certificate(IELTS...)" = "English Proficiency Certificate" (rules: include IELTS/TOEFL requirements). Normalize: "Health Check Up Certificate"→"Health Check Up Form", "Police Clearance"→"Non Criminal Record", "Two recommendation Letter"→"Recommendation Letter" (rules: "Two letters from Professors/Associate Professors"), "Study Plan /Research Proposal"→"Study Plan", "Work Experience Certificate" (include rules), "Publication(If Applicable)"→"Publication" (is_required=false, applies_to='if_applicable'), "Resume", "Award/Extracurricular certificates"→"Award/Extracurricular Certificates"
+7) KEYWORDS: JSON array format: '["keyword1","keyword2"]'::jsonb. 1-5 items, subject-only. Remove: campus/university/location/intake/year/scholarship names (e.g., remove "zhuhai", "bnu", "beijing", "campus", "china", "march", "2026", "csc")
 8) GUARD: guard AS (SELECT 1 AS ok FROM university_cte), all INSERT/UPDATE must check WHERE EXISTS (SELECT 1 FROM guard)
-9) NOTES: application_fee=600, medical_insurance_fee=400 (note: "Medical fee only for one year"), visa_extension_fee=400 (note: "per year"), registration_fee in notes: "Registration fee: 800 CNY (only first year)"
+9) NOTES: Combine all fee notes: "Registration fee: 800 CNY (only first year). Medical fee only for one year. Visa extension fee: 400 CNY per year. CSC deadline: YYYY-MM-DD." (if CSC deadline exists). Include Type B accommodation note if applicable.
 
 EXTRACTION:
 - University: WHERE lower(name)=lower('...')
