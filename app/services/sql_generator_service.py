@@ -127,14 +127,15 @@ RULES:
    - If using SELECT in majors_data: NULL::jsonb AS keywords or '["keyword1","keyword2"]'::jsonb AS keywords - cast in SELECT
    - NEVER use NULL without ::jsonb cast. ALWAYS cast to jsonb: '["keyword1","keyword2"]'::jsonb or NULL::jsonb
 9) GUARD (CRITICAL): guard AS (SELECT 1 AS ok FROM university_cte), ALL INSERT/UPDATE statements MUST include WHERE EXISTS (SELECT 1 FROM guard). This is MANDATORY for: majors_upsert, majors_update, program_intakes_upsert, program_intakes_update, program_documents_upsert, program_documents_update, scholarships_upsert, program_intake_scholarships_upsert. NO EXCEPTIONS. Example: INSERT INTO majors ... WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...)
-10) INSERTION ORDER (CRITICAL): 
-    - Insert majors FIRST, then use those IDs in program_intakes
-    - program_intakes_data must JOIN with majors FROM THE ACTUAL TABLE (not CTE) with ALL matching criteria: FROM majors m WHERE m.university_id = (SELECT id FROM university_cte) AND lower(m.name) IN (...) AND m.degree_level = 'Master' AND m.teaching_language = 'English'
-    - CRITICAL: Include ALL matching fields (university_id, lower(name), degree_level, teaching_language) in WHERE clause. Use EXACT values from majors_data (e.g., if majors_data has 'Master', use 'Master' in WHERE, not 'masters' or 'Masters')
-    - After program_intakes are inserted, program_documents_data must use: FROM program_intakes pi WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = '...' AND pi.intake_year = ... (reference actual table, not CTE)
-    - After program_intakes are inserted, program_intake_scholarships_data must use: FROM program_intakes pi WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = '...' AND pi.intake_year = ... (reference actual table, not CTE)
-    - DO NOT join with CTEs that reference data that hasn't been inserted yet. Always reference the actual database tables after INSERTs complete.
-    - CRITICAL: program_intakes_data must include ALL matching criteria: FROM majors m WHERE m.university_id = (SELECT id FROM university_cte) AND lower(m.name) IN (...) AND m.degree_level = 'Master' AND m.teaching_language = 'English' - this ensures it finds the correct majors that were just inserted
+10) INSERTION ORDER (CRITICAL - EXECUTION SEQUENCE): 
+    - PostgreSQL WITH CTEs execute in order: majors_upsert executes FIRST and commits, THEN majors_update executes, THEN program_intakes_data can see the inserted/updated majors
+    - CRITICAL: program_intakes_data MUST be defined AFTER majors_upsert and majors_update CTEs in the WITH clause
+    - program_intakes_data must SELECT FROM majors m (actual table) with EXACT matching: FROM majors m WHERE m.university_id = (SELECT id FROM university_cte) AND lower(m.name) IN (lower('Major Name 1'), lower('Major Name 2')) AND m.degree_level = 'Master' AND m.teaching_language = 'English'
+    - Use EXACT string values from majors_data: if majors_data has 'Master', use 'Master' (not 'masters' or 'Masters'). If majors_data has 'English', use 'English' (not 'english' or 'ENGLISH')
+    - After program_intakes_upsert/update execute, program_documents_data must use: FROM program_intakes pi WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = 'MARCH'::intaketerm AND pi.intake_year = 2026 (reference actual table, use exact enum value)
+    - After program_intakes_upsert/update execute, program_intake_scholarships_data must use: FROM program_intakes pi WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = 'MARCH'::intaketerm AND pi.intake_year = 2026 (reference actual table, use exact enum value)
+    - CRITICAL: The WHERE clause in program_intakes_data must match EXACTLY what was inserted in majors_data. If majors_data inserts 'Master' and 'English', then program_intakes_data WHERE must use 'Master' and 'English' (case-sensitive for degree_level and teaching_language, case-insensitive for name using lower())
+    - If program_intakes_data returns 0 rows, check: 1) Did majors_upsert actually insert? 2) Do the WHERE criteria match exactly? 3) Are the enum values correct?
 11) NOTES: Combine all fee notes: "Registration fee: 800 CNY (only first year). Medical fee only for one year. Visa extension fee: 400 CNY per year. CSC deadline: YYYY-MM-DD." (if CSC deadline exists). Include accommodation note if applicable. CRITICAL: medical_insurance_fee MUST be set to numeric value (e.g., 400) if document mentions medical fee amount. Do NOT leave it NULL if document states "Medical: 400CNY" or similar.
 
 EXTRACTION:
@@ -156,22 +157,26 @@ EXTRACTION:
 - Documents: All from doc, normalized, with rules. "Last Academic Transcript and Certificate(Notarized)" = TWO documents: "Transcript" (rules: "Notarized") AND "Highest Degree Certificate" (rules: "Notarized"). Use: FROM program_intakes pi WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = '...' AND pi.intake_year = ... (reference actual table, not CTE)
 - Scholarships: Create and link, only explicit fields. first_year_only should be NULL/false unless doc explicitly states scholarship duration is first year only. Use: FROM program_intakes pi WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = '...' AND pi.intake_year = ... (reference actual table, not CTE)
 
-STYLE: Use WITH CTEs pattern. Idempotent. Pure SQL. Follow this structure:
+STYLE: Use WITH CTEs pattern. Idempotent. Pure SQL. Follow this EXACT structure (order matters):
 1) university_cte: SELECT id FROM universities WHERE lower(name)=lower('...')
 2) guard: SELECT 1 AS ok FROM university_cte
 3) majors_data: Use VALUES with explicit casting: (university_id, name, degree_level, teaching_language, duration_years, discipline, category, '["kw1","kw2"]'::jsonb, is_featured, is_active) OR use SELECT with casting: NULL::jsonb AS keywords or '["kw1","kw2"]'::jsonb AS keywords
 4) majors_upsert: INSERT INTO majors ... FROM majors_data WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...)
 5) majors_update: UPDATE majors ... FROM majors_data WHERE EXISTS (SELECT 1 FROM guard) AND ...
-6) program_intakes_data: SELECT FROM majors m (actual table, not CTE) WHERE m.university_id = (SELECT id FROM university_cte) AND lower(m.name) IN (...) AND m.degree_level = 'Master' AND m.teaching_language = 'English'
+6) program_intakes_data: SELECT FROM majors m (actual table, MUST be after majors_upsert/update) WHERE m.university_id = (SELECT id FROM university_cte) AND lower(m.name) IN (lower('Exact Name 1'), lower('Exact Name 2')) AND m.degree_level = 'Master' AND m.teaching_language = 'English'
+   - CRITICAL: Use EXACT same values from majors_data: if majors_data has 'Master', use 'Master' (case-sensitive). If majors_data has 'English', use 'English' (case-sensitive). For names, use lower() for case-insensitive matching but include the EXACT strings from majors_data
 7) program_intakes_upsert: INSERT INTO program_intakes ... FROM program_intakes_data WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...)
 8) program_intakes_update: UPDATE program_intakes ... FROM program_intakes_data WHERE EXISTS (SELECT 1 FROM guard) AND ...
-9) program_documents_data: SELECT FROM program_intakes pi (actual table) WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = '...' AND pi.intake_year = ...
+9) program_documents_data: SELECT FROM program_intakes pi (actual table, MUST be after program_intakes_upsert/update) WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = 'MARCH'::intaketerm AND pi.intake_year = 2026
 10) program_documents_upsert/update: INSERT/UPDATE with guard
 11) scholarships_upsert/update: INSERT/UPDATE with guard
-12) program_intake_scholarships_data: SELECT FROM program_intakes pi (actual table) WHERE ...
+12) program_intake_scholarships_data: SELECT FROM program_intakes pi (actual table, MUST be after program_intakes_upsert/update) WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = 'MARCH'::intaketerm AND pi.intake_year = 2026
 13) program_intake_scholarships_upsert: INSERT with guard
 14) Final SELECT: counts + errors array
-CRITICAL: Always reference actual database tables (majors, program_intakes) AFTER INSERTs, never reference CTEs with uninserted data."""
+CRITICAL: 
+- CTE execution order: majors_upsert executes and commits, THEN majors_update executes, THEN program_intakes_data can see the inserted/updated majors
+- Always reference actual database tables (majors, program_intakes) AFTER their INSERT/UPDATE CTEs, never reference CTEs with uninserted data
+- Use EXACT string matching: if majors_data inserts 'Master', program_intakes_data WHERE must use 'Master' (not 'Masters' or 'master')"""
 
         user_prompt = f"""Document text to parse:
 
