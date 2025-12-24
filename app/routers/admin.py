@@ -1607,52 +1607,86 @@ async def execute_generated_sql(
         # Execute SQL using raw connection
         from sqlalchemy import text
         
-        # Split SQL by semicolons and execute each statement
-        statements = [s.strip() for s in sql.split(';') if s.strip()]
+        # Remove trailing semicolon if present (for single statement execution)
+        sql_clean = sql.rstrip().rstrip(';').strip()
         
-        results = []
-        for statement in statements:
-            if statement:
-                try:
-                    result = db.execute(text(statement))
-                    # If it's a SELECT, fetch results
-                    if statement.strip().upper().startswith('SELECT'):
-                        rows = result.fetchall()
-                        columns = result.keys() if hasattr(result, 'keys') else []
-                        results.append({
-                            "statement": statement[:100] + "..." if len(statement) > 100 else statement,
-                            "type": "SELECT",
-                            "rows": [dict(zip(columns, row)) for row in rows] if columns else []
-                        })
+        print(f"🔍 Executing SQL (length: {len(sql_clean)} chars)")
+        print(f"📄 First 200 chars: {sql_clean[:200]}...")
+        
+        # Check if SQL contains university lookup (for debugging)
+        if 'university_cte' in sql_clean.lower() or 'universities' in sql_clean.lower():
+            # Try to extract university name for logging
+            uni_match = re.search(r"lower\(name\)\s*=\s*lower\(['\"]([^'\"]+)['\"]\)", sql_clean, re.IGNORECASE)
+            if uni_match:
+                uni_name = uni_match.group(1)
+                print(f"🔍 Looking for university: {uni_name}")
+                # Check if university exists
+                check_uni = db.execute(
+                    text("SELECT id, name FROM universities WHERE lower(name) = lower(:name) LIMIT 1"),
+                    {"name": uni_name}
+                ).fetchone()
+                if check_uni:
+                    print(f"✅ University found: ID={check_uni[0]}, Name={check_uni[1]}")
+                else:
+                    print(f"⚠️  WARNING: University '{uni_name}' not found in database!")
+        
+        # Execute the entire SQL script as one statement (handles CTEs properly)
+        result = db.execute(text(sql_clean))
+        
+        # Check if it's a SELECT statement (should return results)
+        if sql_clean.strip().upper().startswith('WITH') or sql_clean.strip().upper().startswith('SELECT'):
+            rows = result.fetchall()
+            columns = result.keys() if hasattr(result, 'keys') else []
+            
+            # Convert rows to dict format
+            rows_dict = []
+            for row in rows:
+                row_dict = {}
+                for i, col in enumerate(columns):
+                    value = row[i] if i < len(row) else None
+                    # Handle array types (like errors text[])
+                    if isinstance(value, list):
+                        row_dict[col] = value
                     else:
-                        # For INSERT/UPDATE, get rowcount
-                        results.append({
-                            "statement": statement[:100] + "..." if len(statement) > 100 else statement,
-                            "type": "DML",
-                            "rows_affected": result.rowcount if hasattr(result, 'rowcount') else 0
-                        })
-                except Exception as e:
-                    results.append({
-                        "statement": statement[:100] + "..." if len(statement) > 100 else statement,
-                        "error": str(e)
-                    })
-        
-        # Commit transaction
-        db.commit()
-        
-        # Find the final SELECT result (should contain counts and errors)
-        final_result = None
-        for result in reversed(results):
-            if result.get("type") == "SELECT" and result.get("rows"):
-                final_result = result["rows"][0] if result["rows"] else None
-                break
-        
-        return {
-            "success": True,
-            "message": "SQL executed successfully",
-            "results": results,
-            "summary": final_result
-        }
+                        row_dict[col] = value
+                rows_dict.append(row_dict)
+            
+            print(f"✅ SQL executed successfully. Returned {len(rows_dict)} row(s)")
+            if rows_dict:
+                print(f"📊 First row: {rows_dict[0]}")
+            
+            # The final SELECT should return one row with counts and errors
+            final_result = rows_dict[0] if rows_dict else None
+            
+            # Commit transaction
+            db.commit()
+            
+            return {
+                "success": True,
+                "message": "SQL executed successfully",
+                "results": [{
+                    "type": "SELECT",
+                    "rows": rows_dict,
+                    "row_count": len(rows_dict)
+                }],
+                "summary": final_result
+            }
+        else:
+            # For INSERT/UPDATE/DELETE, get rowcount
+            rows_affected = result.rowcount if hasattr(result, 'rowcount') else 0
+            db.commit()
+            
+            print(f"✅ SQL executed successfully. Rows affected: {rows_affected}")
+            
+            return {
+                "success": True,
+                "message": "SQL executed successfully",
+                "results": [{
+                    "type": "DML",
+                    "rows_affected": rows_affected
+                }],
+                "summary": {"rows_affected": rows_affected}
+            }
         
     except Exception as e:
         db.rollback()
