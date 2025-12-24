@@ -2831,6 +2831,18 @@ Output ONLY valid JSON, no other text:"""
             
             if state.major_query:
                 # Resolve major_query to major_ids
+                # CRITICAL: If university_id is known, pass it to filter majors to only those at that university
+                # This prevents matching majors from other universities
+                university_id = None
+                if hasattr(state, '_resolved_university_id') and state._resolved_university_id:
+                    university_id = state._resolved_university_id
+                elif state.university_query:
+                    # Try to resolve university_id if not already resolved
+                    university_id = self.resolve_university_id(state.university_query)
+                    if university_id:
+                        state._resolved_university_id = university_id
+                        print(f"DEBUG: Resolved university_query '{state.university_query}' to university_id: {university_id}")
+                
                 # For language programs, use much higher limit (100) to get all language programs
                 # Don't limit language programs - we need all of them to check durations and show options
                 limit = 100 if state.degree_level == "Language" else 6
@@ -2838,6 +2850,7 @@ Output ONLY valid JSON, no other text:"""
                     major_query=state.major_query,
                     degree_level=state.degree_level,
                     teaching_language=state.teaching_language,
+                    university_id=university_id,  # CRITICAL: Filter by university if known
                     limit=limit,
                     confidence_threshold=0.78
                 )
@@ -2865,6 +2878,34 @@ Output ONLY valid JSON, no other text:"""
                 state.wants_scholarship = extracted.get("wants_scholarship", False)
                 state.wants_earliest = extracted.get("wants_earliest", False)
                 print(f"DEBUG: Preserved extracted fields: major_query={state.major_query}, intake_term={state.intake_term}, degree_level={state.degree_level}")
+            
+            # CRITICAL: Also try to preserve from cached state if available (for follow-up questions)
+            if partner_id and conversation_id:
+                cached = self._get_cached_state(partner_id, conversation_id)
+                if cached and cached.get("state"):
+                    prev_cached_state = cached.get("state")
+                    # Preserve degree_level if not already set
+                    if not state.degree_level and hasattr(prev_cached_state, 'degree_level') and prev_cached_state.degree_level:
+                        state.degree_level = prev_cached_state.degree_level
+                        print(f"DEBUG: Preserved degree_level from cached state after error: {state.degree_level}")
+                    # Preserve major_query if not already set
+                    if not state.major_query and hasattr(prev_cached_state, 'major_query') and prev_cached_state.major_query:
+                        state.major_query = prev_cached_state.major_query
+                        print(f"DEBUG: Preserved major_query from cached state after error: {state.major_query}")
+                    # Preserve intake_term if not already set
+                    if not state.intake_term and hasattr(prev_cached_state, 'intake_term') and prev_cached_state.intake_term:
+                        state.intake_term = prev_cached_state.intake_term
+                        print(f"DEBUG: Preserved intake_term from cached state after error: {state.intake_term}")
+                    # Preserve resolved major IDs
+                    if hasattr(prev_cached_state, '_resolved_major_ids') and prev_cached_state._resolved_major_ids:
+                        state._resolved_major_ids = prev_cached_state._resolved_major_ids
+                        print(f"DEBUG: Preserved _resolved_major_ids from cached state after error: {state._resolved_major_ids}")
+                    # Preserve university
+                    if not state.university_query and hasattr(prev_cached_state, 'university_query') and prev_cached_state.university_query:
+                        state.university_query = prev_cached_state.university_query
+                        if hasattr(prev_cached_state, '_resolved_university_id') and prev_cached_state._resolved_university_id:
+                            state._resolved_university_id = prev_cached_state._resolved_university_id
+                        print(f"DEBUG: Preserved university_query from cached state after error: {state.university_query}")
         
         # Handle earliest intake: infer intake_term from current month if wants_earliest=True
         if state.wants_earliest and not state.intake_term:
@@ -3118,18 +3159,42 @@ Output ONLY valid JSON, no other text:"""
             )
             if len(major_ids) > 3:
                 # Too many candidates - check if they're all the same major name
+                # CRITICAL: Filter candidates by degree_level if it's established
+                # This prevents showing Bachelor-level majors when user is asking about Master-level (e.g., MBA)
                 candidates = []
+                candidate_ids = []
+                from app.models import Major
                 for mid in major_ids[:6]:
-                    major_name = self._get_major_name_by_id(mid)
-                    candidates.append(major_name)
+                    major_obj = self.db.query(Major).filter(Major.id == mid).first()
+                    if major_obj:
+                        # If degree_level is established, only include majors matching that degree level
+                        if state.degree_level:
+                            major_degree = str(major_obj.degree_level or "").strip()
+                            state_degree = str(state.degree_level).strip()
+                            if major_degree.lower() != state_degree.lower():
+                                # Skip majors that don't match the established degree level
+                                print(f"DEBUG: Filtering out major_id={mid} ({major_obj.name}) - degree_level '{major_degree}' doesn't match established '{state_degree}'")
+                                continue
+                        major_name = major_obj.name
+                        candidates.append(major_name)
+                        candidate_ids.append(mid)
+                
+                # If filtering by degree_level removed all candidates, use all candidates (fallback)
+                if not candidates and state.degree_level:
+                    print(f"DEBUG: All candidates filtered out by degree_level={state.degree_level}, using all candidates as fallback")
+                    for mid in major_ids[:6]:
+                        major_obj = self.db.query(Major).filter(Major.id == mid).first()
+                        if major_obj:
+                            candidates.append(major_obj.name)
+                            candidate_ids.append(mid)
                 
                 # Check if all candidates have the same name (case-insensitive)
                 if candidates:
                     unique_names = set(name.lower().strip() for name in candidates)
                     if len(unique_names) == 1:
                         # All candidates are the same major - use them without asking
-                        print(f"DEBUG: All {len(major_ids)} candidates have the same name '{candidates[0]}', using them without clarification")
-                        state._resolved_major_ids = major_ids
+                        print(f"DEBUG: All {len(candidate_ids)} candidates have the same name '{candidates[0]}', using them without clarification")
+                        state._resolved_major_ids = candidate_ids if candidate_ids else major_ids
                     else:
                         # Different major names - ask user to pick
                         needs_clar = True
@@ -3137,15 +3202,20 @@ Output ONLY valid JSON, no other text:"""
                         # Remove duplicates while preserving order
                         seen = set()
                         unique_candidates = []
-                        for c in candidates:
+                        unique_candidate_ids_filtered = []
+                        for i, c in enumerate(candidates):
                             c_lower = c.lower().strip()
                             if c_lower not in seen:
                                 seen.add(c_lower)
                                 unique_candidates.append(c)
+                                if i < len(candidate_ids):
+                                    unique_candidate_ids_filtered.append(candidate_ids[i])
+                                elif i < len(major_ids):
+                                    unique_candidate_ids_filtered.append(major_ids[i])
                         clarifying_question = f"Which major did you mean? " + " ".join([f"{i+1}) {c}" for i, c in enumerate(unique_candidates)])
                         # Store candidates in state for later retrieval
                         state._major_candidates = unique_candidates
-                        state._major_candidate_ids = major_ids[:6]
+                        state._major_candidate_ids = unique_candidate_ids_filtered if unique_candidate_ids_filtered else major_ids[:6]
         
         # Set pending state if clarification needed
         if needs_clar and clarifying_question and missing_slots:
@@ -3240,14 +3310,15 @@ Output ONLY valid JSON, no other text:"""
             is_free_tuition_query = state.wants_fees and any(kw in str(state.wants_fees) for kw in ["free", "0", "zero"])
             
             # For Language programs: only need degree_level and intake_term (no major needed)
-            # For Bachelor/Master/PhD: may need major_query if not specified
+            # CRITICAL: Language programs are non-degree, so we know degree_level=Language and don't ask
             if state.degree_level and "Language" in str(state.degree_level):
-                # Language program - only need degree_level and intake_term
+                # Language program - only need intake_term (degree_level is already known)
                 if not state.intake_term and not state.wants_earliest:
                     missing_slots.append("intake_term")
                     question_parts.append("intake term (March/September)")
             else:
                 # Non-Language programs - need degree_level, intake_term, and optionally major_query
+                # For LIST_PROGRAMS, still ask for degree_level (unless it's Language)
                 has_filter = (
                     state.degree_level or state.major_query or state.city or state.province or
                     state.teaching_language or state.intake_term or state.wants_earliest
@@ -3267,6 +3338,10 @@ Output ONLY valid JSON, no other text:"""
                         if state.degree_level and state.intake_term and not state.major_query:
                             # We can still query without major_query, so don't make it required
                             pass
+                elif not state.degree_level:
+                    # If we have other filters but no degree_level, still ask for it (except for Language)
+                    missing_slots.append("degree_level")
+                    question_parts.append("degree level (Language/Bachelor/Master/PhD)")
         
         elif intent == self.router.INTENT_SCHOLARSHIP:
             # SCHOLARSHIP clarification rules (FIXED: no scholarship_bundle, default to any scholarship)
@@ -4028,10 +4103,31 @@ Output ONLY valid JSON, no other text:"""
                 # For requirements queries, only filter by major if explicitly mentioned
                 # If user only mentions university, show requirements for all programs
                 if sql_params.get("major_ids"):
-                    # Check if major was likely mentioned in current query (not just from prev_state)
-                    # For now, include it but we'll relax other filters
-                    filters["major_ids"] = sql_params["major_ids"]
-                    print(f"DEBUG: REQUIREMENTS - added major_ids to filters: {len(filters['major_ids'])} majors")
+                    # CRITICAL: Check if these major_ids belong to the specified university
+                    # If not, remove the major filter to show all programs at the university
+                    if filters.get("university_id"):
+                        from app.models import Major
+                        # Check which of these majors belong to this university
+                        majors_at_uni = self.db.query(Major).filter(
+                            Major.id.in_(sql_params["major_ids"]),
+                            Major.university_id == filters["university_id"]
+                        ).all()
+                        matching_major_ids = [m.id for m in majors_at_uni]
+                        
+                        if matching_major_ids:
+                            # Some majors match - use only those
+                            filters["major_ids"] = matching_major_ids
+                            print(f"DEBUG: REQUIREMENTS - filtered major_ids to {len(matching_major_ids)} majors that belong to university_id={filters['university_id']}")
+                        else:
+                            # None of the majors belong to this university - remove major filter
+                            # This allows showing all programs at the university
+                            print(f"DEBUG: REQUIREMENTS - WARNING: None of the {len(sql_params['major_ids'])} major_ids belong to university_id={filters['university_id']}")
+                            print(f"DEBUG: REQUIREMENTS - Removing major filter to show all programs at the university")
+                            # Don't add major_ids to filters
+                    else:
+                        # No university filter - use all major_ids
+                        filters["major_ids"] = sql_params["major_ids"]
+                        print(f"DEBUG: REQUIREMENTS - added major_ids to filters: {len(filters['major_ids'])} majors")
                 elif sql_params.get("major_text"):
                     filters["major_text"] = sql_params["major_text"]
                     print(f"DEBUG: REQUIREMENTS - added major_text to filters: {filters['major_text']}")
@@ -4801,10 +4897,10 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                     matches.append(({"id": uni.id, "name": uni.name}, score))
             
                 matches.sort(key=lambda x: x[1], reverse=True)
-                if matches[0][1] >= 0.8:
+                if matches and len(matches) > 0 and matches[0][1] >= 0.8:
                     return True, matches[0][0], matches[:3]
                 else:
-                    return False, None, matches[:3]
+                    return False, None, matches[:3] if matches else []
         
         # Fallback to lightweight cache for fuzzy matching
         uni_cache = self._get_uni_name_cache()
@@ -7231,12 +7327,12 @@ Provide a comprehensive, positive answer using ALL relevant information from the
                         intake_str = f" for {state.intake_term} intake" if state.intake_term else ""
                         degree_str = f" {state.degree_level}" if state.degree_level else ""
                         
-            return {
+                        return {
                             "response": f"Here are the {degree_str} majors available at {university_name}{intake_str}:\n\n{majors_text}\n\nIf you want details about a specific major (fees, requirements, deadlines), please let me know which one interests you.",
                             "used_db": True,
-                "used_tavily": False,
-                "sources": []
-            }
+                            "used_tavily": False,
+                            "sources": []
+                        }
 
         # ========== HANDLE EMPTY RESULTS FOR LIST_UNIVERSITIES ==========
         # If LIST_UNIVERSITIES with fees/free_tuition returns empty results, provide helpful message

@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any
 from fastapi import Body
 from datetime import datetime, timedelta, timezone
+import re
 from app.database import get_db
 from app.models import (
     User, UserRole, Lead, Complaint, Student, Document, 
@@ -15,6 +16,7 @@ from app.services.application_automation import ApplicationAutomation
 from app.services.r2_service import R2Service
 from app.services.portals import HITPortal, BeihangPortal, BNUZPortal
 from app.services.document_verification_service import DocumentVerificationService
+from app.services.sql_generator_service import SQLGeneratorService
 from fastapi import UploadFile, File, Form
 from typing import Tuple
 import io
@@ -1415,4 +1417,151 @@ async def delete_student_document_admin(
     db.commit()
     
     return {"message": "Document deleted successfully"}
+
+# Initialize SQL generator service
+sql_generator_service = SQLGeneratorService()
+
+class SQLExecuteRequest(BaseModel):
+    sql: str
+
+@router.post("/document-import/generate-sql")
+async def generate_sql_from_document(
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_admin)
+):
+    """Upload a document and generate SQL script for importing university programs"""
+    # Note: We don't need DB session for this endpoint - LLM call can take long time
+    # and DB connection may timeout. We only need admin authentication.
+    try:
+        # Read file content
+        file_content = await file.read()
+        
+        # Extract text from document
+        document_text = sql_generator_service.extract_text_from_document(
+            file_content, 
+            file.filename or "document"
+        )
+        
+        if not document_text.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="No text content could be extracted from the document"
+            )
+        
+        # Generate SQL (this can take a long time with LLM)
+        # We don't need the DB session for this, so errors here won't affect DB connection
+        sql_script = sql_generator_service.generate_sql_from_text(document_text)
+        
+        # Validate SQL
+        validation = sql_generator_service.validate_sql(sql_script)
+        
+        return {
+            "sql": sql_script,
+            "validation": validation,
+            "document_text_preview": document_text[:500] + "..." if len(document_text) > 500 else document_text
+        }
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Log the full error for debugging
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"❌ SQL Generation Error: {str(e)}")
+        print(f"Traceback: {error_trace}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate SQL: {str(e)}"
+        )
+
+@router.post("/document-import/execute-sql")
+async def execute_generated_sql(
+    request: SQLExecuteRequest,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Execute the generated SQL script (admin only, with safety checks)"""
+    sql = request.sql.strip()
+    
+    if not sql:
+        raise HTTPException(status_code=400, detail="SQL script is empty")
+    
+    # Additional safety validation
+    dangerous_patterns = [
+        r'\bDROP\s+TABLE\b',
+        r'\bTRUNCATE\b',
+        r'\bDELETE\s+FROM\s+universities\b',
+        r'\bDELETE\s+FROM\s+majors\b',
+        r'\bDELETE\s+FROM\s+program_intakes\b',
+        r'\bALTER\s+TABLE\b',
+        r'\bCREATE\s+TABLE\b',
+        r'\bDROP\s+DATABASE\b',
+    ]
+    
+    for pattern in dangerous_patterns:
+        if re.search(pattern, sql, re.IGNORECASE):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Dangerous SQL operation detected. Execution blocked for safety."
+            )
+    
+    try:
+        # Execute SQL using raw connection
+        from sqlalchemy import text
+        
+        # Split SQL by semicolons and execute each statement
+        statements = [s.strip() for s in sql.split(';') if s.strip()]
+        
+        results = []
+        for statement in statements:
+            if statement:
+                try:
+                    result = db.execute(text(statement))
+                    # If it's a SELECT, fetch results
+                    if statement.strip().upper().startswith('SELECT'):
+                        rows = result.fetchall()
+                        columns = result.keys() if hasattr(result, 'keys') else []
+                        results.append({
+                            "statement": statement[:100] + "..." if len(statement) > 100 else statement,
+                            "type": "SELECT",
+                            "rows": [dict(zip(columns, row)) for row in rows] if columns else []
+                        })
+                    else:
+                        # For INSERT/UPDATE, get rowcount
+                        results.append({
+                            "statement": statement[:100] + "..." if len(statement) > 100 else statement,
+                            "type": "DML",
+                            "rows_affected": result.rowcount if hasattr(result, 'rowcount') else 0
+                        })
+                except Exception as e:
+                    results.append({
+                        "statement": statement[:100] + "..." if len(statement) > 100 else statement,
+                        "error": str(e)
+                    })
+        
+        # Commit transaction
+        db.commit()
+        
+        # Find the final SELECT result (should contain counts and errors)
+        final_result = None
+        for result in reversed(results):
+            if result.get("type") == "SELECT" and result.get("rows"):
+                final_result = result["rows"][0] if result["rows"] else None
+                break
+        
+        return {
+            "success": True,
+            "message": "SQL executed successfully",
+            "results": results,
+            "summary": final_result
+        }
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"SQL execution failed: {str(e)}"
+        )
 
