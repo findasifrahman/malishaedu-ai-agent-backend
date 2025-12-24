@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 from pydantic import BaseModel
@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any, List
 from fastapi import Body
 from datetime import datetime, timedelta, timezone
 import re
+import json
 from app.database import get_db
 from app.models import (
     User, UserRole, Lead, Complaint, Student, Document, 
@@ -1529,7 +1530,23 @@ async def generate_sql_from_document(
             # Return response - FastAPI will serialize it using response_model
             # Note: If this fails, it might be due to response size or timeout
             # 18K characters should be fine, but if issues persist, consider streaming
-            return response_data
+            try:
+                # Validate response can be serialized
+                json_str = json.dumps(response_data)
+                print(f"✅ Response validated and serialized ({len(json_str)} bytes)")
+                
+                # Return the response data as dict - FastAPI will validate against response_model
+                # Using dict instead of model instance to avoid serialization issues
+                print("✅ Returning response data...")
+                return response_data
+            except Exception as send_error:
+                print(f"❌ Error during response return: {str(send_error)}")
+                import traceback
+                print(traceback.format_exc())
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Error sending response: {str(send_error)}"
+                )
         except Exception as response_error:
             print(f"❌ Error preparing response: {str(response_error)}")
             import traceback
