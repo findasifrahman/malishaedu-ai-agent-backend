@@ -223,10 +223,12 @@ Generate the PostgreSQL SQL script following all rules above. Output ONLY SQL, n
             estimated_tokens = total_chars / 4  # Rough estimate
             print(f"📊 SQL Generation Context: ~{estimated_tokens:.0f} tokens ({total_chars:,} chars)")
             
+            # Use chat_completion with retry logic (max_retries handled in openai_service)
             response = self.openai_service.chat_completion(
                 messages=messages,
                 temperature=0.1,  # Low temperature for deterministic SQL
-                top_p=0.9
+                top_p=0.9,
+                max_retries=3  # Retry up to 3 times for connection errors
             )
             
             # Log token usage if available
@@ -252,12 +254,26 @@ Generate the PostgreSQL SQL script following all rules above. Output ONLY SQL, n
         except Exception as e:
             # Log the error
             import traceback
+            from openai import APIConnectionError, APITimeoutError, RateLimitError
+            
             error_trace = traceback.format_exc()
-            print(f"❌ Exception in SQL generation: {str(e)}")
-            print(f"Traceback: {error_trace}")
+            error_type = type(e).__name__
+            error_msg = str(e)
+            
+            print(f"❌ Exception in SQL generation ({error_type}): {error_msg}")
+            
+            # Provide user-friendly error messages
+            if isinstance(e, APIConnectionError):
+                user_error = "OpenAI API connection failed. Please check your internet connection and try again."
+            elif isinstance(e, APITimeoutError):
+                user_error = "OpenAI API request timed out. The document may be too large. Please try with a smaller document or try again later."
+            elif isinstance(e, RateLimitError):
+                user_error = "OpenAI API rate limit exceeded. Please wait a few minutes and try again."
+            else:
+                user_error = f"SQL generation failed: {error_msg}"
             
             # Return error SQL if generation fails
-            error_sql = f"""-- SQL Generation Error: {str(e)}
+            error_sql = f"""-- SQL Generation Error: {user_error}
 SELECT 
     0 as majors_inserted,
     0 as majors_updated,

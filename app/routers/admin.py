@@ -1461,12 +1461,16 @@ async def generate_sql_from_document(
         
         # Check if it's an error SQL (starts with error comment)
         if sql_script.strip().startswith('-- SQL Generation Error'):
-            # Extract error message from SQL
-            error_match = re.search(r'SQL Generation Error:\s*(.+)', sql_script)
-            error_msg = error_match.group(1) if error_match else "SQL generation failed"
+            # Extract error message from SQL (get text after "SQL Generation Error:" until newline or SELECT)
+            error_match = re.search(r'SQL Generation Error:\s*([^\n]+)', sql_script)
+            if error_match:
+                error_msg = error_match.group(1).strip()
+            else:
+                error_msg = "SQL generation failed due to an unknown error"
+            print(f"❌ Detected error SQL, raising HTTPException: {error_msg}")
             raise HTTPException(
                 status_code=500,
-                detail=f"SQL generation failed: {error_msg}"
+                detail=error_msg  # Return the user-friendly error message directly
             )
         
         # Validate SQL

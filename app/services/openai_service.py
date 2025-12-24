@@ -1,11 +1,18 @@
 from openai import OpenAI
+from openai import APIConnectionError, APITimeoutError, RateLimitError
 from app.config import settings
 from typing import List, Dict, Optional
 import json
+import time
 
 class OpenAIService:
     def __init__(self):
-        self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        # Configure OpenAI client with timeout and retry settings
+        self.client = OpenAI(
+            api_key=settings.OPENAI_API_KEY,
+            timeout=300.0,  # 5 minutes timeout for long SQL generation
+            max_retries=3  # Retry up to 3 times
+        )
         self.model = settings.OPENAI_MODEL
         self.router_model = settings.OPENAI_ROUTER_MODEL
         self.distill_model = settings.OPENAI_DISTILL_MODEL
@@ -37,17 +44,49 @@ class OpenAIService:
         messages: List[Dict[str, str]], 
         temperature: float = 0.7,
         top_p: float = 1.0,
-        stream: bool = False
+        stream: bool = False,
+        max_retries: int = 3
     ):
-        """Generate chat completion"""
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=temperature,
-            top_p=top_p,
-            stream=stream
-        )
-        return response
+        """Generate chat completion with retry logic"""
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=temperature,
+                    top_p=top_p,
+                    stream=stream,
+                    timeout=300.0  # 5 minutes timeout
+                )
+                return response
+            except (APIConnectionError, APITimeoutError) as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) * 2  # Exponential backoff: 2s, 4s, 8s
+                    print(f"⚠️  OpenAI connection error (attempt {attempt + 1}/{max_retries}). Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"❌ OpenAI connection failed after {max_retries} attempts")
+                    raise
+            except RateLimitError as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    wait_time = 60  # Wait 60 seconds for rate limit
+                    print(f"⚠️  OpenAI rate limit (attempt {attempt + 1}/{max_retries}). Waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"❌ OpenAI rate limit exceeded after {max_retries} attempts")
+                    raise
+            except Exception as e:
+                # For other errors, don't retry
+                print(f"❌ OpenAI API error: {str(e)}")
+                raise
+        
+        # Should not reach here, but just in case
+        if last_exception:
+            raise last_exception
     
     def distill_content(self, content: str, context: str) -> str:
         """Distill and extract key information from content"""
