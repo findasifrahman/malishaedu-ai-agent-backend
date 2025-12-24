@@ -1630,6 +1630,52 @@ async def execute_generated_sql(
                 else:
                     print(f"⚠️  WARNING: University '{uni_name}' not found in database!")
         
+        # Check enum values for debugging and fix if needed
+        try:
+            enum_values = db.execute(
+                text("SELECT unnest(enum_range(NULL::intaketerm))::text")
+            ).fetchall()
+            enum_list = [row[0] for row in enum_values]
+            print(f"📋 Available intaketerm enum values: {enum_list}")
+            
+            # If SQL uses incorrect enum values, try to fix them
+            if enum_list:
+                # Map common variations to actual enum values
+                enum_map = {}
+                for val in enum_list:
+                    enum_map[val.lower()] = val
+                    enum_map[val] = val
+                
+                # Check and replace incorrect enum casts
+                if "'March'::intaketerm" in sql_clean:
+                    if 'March' not in enum_list:
+                        # Try to find the correct value
+                        if 'march' in enum_map:
+                            correct_value = enum_map['march']
+                            print(f"⚠️  Fixing enum value: 'March' -> '{correct_value}'")
+                            sql_clean = sql_clean.replace("'March'::intaketerm", f"'{correct_value}'::intaketerm")
+                            sql_clean = sql_clean.replace("'March'::intaketerm", f"'{correct_value}'::intaketerm")
+                        else:
+                            print(f"❌ ERROR: 'March' not found in enum values! Available: {enum_list}")
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Invalid enum value 'March'. Available values: {enum_list}. Please update the SQL generator to use the correct enum values."
+                            )
+                
+                if "'September'::intaketerm" in sql_clean and 'September' not in enum_list:
+                    if 'september' in enum_map:
+                        correct_value = enum_map['september']
+                        print(f"⚠️  Fixing enum value: 'September' -> '{correct_value}'")
+                        sql_clean = sql_clean.replace("'September'::intaketerm", f"'{correct_value}'::intaketerm")
+                
+                if "'Other'::intaketerm" in sql_clean and 'Other' not in enum_list:
+                    if 'other' in enum_map:
+                        correct_value = enum_map['other']
+                        print(f"⚠️  Fixing enum value: 'Other' -> '{correct_value}'")
+                        sql_clean = sql_clean.replace("'Other'::intaketerm", f"'{correct_value}'::intaketerm")
+        except Exception as enum_check_error:
+            print(f"⚠️  Could not check/fix enum values: {enum_check_error}")
+        
         # Execute the entire SQL script as one statement (handles CTEs properly)
         result = db.execute(text(sql_clean))
         

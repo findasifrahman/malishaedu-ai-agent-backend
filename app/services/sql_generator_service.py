@@ -33,6 +33,22 @@ class SQLGeneratorService:
             except:
                 raise ValueError(f"Unsupported file type: {file_type}")
     
+    def _get_intake_term_enum_values(self) -> list:
+        """Query database to get actual IntakeTerm enum values"""
+        try:
+            from app.database import SessionLocal
+            from sqlalchemy import text
+            db = SessionLocal()
+            try:
+                result = db.execute(text("SELECT unnest(enum_range(NULL::intaketerm))::text"))
+                values = [row[0] for row in result.fetchall()]
+                return values if values else ['March', 'September', 'Other']  # Fallback
+            finally:
+                db.close()
+        except Exception as e:
+            print(f"⚠️  Could not query enum values: {e}, using defaults")
+            return ['March', 'September', 'Other']  # Default fallback
+    
     def generate_sql_from_text(self, document_text: str) -> str:
         """Generate PostgreSQL SQL script from document text using LLM"""
         
@@ -51,7 +67,11 @@ class SQLGeneratorService:
             document_text = first_part + "\n\n[... document truncated ...]\n\n" + last_part
             print(f"📊 Truncated document: {len(document_text)} chars")
         
-        system_prompt = """You are a PostgreSQL SQL generator for MalishaEdu university program import system.
+        # Get actual enum values from database
+        enum_values = self._get_intake_term_enum_values()
+        enum_values_str = ', '.join([f"'{v}'" for v in enum_values])
+        
+        system_prompt = f"""You are a PostgreSQL SQL generator for MalishaEdu university program import system.
 
 Your task: Read the document text and generate EXACTLY ONE valid PostgreSQL SQL script that:
 1. Finds the university by name (case-insensitive)
@@ -79,11 +99,14 @@ SCHEMA TABLES:
 
 MANDATORY FIXES (APPLY ALL):
 
-1) INTAKE_TERM ENUM CAST:
-   - program_intakes.intake_term is an enum type (IntakeTerm)
-   - ALWAYS use 'March'::intaketerm, 'September'::intaketerm, 'Other'::intaketerm
-   - NEVER use 'March'::text or just 'March' without cast
+1) INTAKE_TERM ENUM CAST (CRITICAL):
+   - program_intakes.intake_term is a PostgreSQL enum type named 'intaketerm'
+   - The ACTUAL enum values in the database are: {enum_values_str} (use these EXACT strings, case-sensitive)
+   - ALWAYS cast enum values using the exact strings above: '{enum_values[0] if enum_values else "March"}'::intaketerm
+   - NEVER use 'March'::text or just 'March' without the ::intaketerm cast
+   - The enum type name is 'intaketerm' (lowercase, no spaces)
    - Apply enum cast in: data CTEs, joins, WHERE clauses, INSERT/UPDATE statements
+   - CRITICAL: Use the EXACT enum values listed above - do not use variations like 'march' or 'MARCH' unless they match exactly
 
 2) DEADLINE MAPPING:
    - application_deadline: Store the PRIMARY deadline date (usually university deadline) as timestamptz
