@@ -126,8 +126,9 @@ RULES:
    - If using VALUES in majors_data: ('Major Name', 'Master', 'English', 2, NULL, NULL, '["keyword1","keyword2"]'::jsonb) - cast in VALUES
    - If using SELECT in majors_data: NULL::jsonb AS keywords or '["keyword1","keyword2"]'::jsonb AS keywords - cast in SELECT
    - NEVER use NULL without ::jsonb cast. ALWAYS cast to jsonb: '["keyword1","keyword2"]'::jsonb or NULL::jsonb
-9) GUARD (CRITICAL): guard AS (SELECT 1 AS ok FROM university_cte), ALL INSERT/UPDATE statements MUST include WHERE EXISTS (SELECT 1 FROM guard). This is MANDATORY for: majors_upsert, majors_update, program_intakes_upsert, program_intakes_update, program_documents_upsert, program_documents_update, scholarships_upsert, program_intake_scholarships_upsert. NO EXCEPTIONS. Example: INSERT INTO majors ... WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...)
-10) INSERTION ORDER (CRITICAL - EXECUTION SEQUENCE): 
+9) RETURNING CLAUSE (CRITICAL): ALL INSERT/UPDATE CTEs that will be referenced later for counting MUST have a RETURNING clause. This is MANDATORY for: majors_upsert (RETURNING id or RETURNING 1), majors_update (RETURNING m.id or RETURNING 1), program_intakes_upsert (RETURNING id or RETURNING 1), program_intakes_update (RETURNING pi.id or RETURNING 1), program_documents_upsert (RETURNING 1), program_documents_update (RETURNING 1), scholarships_upsert (RETURNING 1), scholarships_update (RETURNING 1), program_intake_scholarships_upsert (RETURNING 1). NO EXCEPTIONS. PostgreSQL requires RETURNING clause if you want to count rows from the CTE later. Example: INSERT INTO majors ... RETURNING 1 (or RETURNING id if you need the ID)
+10) GUARD (CRITICAL): guard AS (SELECT 1 AS ok FROM university_cte), ALL INSERT/UPDATE statements MUST include WHERE EXISTS (SELECT 1 FROM guard). This is MANDATORY for: majors_upsert, majors_update, program_intakes_upsert, program_intakes_update, program_documents_upsert, program_documents_update, scholarships_upsert, program_intake_scholarships_upsert. NO EXCEPTIONS. Example: INSERT INTO majors ... WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...)
+11) INSERTION ORDER (CRITICAL - EXECUTION SEQUENCE): 
     - PostgreSQL WITH CTEs execute in order: majors_upsert executes FIRST and commits, THEN majors_update executes, THEN program_intakes_data can see the inserted/updated majors
     - CRITICAL: program_intakes_data MUST be defined AFTER majors_upsert and majors_update CTEs in the WITH clause
     - program_intakes_data must SELECT FROM majors m (actual table) with EXACT matching: FROM majors m WHERE m.university_id = (SELECT id FROM university_cte) AND lower(m.name) IN (lower('Major Name 1'), lower('Major Name 2')) AND m.degree_level = 'Master' AND m.teaching_language = 'English'
@@ -136,7 +137,7 @@ RULES:
     - After program_intakes_upsert/update execute, program_intake_scholarships_data must use: FROM program_intakes pi WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = 'MARCH'::intaketerm AND pi.intake_year = 2026 (reference actual table, use exact enum value)
     - CRITICAL: The WHERE clause in program_intakes_data must match EXACTLY what was inserted in majors_data. If majors_data inserts 'Master' and 'English', then program_intakes_data WHERE must use 'Master' and 'English' (case-sensitive for degree_level and teaching_language, case-insensitive for name using lower())
     - If program_intakes_data returns 0 rows, check: 1) Did majors_upsert actually insert? 2) Do the WHERE criteria match exactly? 3) Are the enum values correct?
-11) NOTES: Combine all fee notes: "Registration fee: 800 CNY (only first year). Medical fee only for one year. Visa extension fee: 400 CNY per year. CSC deadline: YYYY-MM-DD." (if CSC deadline exists). Include accommodation note if applicable. CRITICAL: medical_insurance_fee MUST be set to numeric value (e.g., 400) if document mentions medical fee amount. Do NOT leave it NULL if document states "Medical: 400CNY" or similar.
+12) NOTES: Combine all fee notes: "Registration fee: 800 CNY (only first year). Medical fee only for one year. Visa extension fee: 400 CNY per year. CSC deadline: YYYY-MM-DD." (if CSC deadline exists). Include accommodation note if applicable. CRITICAL: medical_insurance_fee MUST be set to numeric value (e.g., 400) if document mentions medical fee amount. Do NOT leave it NULL if document states "Medical: 400CNY" or similar.
 
 EXTRACTION:
 - University: WHERE lower(name)=lower('...')
@@ -161,18 +162,20 @@ STYLE: Use WITH CTEs pattern. Idempotent. Pure SQL. Follow this EXACT structure 
 1) university_cte: SELECT id FROM universities WHERE lower(name)=lower('...')
 2) guard: SELECT 1 AS ok FROM university_cte
 3) majors_data: Use VALUES with explicit casting: (university_id, name, degree_level, teaching_language, duration_years, discipline, category, '["kw1","kw2"]'::jsonb, is_featured, is_active) OR use SELECT with casting: NULL::jsonb AS keywords or '["kw1","kw2"]'::jsonb AS keywords
-4) majors_upsert: INSERT INTO majors ... FROM majors_data WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...)
-5) majors_update: UPDATE majors ... FROM majors_data WHERE EXISTS (SELECT 1 FROM guard) AND ...
+4) majors_upsert: INSERT INTO majors ... FROM majors_data WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...) RETURNING 1 (or RETURNING id)
+5) majors_update: UPDATE majors ... FROM majors_data WHERE EXISTS (SELECT 1 FROM guard) AND ... RETURNING 1 (or RETURNING m.id)
 6) program_intakes_data: SELECT FROM majors m (actual table, MUST be after majors_upsert/update) WHERE m.university_id = (SELECT id FROM university_cte) AND lower(m.name) IN (lower('Exact Name 1'), lower('Exact Name 2')) AND m.degree_level = 'Master' AND m.teaching_language = 'English'
    - CRITICAL: Use EXACT same values from majors_data: if majors_data has 'Master', use 'Master' (case-sensitive). If majors_data has 'English', use 'English' (case-sensitive). For names, use lower() for case-insensitive matching but include the EXACT strings from majors_data
-7) program_intakes_upsert: INSERT INTO program_intakes ... FROM program_intakes_data WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...)
-8) program_intakes_update: UPDATE program_intakes ... FROM program_intakes_data WHERE EXISTS (SELECT 1 FROM guard) AND ...
+7) program_intakes_upsert: INSERT INTO program_intakes ... FROM program_intakes_data WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...) RETURNING 1 (or RETURNING id)
+8) program_intakes_update: UPDATE program_intakes ... FROM program_intakes_data WHERE EXISTS (SELECT 1 FROM guard) AND ... RETURNING 1 (or RETURNING pi.id)
 9) program_documents_data: SELECT FROM program_intakes pi (actual table, MUST be after program_intakes_upsert/update) WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = 'MARCH'::intaketerm AND pi.intake_year = 2026
-10) program_documents_upsert/update: INSERT/UPDATE with guard
-11) scholarships_upsert/update: INSERT/UPDATE with guard
-12) program_intake_scholarships_data: SELECT FROM program_intakes pi (actual table, MUST be after program_intakes_upsert/update) WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = 'MARCH'::intaketerm AND pi.intake_year = 2026
-13) program_intake_scholarships_upsert: INSERT with guard
-14) Final SELECT: counts + errors array
+10) program_documents_upsert: INSERT INTO program_documents ... FROM program_documents_data WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...) RETURNING 1 (MANDATORY - needed for counting)
+11) program_documents_update: UPDATE program_documents ... FROM program_documents_data WHERE EXISTS (SELECT 1 FROM guard) AND ... RETURNING 1 (MANDATORY - needed for counting)
+12) scholarships_upsert: INSERT INTO scholarships ... FROM scholarships_data WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...) RETURNING 1 (MANDATORY - needed for counting)
+13) scholarships_update: UPDATE scholarships ... FROM scholarships_data WHERE EXISTS (SELECT 1 FROM guard) AND ... RETURNING 1 (MANDATORY - needed for counting)
+14) program_intake_scholarships_data: SELECT FROM program_intakes pi (actual table, MUST be after program_intakes_upsert/update) WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = 'MARCH'::intaketerm AND pi.intake_year = 2026
+15) program_intake_scholarships_upsert: INSERT INTO program_intake_scholarships ... FROM program_intake_scholarships_data WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...) RETURNING 1 (MANDATORY - needed for counting)
+16) Final SELECT: counts + errors array
 CRITICAL: 
 - CTE execution order: majors_upsert executes and commits, THEN majors_update executes, THEN program_intakes_data can see the inserted/updated majors
 - Always reference actual database tables (majors, program_intakes) AFTER their INSERT/UPDATE CTEs, never reference CTEs with uninserted data
