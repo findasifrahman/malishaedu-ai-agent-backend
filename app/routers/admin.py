@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
+import uuid
+import threading
 from fastapi import Body
 from datetime import datetime, timedelta, timezone
 import re
@@ -24,6 +26,10 @@ import io
 from PIL import Image
 
 router = APIRouter()
+
+# In-memory job store for SQL generation (use Redis in production for persistence)
+sql_generation_jobs: Dict[str, Dict[str, Any]] = {}
+sql_jobs_lock = threading.Lock()
 
 class ModelTuningParams(BaseModel):
     temperature: Optional[float] = None
@@ -1582,6 +1588,160 @@ async def generate_sql_from_document(
             status_code=500,
             detail=f"Failed to generate SQL: {str(e)}"
         )
+
+@router.post("/document-import/generate-sql-start")
+async def start_sql_generation(
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_admin),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
+    """Start SQL generation in background, return job ID immediately (< 1 second)"""
+    import asyncio
+    
+    # Generate unique job ID
+    job_id = str(uuid.uuid4())
+    
+    # Read file content before starting background task
+    file_content = await file.read()
+    filename = file.filename or "document"
+    
+    # Initialize job status
+    with sql_jobs_lock:
+        sql_generation_jobs[job_id] = {
+            "status": "processing",
+            "progress": "Reading document...",
+            "result": None,
+            "error": None,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+    
+    # Start background task
+    background_tasks.add_task(
+        generate_sql_background,
+        job_id,
+        file_content,
+        filename
+    )
+    
+    print(f"🚀 Started SQL generation job: {job_id}")
+    return {
+        "job_id": job_id,
+        "status": "processing",
+        "message": "SQL generation started. Poll /generate-sql-status/{job_id} for results."
+    }
+
+async def generate_sql_background(job_id: str, file_content: bytes, filename: str):
+    """Background task to generate SQL"""
+    import asyncio
+    
+    try:
+        # Update progress
+        with sql_jobs_lock:
+            if job_id in sql_generation_jobs:
+                sql_generation_jobs[job_id]["progress"] = "Extracting text from document..."
+        
+        # Extract text from document
+        document_text = sql_generator_service.extract_text_from_document(
+            file_content,
+            filename
+        )
+        
+        if not document_text.strip():
+            with sql_jobs_lock:
+                if job_id in sql_generation_jobs:
+                    sql_generation_jobs[job_id].update({
+                        "status": "failed",
+                        "error": "No text content could be extracted from the document"
+                    })
+            return
+        
+        # Update progress
+        with sql_jobs_lock:
+            if job_id in sql_generation_jobs:
+                sql_generation_jobs[job_id]["progress"] = "Generating SQL with AI (this may take 60-120 seconds)..."
+        
+        # Generate SQL (this can take a long time with LLM)
+        print(f"🔄 [Job {job_id}] Starting SQL generation...")
+        sql_script = await asyncio.to_thread(
+            sql_generator_service.generate_sql_from_text,
+            document_text
+        )
+        print(f"✅ [Job {job_id}] SQL generation completed")
+        
+        # Check if SQL generation returned empty or error SQL
+        if not sql_script or not sql_script.strip():
+            with sql_jobs_lock:
+                if job_id in sql_generation_jobs:
+                    sql_generation_jobs[job_id].update({
+                        "status": "failed",
+                        "error": "SQL generation returned empty result. Please check the document content and try again."
+                    })
+            return
+        
+        # Check if it's an error SQL
+        if sql_script.strip().startswith('-- SQL Generation Error'):
+            error_match = re.search(r'SQL Generation Error:\s*([^\n]+)', sql_script)
+            error_msg = error_match.group(1).strip() if error_match else "SQL generation failed due to an unknown error"
+            with sql_jobs_lock:
+                if job_id in sql_generation_jobs:
+                    sql_generation_jobs[job_id].update({
+                        "status": "failed",
+                        "error": error_msg
+                    })
+            return
+        
+        # Validate SQL
+        validation = sql_generator_service.validate_sql(sql_script)
+        
+        # Create validation dict
+        validation_dict = {
+            "valid": bool(validation.get('valid', False)),
+            "errors": list(validation.get('errors', [])),
+            "warnings": list(validation.get('warnings', []))
+        }
+        
+        # Store result
+        with sql_jobs_lock:
+            if job_id in sql_generation_jobs:
+                sql_generation_jobs[job_id].update({
+                    "status": "completed",
+                    "progress": "Complete",
+                    "result": {
+                        "sql": sql_script,
+                        "validation": validation_dict,
+                        "document_text_preview": document_text[:500] + "..." if len(document_text) > 500 else document_text
+                    }
+                })
+        
+        print(f"✅ [Job {job_id}] SQL generation completed successfully: {len(sql_script)} characters")
+        
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        error_msg = str(e)
+        print(f"❌ [Job {job_id}] SQL generation failed: {error_msg}")
+        print(f"Traceback: {error_trace}")
+        
+        with sql_jobs_lock:
+            if job_id in sql_generation_jobs:
+                sql_generation_jobs[job_id].update({
+                    "status": "failed",
+                    "error": error_msg
+                })
+
+@router.get("/document-import/generate-sql-status/{job_id}")
+async def get_sql_generation_status(
+    job_id: str,
+    current_user: User = Depends(require_admin)
+):
+    """Get SQL generation job status"""
+    with sql_jobs_lock:
+        if job_id not in sql_generation_jobs:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        job = sql_generation_jobs[job_id].copy()
+    
+    return job
 
 @router.post("/document-import/execute-sql")
 async def execute_generated_sql(
