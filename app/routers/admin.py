@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import uuid
 import threading
+import asyncio
 from fastapi import Body
 from datetime import datetime, timedelta, timezone
 import re
@@ -19,7 +20,10 @@ from app.services.application_automation import ApplicationAutomation
 from app.services.r2_service import R2Service
 from app.services.portals import HITPortal, BeihangPortal, BNUZPortal
 from app.services.document_verification_service import DocumentVerificationService
-from app.services.sql_generator_service import SQLGeneratorService
+from app.services.sql_generator_service import SQLGeneratorService  # DEPRECATED - kept for backward compatibility
+from app.services.document_extraction_service import DocumentExtractionService
+from app.services.data_ingestion_service import DataIngestionService
+from app.schemas.document_import import ExtractedData
 from fastapi import UploadFile, File, Form
 from typing import Tuple
 import io
@@ -30,6 +34,13 @@ router = APIRouter()
 # In-memory job store for SQL generation (use Redis in production for persistence)
 sql_generation_jobs: Dict[str, Dict[str, Any]] = {}
 sql_jobs_lock = threading.Lock()
+
+# In-memory job store for data extraction (use Redis in production for persistence)
+extraction_jobs: Dict[str, Dict[str, Any]] = {}
+extraction_jobs_lock = threading.Lock()
+
+# Initialize new services
+document_extraction_service = DocumentExtractionService()
 
 class ModelTuningParams(BaseModel):
     temperature: Optional[float] = None
@@ -1441,6 +1452,12 @@ class SQLGenerationResponse(BaseModel):
     validation: SQLValidationResponse
     document_text_preview: str
 
+# ============================================================================
+# DEPRECATED: OLD SQL GENERATION ENDPOINTS
+# These endpoints are kept for backward compatibility but should NOT be used.
+# Use the new data extraction/ingestion pipeline instead.
+# ============================================================================
+
 @router.post("/document-import/generate-sql")
 async def generate_sql_from_document(
     file: UploadFile = File(...),
@@ -1970,5 +1987,217 @@ async def execute_generated_sql(
         raise HTTPException(
             status_code=500,
             detail=f"SQL execution failed: {str(e)}"
+        )
+
+
+# ============================================================================
+# NEW PRODUCTION-SAFE DATA INGESTION PIPELINE
+# ============================================================================
+
+class DataExtractionRequest(BaseModel):
+    """Request to extract data from document"""
+    pass
+
+class DataIngestionRequest(BaseModel):
+    """Request to ingest extracted data"""
+    extracted_data: Dict[str, Any]
+
+@router.post("/document-import/extract-data-start")
+async def start_data_extraction(
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_admin),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
+    """
+    Start data extraction in background, return job ID immediately.
+    NEW PRODUCTION-SAFE ENDPOINT - LLM only extracts JSON, no SQL generation.
+    """
+    import asyncio
+    
+    # Generate unique job ID
+    job_id = str(uuid.uuid4())
+    
+    # Read file content before starting background task
+    file_content = await file.read()
+    filename = file.filename or "document"
+    
+    # Initialize job status
+    with extraction_jobs_lock:
+        extraction_jobs[job_id] = {
+            "status": "processing",
+            "progress": "Reading document...",
+            "result": None,
+            "error": None,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+    
+    # Start background task
+    background_tasks.add_task(
+        extract_data_background,
+        job_id,
+        file_content,
+        filename
+    )
+    
+    print(f"🚀 Started data extraction job: {job_id}")
+    return {
+        "job_id": job_id,
+        "status": "processing",
+        "message": "Data extraction started. Poll /document-import/extract-data-status/{job_id} for results."
+    }
+
+async def extract_data_background(job_id: str, file_content: bytes, filename: str):
+    """Background task to extract data from document"""
+    try:
+        # Update progress
+        with extraction_jobs_lock:
+            if job_id in extraction_jobs:
+                extraction_jobs[job_id]["progress"] = "Extracting text from document..."
+        
+        # Extract text from document
+        document_text = document_extraction_service.extract_text_from_document(
+            file_content,
+            filename
+        )
+        
+        if not document_text.strip():
+            with extraction_jobs_lock:
+                if job_id in extraction_jobs:
+                    extraction_jobs[job_id].update({
+                        "status": "failed",
+                        "error": "No text content could be extracted from the document"
+                    })
+            return
+        
+        # Update progress
+        with extraction_jobs_lock:
+            if job_id in extraction_jobs:
+                extraction_jobs[job_id]["progress"] = "Extracting structured data with AI (this may take 60-120 seconds)..."
+        
+        # Extract structured data (this can take a long time with LLM)
+        print(f"🔄 [Job {job_id}] Starting data extraction...")
+        extracted_data = await asyncio.to_thread(
+            document_extraction_service.extract_data_from_text,
+            document_text
+        )
+        print(f"✅ [Job {job_id}] Data extraction completed")
+        
+        # Validate extracted data
+        try:
+            validated_data = ExtractedData(**extracted_data)
+            extracted_data = validated_data.dict()
+        except Exception as validation_error:
+            print(f"⚠️  [Job {job_id}] Validation warning: {validation_error}")
+            # Continue with extracted data even if validation fails (will be caught during ingestion)
+        
+        # Store result
+        with extraction_jobs_lock:
+            if job_id in extraction_jobs:
+                extraction_jobs[job_id].update({
+                    "status": "completed",
+                    "progress": "Complete",
+                    "result": {
+                        "extracted_data": extracted_data,
+                        "document_text_preview": document_text[:500] + "..." if len(document_text) > 500 else document_text
+                    }
+                })
+        
+        # Count majors (handle both formats: individual majors or major_groups)
+        majors_count = 0
+        if extracted_data.get('majors'):
+            majors_count = len(extracted_data.get('majors', []))
+        elif extracted_data.get('major_groups'):
+            for group in extracted_data.get('major_groups', []):
+                majors_count += len(group.get('major_names', []))
+        print(f"✅ [Job {job_id}] Data extraction completed successfully: {majors_count} majors")
+        
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        error_msg = str(e)
+        print(f"❌ [Job {job_id}] Data extraction failed: {error_msg}")
+        print(f"Traceback: {error_trace}")
+        
+        with extraction_jobs_lock:
+            if job_id in extraction_jobs:
+                extraction_jobs[job_id].update({
+                    "status": "failed",
+                    "error": error_msg
+                })
+
+@router.get("/document-import/extract-data-status/{job_id}")
+async def get_extraction_status(
+    job_id: str,
+    current_user: User = Depends(require_admin)
+):
+    """Get data extraction job status"""
+    with extraction_jobs_lock:
+        if job_id not in extraction_jobs:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        job = extraction_jobs[job_id].copy()
+    
+    return job
+
+@router.post("/document-import/ingest-data")
+async def ingest_extracted_data(
+    request: DataIngestionRequest,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Ingest extracted data into database.
+    NEW PRODUCTION-SAFE ENDPOINT - All SQL is generated deterministically in backend code.
+    """
+    try:
+        # Validate extracted data
+        try:
+            validated_data = ExtractedData(**request.extracted_data)
+        except Exception as validation_error:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid extracted data: {str(validation_error)}"
+            )
+        
+        # Initialize ingestion service
+        ingestion_service = DataIngestionService(db)
+        
+        # Ingest data
+        print(f"🔄 Starting data ingestion...")
+        result = ingestion_service.ingest_extracted_data(request.extracted_data)
+        print(f"✅ Data ingestion completed: {result}")
+        
+        # Check if critical entities were inserted
+        if result["program_intakes_inserted"] == 0 and result["program_intakes_updated"] == 0:
+            # This is a warning, not an error - data might already exist
+            result["errors"].append("WARNING: No program intakes were inserted or updated. Data may already exist.")
+        
+        return {
+            "success": True,
+            "message": "Data ingested successfully",
+            "counts": {
+                "majors_inserted": result["majors_inserted"],
+                "majors_updated": result["majors_updated"],
+                "program_intakes_inserted": result["program_intakes_inserted"],
+                "program_intakes_updated": result["program_intakes_updated"],
+                "documents_inserted": result["documents_inserted"],
+                "documents_updated": result["documents_updated"],
+                "scholarships_inserted": result["scholarships_inserted"],
+                "scholarships_updated": result["scholarships_updated"],
+                "links_inserted": result["links_inserted"]
+            },
+            "errors": result["errors"]
+        }
+        
+    except Exception as e:
+        db.rollback()
+        import traceback
+        error_trace = traceback.format_exc()
+        error_msg = str(e)
+        print(f"❌ Data ingestion failed: {error_msg}")
+        print(f"Traceback: {error_trace}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Data ingestion failed: {error_msg}"
         )
 
