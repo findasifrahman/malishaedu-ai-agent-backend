@@ -122,7 +122,10 @@ RULES:
 5) SCHOLARSHIPS: Only set fields from doc. first_year_only should be NULL or false unless document explicitly states scholarship is first year only. Registration/medical fees "only first year" are UNIVERSITY payments, NOT scholarship duration. tuition_waiver_percent=100 only if doc explicitly states full tuition waiver.
 6) ERRORS: errors AS (SELECT NULL::text AS err WHERE false UNION ALL SELECT '...' WHERE ...), final: array_agg(err) AS errors
 7) DOCUMENTS: Extract ALL  documents. CRITICAL: "Last Academic Transcript and Certificate(Notarized)" = TWO documents: "Transcript" (rules: "Notarized") AND "Highest Degree Certificate" (rules: "Notarized"). "English Proficiency Certificate(IELTS...)" = "English Proficiency Certificate" (rules: include IELTS/TOEFL requirements). Normalize: "Health Check Up Certificate"→"Health Check Up Form", "Police Clearance"→"Non Criminal Record", "Two recommendation Letter"→"Recommendation Letter" (rules: "Two letters from Professors/Associate Professors"), "Study Plan /Research Proposal"→"Study Plan", "Work Experience Certificate" (include rules), "Publication(If Applicable)"→"Publication" (is_required=false, applies_to='if_applicable'), "Resume", "Award/Extracurricular certificates"→"Award/Extracurricular Certificates"
-8) KEYWORDS: JSON array format: '["keyword1","keyword2"]'::jsonb. 1-5 items, subject-only. Remove: campus/university/location/intake/year/scholarship names (e.g., remove "zhuhai", "bnu", "beijing", "campus", "china", "march", "2026", "csc")
+8) KEYWORDS (CRITICAL - TYPE CASTING): JSON array format: '["keyword1","keyword2"]'::jsonb. 1-5 items, subject-only. Remove: campus/university/location/intake/year/scholarship names (e.g., remove "zhuhai", "bnu", "beijing", "campus", "china", "march", "2026", "csc"). CRITICAL: keywords column is jsonb type. 
+   - If using VALUES in majors_data: ('Major Name', 'Master', 'English', 2, NULL, NULL, '["keyword1","keyword2"]'::jsonb) - cast in VALUES
+   - If using SELECT in majors_data: NULL::jsonb AS keywords or '["keyword1","keyword2"]'::jsonb AS keywords - cast in SELECT
+   - NEVER use NULL without ::jsonb cast. ALWAYS cast to jsonb: '["keyword1","keyword2"]'::jsonb or NULL::jsonb
 9) GUARD (CRITICAL): guard AS (SELECT 1 AS ok FROM university_cte), ALL INSERT/UPDATE statements MUST include WHERE EXISTS (SELECT 1 FROM guard). This is MANDATORY for: majors_upsert, majors_update, program_intakes_upsert, program_intakes_update, program_documents_upsert, program_documents_update, scholarships_upsert, program_intake_scholarships_upsert. NO EXCEPTIONS. Example: INSERT INTO majors ... WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...)
 10) INSERTION ORDER (CRITICAL): 
     - Insert majors FIRST, then use those IDs in program_intakes
@@ -136,7 +139,7 @@ RULES:
 
 EXTRACTION:
 - University: WHERE lower(name)=lower('...')
-- Majors: Check existence first (university_id + lower(name) + degree_level + teaching_language), then INSERT ... WHERE NOT EXISTS or UPDATE. MUST insert majors before using them in program_intakes. Use 'Master' (capitalized, singular) for degree_level, NOT 'masters' or 'Masters'. Valid: 'Bachelor', 'Master', 'Phd', 'Language Program'.
+- Majors: Check existence first (university_id + lower(name) + degree_level + teaching_language), then INSERT ... WHERE NOT EXISTS or UPDATE. MUST insert majors before using them in program_intakes. Use 'Master' (capitalized, singular) for degree_level, NOT 'masters' or 'Masters'. Valid: 'Bachelor', 'Master', 'Phd', 'Language Program'. CRITICAL: keywords column is jsonb type. In majors_data CTE, always cast: NULL::jsonb AS keywords (if no keywords) or '["keyword1","keyword2"]'::jsonb AS keywords. NEVER use just NULL without ::jsonb cast.
 - Intakes: intake_term='{enum_values[0] if enum_values else "March"}'::intaketerm, intake_year required. JOIN with majors FROM ACTUAL TABLE with ALL matching criteria: FROM majors m WHERE m.university_id = (SELECT id FROM university_cte) AND lower(m.name) IN (...) AND m.degree_level = 'Master' AND m.teaching_language = 'English' (use EXACT values from majors_data - if majors_data has 'Master', use 'Master' in WHERE clause)
 - Fees: 
   * CNY if RMB/CNY, USD if USD, else CNY
@@ -153,7 +156,22 @@ EXTRACTION:
 - Documents: All from doc, normalized, with rules. "Last Academic Transcript and Certificate(Notarized)" = TWO documents: "Transcript" (rules: "Notarized") AND "Highest Degree Certificate" (rules: "Notarized"). Use: FROM program_intakes pi WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = '...' AND pi.intake_year = ... (reference actual table, not CTE)
 - Scholarships: Create and link, only explicit fields. first_year_only should be NULL/false unless doc explicitly states scholarship duration is first year only. Use: FROM program_intakes pi WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = '...' AND pi.intake_year = ... (reference actual table, not CTE)
 
-STYLE: WITH CTEs (university_cte, guard, data), INSERT/UPDATE (guarded), final SELECT with counts+errors. Idempotent. Pure SQL."""
+STYLE: Use WITH CTEs pattern. Idempotent. Pure SQL. Follow this structure:
+1) university_cte: SELECT id FROM universities WHERE lower(name)=lower('...')
+2) guard: SELECT 1 AS ok FROM university_cte
+3) majors_data: Use VALUES with explicit casting: (university_id, name, degree_level, teaching_language, duration_years, discipline, category, '["kw1","kw2"]'::jsonb, is_featured, is_active) OR use SELECT with casting: NULL::jsonb AS keywords or '["kw1","kw2"]'::jsonb AS keywords
+4) majors_upsert: INSERT INTO majors ... FROM majors_data WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...)
+5) majors_update: UPDATE majors ... FROM majors_data WHERE EXISTS (SELECT 1 FROM guard) AND ...
+6) program_intakes_data: SELECT FROM majors m (actual table, not CTE) WHERE m.university_id = (SELECT id FROM university_cte) AND lower(m.name) IN (...) AND m.degree_level = 'Master' AND m.teaching_language = 'English'
+7) program_intakes_upsert: INSERT INTO program_intakes ... FROM program_intakes_data WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...)
+8) program_intakes_update: UPDATE program_intakes ... FROM program_intakes_data WHERE EXISTS (SELECT 1 FROM guard) AND ...
+9) program_documents_data: SELECT FROM program_intakes pi (actual table) WHERE pi.university_id = (SELECT id FROM university_cte) AND pi.intake_term = '...' AND pi.intake_year = ...
+10) program_documents_upsert/update: INSERT/UPDATE with guard
+11) scholarships_upsert/update: INSERT/UPDATE with guard
+12) program_intake_scholarships_data: SELECT FROM program_intakes pi (actual table) WHERE ...
+13) program_intake_scholarships_upsert: INSERT with guard
+14) Final SELECT: counts + errors array
+CRITICAL: Always reference actual database tables (majors, program_intakes) AFTER INSERTs, never reference CTEs with uninserted data."""
 
         user_prompt = f"""Document text to parse:
 
