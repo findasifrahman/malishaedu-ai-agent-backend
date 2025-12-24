@@ -240,9 +240,22 @@ Generate the PostgreSQL SQL script following all rules above. Output ONLY SQL, n
             sql_content = re.sub(r'\n```\s*$', '', sql_content, flags=re.MULTILINE)
             sql_content = sql_content.strip()
             
+            # Log SQL generation result
+            if sql_content:
+                print(f"✅ SQL generated: {len(sql_content)} characters")
+                print(f"📄 First 200 chars: {sql_content[:200]}...")
+            else:
+                print("⚠️  WARNING: SQL content is empty after generation")
+            
             return sql_content
             
         except Exception as e:
+            # Log the error
+            import traceback
+            error_trace = traceback.format_exc()
+            print(f"❌ Exception in SQL generation: {str(e)}")
+            print(f"Traceback: {error_trace}")
+            
             # Return error SQL if generation fails
             error_sql = f"""-- SQL Generation Error: {str(e)}
 SELECT 

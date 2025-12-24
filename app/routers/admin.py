@@ -1452,8 +1452,29 @@ async def generate_sql_from_document(
         # We don't need the DB session for this, so errors here won't affect DB connection
         sql_script = sql_generator_service.generate_sql_from_text(document_text)
         
+        # Check if SQL generation returned empty or error SQL
+        if not sql_script or not sql_script.strip():
+            raise HTTPException(
+                status_code=500,
+                detail="SQL generation returned empty result. Please check the document content and try again."
+            )
+        
+        # Check if it's an error SQL (starts with error comment)
+        if sql_script.strip().startswith('-- SQL Generation Error'):
+            # Extract error message from SQL
+            error_match = re.search(r'SQL Generation Error:\s*(.+)', sql_script)
+            error_msg = error_match.group(1) if error_match else "SQL generation failed"
+            raise HTTPException(
+                status_code=500,
+                detail=f"SQL generation failed: {error_msg}"
+            )
+        
         # Validate SQL
         validation = sql_generator_service.validate_sql(sql_script)
+        
+        # Log success
+        print(f"✅ SQL generated successfully: {len(sql_script)} characters")
+        print(f"📊 Validation: valid={validation['valid']}, errors={len(validation['errors'])}, warnings={len(validation['warnings'])}")
         
         return {
             "sql": sql_script,
@@ -1462,6 +1483,7 @@ async def generate_sql_from_document(
         }
         
     except ValueError as e:
+        print(f"❌ ValueError in SQL generation: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
