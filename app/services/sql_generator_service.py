@@ -103,29 +103,51 @@ TABLES:
 RULES:
 1) ENUM: intake_term = '{enum_values[0] if enum_values else "March"}'::intaketerm (use EXACT values: {enum_values_str}, case-sensitive). Type: 'intaketerm'. Do NOT use 'MARCH' if enum has 'March'.
 2) DEADLINE: application_deadline=timestamptz (primary deadline, usually university), deadline_type='University' (no dates). If CSC deadline exists, add to notes: "CSC deadline: YYYY-MM-DD."
-3) ACCOMMODATION: Keep accommodation_fee NULL unless general for all. Scholarship-specific accommodation (e.g., Type B: 4500-9000 RMB/year) → program_intake_scholarships.eligibility_note: "Accommodation fee: 4500-9000 RMB/year (paid by student)"
-4) SCHOLARSHIPS: Only set fields from doc. first_year_only should be NULL or false unless document explicitly states scholarship is first year only. Registration/medical fees "only first year" are UNIVERSITY payments, NOT scholarship duration. tuition_waiver_percent=100 only if doc explicitly states full tuition waiver.
-5) ERRORS: errors AS (SELECT NULL::text AS err WHERE false UNION ALL SELECT '...' WHERE ...), final: array_agg(err) AS errors
-6) DOCUMENTS: Extract ALL 12 documents. CRITICAL: "Last Academic Transcript and Certificate(Notarized)" = TWO documents: "Transcript" (rules: "Notarized") AND "Highest Degree Certificate" (rules: "Notarized"). "English Proficiency Certificate(IELTS...)" = "English Proficiency Certificate" (rules: include IELTS/TOEFL requirements). Normalize: "Health Check Up Certificate"→"Health Check Up Form", "Police Clearance"→"Non Criminal Record", "Two recommendation Letter"→"Recommendation Letter" (rules: "Two letters from Professors/Associate Professors"), "Study Plan /Research Proposal"→"Study Plan", "Work Experience Certificate" (include rules), "Publication(If Applicable)"→"Publication" (is_required=false, applies_to='if_applicable'), "Resume", "Award/Extracurricular certificates"→"Award/Extracurricular Certificates"
-7) KEYWORDS: JSON array format: '["keyword1","keyword2"]'::jsonb. 1-5 items, subject-only. Remove: campus/university/location/intake/year/scholarship names (e.g., remove "zhuhai", "bnu", "beijing", "campus", "china", "march", "2026", "csc")
-8) GUARD: guard AS (SELECT 1 AS ok FROM university_cte), all INSERT/UPDATE must check WHERE EXISTS (SELECT 1 FROM guard)
-9) NOTES: Combine all fee notes: "Registration fee: 800 CNY (only first year). Medical fee only for one year. Visa extension fee: 400 CNY per year. CSC deadline: YYYY-MM-DD." (if CSC deadline exists). Include Type B accommodation note if applicable. CRITICAL: medical_insurance_fee MUST be set to numeric value (e.g., 400) if document mentions medical fee amount. Do NOT leave it NULL if document states "Medical: 400CNY" or similar. CRITICAL: medical_insurance_fee must be set to numeric value (e.g., 400) if document mentions medical fee. Do NOT leave it NULL if document states a medical fee amount.
+3) ACCOMMODATION FEES (CRITICAL): 
+   - If document shows accommodation fee as RANGE (e.g., "4500-9000RMB/Year" or "2500-3500 CNY/year"):
+     * Set accommodation_fee = LOWER BOUND (e.g., 4500, NOT 9000)
+     * Set accommodation_fee_period = 'year' or 'month' or 'semester' as specified
+     * Set accommodation_note = FULL TEXT from document (e.g., "Accommodation: 4500-9000RMB(645$-1290$)/Year")
+   - If accommodation is scholarship-specific (e.g., "Type B: 4500-9000 RMB/year"):
+     * Keep program_intakes.accommodation_fee NULL (unless general for all)
+     * Put in program_intake_scholarships.eligibility_note: "Accommodation fee: 4500-9000 RMB/year (paid by student)"
+   - ALWAYS use LOWER BOUND for numeric fee fields when range is given
+4) FEES WITH RANGES: For ANY fee with range (e.g., "2500-3500", "4500-9000"):
+   - Numeric field = LOWER BOUND value
+   - Full range text goes in corresponding _note field (accommodation_note, notes, etc.)
+   - Example: "Accommodation: 4500-9000RMB/Year" → accommodation_fee=4500, accommodation_note="Accommodation: 4500-9000RMB(645$-1290$)/Year"
+5) SCHOLARSHIPS: Only set fields from doc. first_year_only should be NULL or false unless document explicitly states scholarship is first year only. Registration/medical fees "only first year" are UNIVERSITY payments, NOT scholarship duration. tuition_waiver_percent=100 only if doc explicitly states full tuition waiver.
+6) ERRORS: errors AS (SELECT NULL::text AS err WHERE false UNION ALL SELECT '...' WHERE ...), final: array_agg(err) AS errors
+7) DOCUMENTS: Extract ALL  documents. CRITICAL: "Last Academic Transcript and Certificate(Notarized)" = TWO documents: "Transcript" (rules: "Notarized") AND "Highest Degree Certificate" (rules: "Notarized"). "English Proficiency Certificate(IELTS...)" = "English Proficiency Certificate" (rules: include IELTS/TOEFL requirements). Normalize: "Health Check Up Certificate"→"Health Check Up Form", "Police Clearance"→"Non Criminal Record", "Two recommendation Letter"→"Recommendation Letter" (rules: "Two letters from Professors/Associate Professors"), "Study Plan /Research Proposal"→"Study Plan", "Work Experience Certificate" (include rules), "Publication(If Applicable)"→"Publication" (is_required=false, applies_to='if_applicable'), "Resume", "Award/Extracurricular certificates"→"Award/Extracurricular Certificates"
+8) KEYWORDS: JSON array format: '["keyword1","keyword2"]'::jsonb. 1-5 items, subject-only. Remove: campus/university/location/intake/year/scholarship names (e.g., remove "zhuhai", "bnu", "beijing", "campus", "china", "march", "2026", "csc")
+9) GUARD: guard AS (SELECT 1 AS ok FROM university_cte), all INSERT/UPDATE must check WHERE EXISTS (SELECT 1 FROM guard)
+10) INSERTION ORDER (CRITICAL): 
+    - Insert majors FIRST, then use those IDs in program_intakes
+    - program_intakes_data must JOIN with majors AFTER majors are inserted/updated
+    - Use: FROM (SELECT id FROM majors WHERE university_id = (SELECT id FROM university_cte) AND ...) m
+    - program_documents_data must use: FROM (SELECT id FROM program_intakes WHERE ...) pi (after program_intakes exist)
+    - program_intake_scholarships_data must use: FROM (SELECT id FROM program_intakes WHERE ...) pi (after program_intakes exist)
+    - DO NOT join directly with CTEs that haven't been materialized yet
+11) NOTES: Combine all fee notes: "Registration fee: 800 CNY (only first year). Medical fee only for one year. Visa extension fee: 400 CNY per year. CSC deadline: YYYY-MM-DD." (if CSC deadline exists). Include accommodation note if applicable. CRITICAL: medical_insurance_fee MUST be set to numeric value (e.g., 400) if document mentions medical fee amount. Do NOT leave it NULL if document states "Medical: 400CNY" or similar.
 
 EXTRACTION:
 - University: WHERE lower(name)=lower('...')
-- Majors: Check existence first (university_id + lower(name) + degree_level + teaching_language), then INSERT ... WHERE NOT EXISTS or UPDATE
-- Intakes: intake_term='{enum_values[0] if enum_values else "March"}'::intaketerm, intake_year required
+- Majors: Check existence first (university_id + lower(name) + degree_level + teaching_language), then INSERT ... WHERE NOT EXISTS or UPDATE. MUST insert majors before using them in program_intakes.
+- Intakes: intake_term='{enum_values[0] if enum_values else "March"}'::intaketerm, intake_year required. JOIN with majors AFTER majors are inserted: FROM (SELECT id FROM majors WHERE ...) m
 - Fees: 
   * CNY if RMB/CNY, USD if USD, else CNY
-  * accommodation_fee NULL unless general for all
+  * accommodation_fee: If range given (e.g., "4500-9000"), use LOWER BOUND (4500) in numeric field, put FULL TEXT in accommodation_note
+  * accommodation_fee_period: 'year'/'month'/'semester' as specified
+  * accommodation_note: Full text from doc if range (e.g., "Accommodation: 4500-9000RMB(645$-1290$)/Year")
   * medical_insurance_fee MUST be numeric if doc mentions medical fee (e.g., "Medical: 400CNY" → medical_insurance_fee=400, medical_insurance_fee_period='year')
   * application_fee from doc (e.g., "application fee of 600 RMB" → application_fee=600)
   * visa_extension_fee from doc (e.g., "Visa Fees: 400CNY/Year" → visa_extension_fee=400)
+  * For ANY fee with range, use LOWER BOUND in numeric field, full text in note field
 - Requirements:
   * english_test_required=true if doc mentions "English Proficiency Certificate" or "IELTS" or "TOEFL"
   * english_test_note should include requirements (e.g., "IELTS 6.0 or TOFEL 80 or any other valid English Proficiency certificate")
-- Documents: All from doc, normalized, with rules. "Last Academic Transcript and Certificate(Notarized)" = TWO documents: "Transcript" (rules: "Notarized") AND "Highest Degree Certificate" (rules: "Notarized")
-- Scholarships: Create and link, only explicit fields. first_year_only should be NULL/false unless doc explicitly states scholarship duration is first year only
+- Documents: All from doc, normalized, with rules. "Last Academic Transcript and Certificate(Notarized)" = TWO documents: "Transcript" (rules: "Notarized") AND "Highest Degree Certificate" (rules: "Notarized"). Use: FROM (SELECT id FROM program_intakes WHERE ...) pi (after program_intakes exist)
+- Scholarships: Create and link, only explicit fields. first_year_only should be NULL/false unless doc explicitly states scholarship duration is first year only. Use: FROM (SELECT id FROM program_intakes WHERE ...) pi (after program_intakes exist)
 
 STYLE: WITH CTEs (university_cte, guard, data), INSERT/UPDATE (guarded), final SELECT with counts+errors. Idempotent. Pure SQL."""
 
