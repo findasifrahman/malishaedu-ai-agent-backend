@@ -104,14 +104,16 @@ RULES:
 1) ENUM: intake_term = '{enum_values[0] if enum_values else "March"}'::intaketerm (use EXACT values: {enum_values_str}, case-sensitive). Type: 'intaketerm'. Do NOT use 'MARCH' if enum has 'March'.
 2) DEADLINE: application_deadline=timestamptz (primary deadline, usually university), deadline_type='University' (no dates). If CSC deadline exists, add to notes: "CSC deadline: YYYY-MM-DD."
 3) ACCOMMODATION FEES (CRITICAL): 
-   - If document shows accommodation fee as RANGE (e.g., "4500-9000RMB/Year" or "2500-3500 CNY/year"):
-     * Set accommodation_fee = LOWER BOUND (e.g., 4500, NOT 9000)
+   - If document shows accommodation fee ANYWHERE (e.g., "Accommodation: 4500-9000RMB/Year" or "Type B: 4500-9000 RMB/year"):
+     * Set accommodation_fee = LOWER BOUND (e.g., 4500, NOT 9000) in program_intakes
      * Set accommodation_fee_period = 'year' or 'month' or 'semester' as specified
      * Set accommodation_note = FULL TEXT from document (e.g., "Accommodation: 4500-9000RMB(645$-1290$)/Year")
+     * DO NOT leave accommodation_fee or accommodation_note as NULL if document mentions accommodation fee
    - If accommodation is scholarship-specific (e.g., "Type B: 4500-9000 RMB/year"):
-     * Keep program_intakes.accommodation_fee NULL (unless general for all)
-     * Put in program_intake_scholarships.eligibility_note: "Accommodation fee: 4500-9000 RMB/year (paid by student)"
+     * ALSO put in program_intake_scholarships.eligibility_note: "Accommodation fee: 4500-9000 RMB/year (paid by student)"
+     * BUT STILL set program_intakes.accommodation_fee = 4500 and accommodation_note with full text
    - ALWAYS use LOWER BOUND for numeric fee fields when range is given
+   - EXAMPLE: "Accommodation: 4500-9000RMB(645$-1290$)/Year" → accommodation_fee=4500, accommodation_fee_period='year', accommodation_note='Accommodation: 4500-9000RMB(645$-1290$)/Year'
 4) FEES WITH RANGES: For ANY fee with range (e.g., "2500-3500", "4500-9000"):
    - Numeric field = LOWER BOUND value
    - Full range text goes in corresponding _note field (accommodation_note, notes, etc.)
@@ -120,7 +122,7 @@ RULES:
 6) ERRORS: errors AS (SELECT NULL::text AS err WHERE false UNION ALL SELECT '...' WHERE ...), final: array_agg(err) AS errors
 7) DOCUMENTS: Extract ALL  documents. CRITICAL: "Last Academic Transcript and Certificate(Notarized)" = TWO documents: "Transcript" (rules: "Notarized") AND "Highest Degree Certificate" (rules: "Notarized"). "English Proficiency Certificate(IELTS...)" = "English Proficiency Certificate" (rules: include IELTS/TOEFL requirements). Normalize: "Health Check Up Certificate"→"Health Check Up Form", "Police Clearance"→"Non Criminal Record", "Two recommendation Letter"→"Recommendation Letter" (rules: "Two letters from Professors/Associate Professors"), "Study Plan /Research Proposal"→"Study Plan", "Work Experience Certificate" (include rules), "Publication(If Applicable)"→"Publication" (is_required=false, applies_to='if_applicable'), "Resume", "Award/Extracurricular certificates"→"Award/Extracurricular Certificates"
 8) KEYWORDS: JSON array format: '["keyword1","keyword2"]'::jsonb. 1-5 items, subject-only. Remove: campus/university/location/intake/year/scholarship names (e.g., remove "zhuhai", "bnu", "beijing", "campus", "china", "march", "2026", "csc")
-9) GUARD: guard AS (SELECT 1 AS ok FROM university_cte), all INSERT/UPDATE must check WHERE EXISTS (SELECT 1 FROM guard)
+9) GUARD (CRITICAL): guard AS (SELECT 1 AS ok FROM university_cte), ALL INSERT/UPDATE statements MUST include WHERE EXISTS (SELECT 1 FROM guard). This is MANDATORY for: majors_upsert, majors_update, program_intakes_upsert, program_intakes_update, program_documents_upsert, program_documents_update, scholarships_upsert, program_intake_scholarships_upsert. NO EXCEPTIONS. Example: INSERT INTO majors ... WHERE EXISTS (SELECT 1 FROM guard) AND NOT EXISTS (...)
 10) INSERTION ORDER (CRITICAL): 
     - Insert majors FIRST, then use those IDs in program_intakes
     - program_intakes_data must JOIN with majors AFTER majors are inserted/updated
@@ -136,9 +138,9 @@ EXTRACTION:
 - Intakes: intake_term='{enum_values[0] if enum_values else "March"}'::intaketerm, intake_year required. JOIN with majors AFTER majors are inserted: FROM (SELECT id FROM majors WHERE ...) m
 - Fees: 
   * CNY if RMB/CNY, USD if USD, else CNY
-  * accommodation_fee: If range given (e.g., "4500-9000"), use LOWER BOUND (4500) in numeric field, put FULL TEXT in accommodation_note
-  * accommodation_fee_period: 'year'/'month'/'semester' as specified
-  * accommodation_note: Full text from doc if range (e.g., "Accommodation: 4500-9000RMB(645$-1290$)/Year")
+  * accommodation_fee: If document mentions accommodation fee ANYWHERE (even in scholarship section), use LOWER BOUND (e.g., 4500) in numeric field, put FULL TEXT in accommodation_note. DO NOT leave NULL if document mentions accommodation.
+  * accommodation_fee_period: 'year'/'month'/'semester' as specified in document
+  * accommodation_note: Full text from doc (e.g., "Accommodation: 4500-9000RMB(645$-1290$)/Year"). MUST be set if accommodation fee is mentioned.
   * medical_insurance_fee MUST be numeric if doc mentions medical fee (e.g., "Medical: 400CNY" → medical_insurance_fee=400, medical_insurance_fee_period='year')
   * application_fee from doc (e.g., "application fee of 600 RMB" → application_fee=600)
   * visa_extension_fee from doc (e.g., "Visa Fees: 400CNY/Year" → visa_extension_fee=400)
