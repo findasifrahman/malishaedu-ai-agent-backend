@@ -104,20 +104,28 @@ RULES:
 1) ENUM: intake_term = '{enum_values[0] if enum_values else "March"}'::intaketerm (use EXACT values: {enum_values_str}, case-sensitive). Type: 'intaketerm'. Do NOT use 'MARCH' if enum has 'March'.
 2) DEADLINE: application_deadline=timestamptz (primary deadline, usually university), deadline_type='University' (no dates). If CSC deadline exists, add to notes: "CSC deadline: YYYY-MM-DD."
 3) ACCOMMODATION: Keep accommodation_fee NULL unless general for all. Scholarship-specific accommodation (e.g., Type B: 4500-9000 RMB/year) → program_intake_scholarships.eligibility_note: "Accommodation fee: 4500-9000 RMB/year (paid by student)"
-4) SCHOLARSHIPS: Only set fields from doc. first_year_only/tuition_waiver_percent only if stated. Registration/medical fees are university payments, not scholarship.
+4) SCHOLARSHIPS: Only set fields from doc. first_year_only should be NULL or false unless document explicitly states scholarship is first year only. Registration/medical fees "only first year" are UNIVERSITY payments, NOT scholarship duration. tuition_waiver_percent=100 only if doc explicitly states full tuition waiver.
 5) ERRORS: errors AS (SELECT NULL::text AS err WHERE false UNION ALL SELECT '...' WHERE ...), final: array_agg(err) AS errors
 6) DOCUMENTS: Extract ALL 12 documents. CRITICAL: "Last Academic Transcript and Certificate(Notarized)" = TWO documents: "Transcript" (rules: "Notarized") AND "Highest Degree Certificate" (rules: "Notarized"). "English Proficiency Certificate(IELTS...)" = "English Proficiency Certificate" (rules: include IELTS/TOEFL requirements). Normalize: "Health Check Up Certificate"→"Health Check Up Form", "Police Clearance"→"Non Criminal Record", "Two recommendation Letter"→"Recommendation Letter" (rules: "Two letters from Professors/Associate Professors"), "Study Plan /Research Proposal"→"Study Plan", "Work Experience Certificate" (include rules), "Publication(If Applicable)"→"Publication" (is_required=false, applies_to='if_applicable'), "Resume", "Award/Extracurricular certificates"→"Award/Extracurricular Certificates"
 7) KEYWORDS: JSON array format: '["keyword1","keyword2"]'::jsonb. 1-5 items, subject-only. Remove: campus/university/location/intake/year/scholarship names (e.g., remove "zhuhai", "bnu", "beijing", "campus", "china", "march", "2026", "csc")
 8) GUARD: guard AS (SELECT 1 AS ok FROM university_cte), all INSERT/UPDATE must check WHERE EXISTS (SELECT 1 FROM guard)
-9) NOTES: Combine all fee notes: "Registration fee: 800 CNY (only first year). Medical fee only for one year. Visa extension fee: 400 CNY per year. CSC deadline: YYYY-MM-DD." (if CSC deadline exists). Include Type B accommodation note if applicable.
+9) NOTES: Combine all fee notes: "Registration fee: 800 CNY (only first year). Medical fee only for one year. Visa extension fee: 400 CNY per year. CSC deadline: YYYY-MM-DD." (if CSC deadline exists). Include Type B accommodation note if applicable. CRITICAL: medical_insurance_fee MUST be set to numeric value (e.g., 400) if document mentions medical fee amount. Do NOT leave it NULL if document states "Medical: 400CNY" or similar. CRITICAL: medical_insurance_fee must be set to numeric value (e.g., 400) if document mentions medical fee. Do NOT leave it NULL if document states a medical fee amount.
 
 EXTRACTION:
 - University: WHERE lower(name)=lower('...')
 - Majors: Check existence first (university_id + lower(name) + degree_level + teaching_language), then INSERT ... WHERE NOT EXISTS or UPDATE
 - Intakes: intake_term='{enum_values[0] if enum_values else "March"}'::intaketerm, intake_year required
-- Fees: CNY if RMB/CNY, USD if USD, else CNY. accommodation_fee NULL unless general
-- Documents: All from doc, normalized, with rules
-- Scholarships: Create and link, only explicit fields
+- Fees: 
+  * CNY if RMB/CNY, USD if USD, else CNY
+  * accommodation_fee NULL unless general for all
+  * medical_insurance_fee MUST be numeric if doc mentions medical fee (e.g., "Medical: 400CNY" → medical_insurance_fee=400, medical_insurance_fee_period='year')
+  * application_fee from doc (e.g., "application fee of 600 RMB" → application_fee=600)
+  * visa_extension_fee from doc (e.g., "Visa Fees: 400CNY/Year" → visa_extension_fee=400)
+- Requirements:
+  * english_test_required=true if doc mentions "English Proficiency Certificate" or "IELTS" or "TOEFL"
+  * english_test_note should include requirements (e.g., "IELTS 6.0 or TOFEL 80 or any other valid English Proficiency certificate")
+- Documents: All from doc, normalized, with rules. "Last Academic Transcript and Certificate(Notarized)" = TWO documents: "Transcript" (rules: "Notarized") AND "Highest Degree Certificate" (rules: "Notarized")
+- Scholarships: Create and link, only explicit fields. first_year_only should be NULL/false unless doc explicitly states scholarship duration is first year only
 
 STYLE: WITH CTEs (university_cte, guard, data), INSERT/UPDATE (guarded), final SELECT with counts+errors. Idempotent. Pure SQL."""
 
