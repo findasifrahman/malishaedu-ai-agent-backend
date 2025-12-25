@@ -1023,6 +1023,9 @@ class DBQueryService:
             # DETAILED LOGGING: Track each filter step
             base_count = query.count()
             print(f"DEBUG: find_program_intakes - Base query count (before filters): {base_count}")
+            print(f"DEBUG: find_program_intakes - Filters received: {list(filters.keys())}")
+            print(f"DEBUG: find_program_intakes - has_scholarship={filters.get('has_scholarship')}, scholarship_types={filters.get('scholarship_types')}, scholarship_type={filters.get('scholarship_type')}")
+            print(f"DEBUG: find_program_intakes - major_ids={filters.get('major_ids')}, degree_level={filters.get('degree_level')}, intake_term={filters.get('intake_term')}, intake_year={filters.get('intake_year')}")
             
             if filters.get("university_id"):
                 query = query.filter(ProgramIntake.university_id == filters["university_id"])
@@ -1173,17 +1176,199 @@ class DBQueryService:
             
             # Scholarship filter
             if filters.get("has_scholarship"):
-                query = query.join(ProgramIntakeScholarship, ProgramIntake.id == ProgramIntakeScholarship.program_intake_id)
-                query = query.distinct()
-            if filters.get("scholarship_type"):
-                if not filters.get("has_scholarship"):
-                    query = query.join(ProgramIntakeScholarship, ProgramIntake.id == ProgramIntakeScholarship.program_intake_id)
-                    query = query.join(Scholarship, ProgramIntakeScholarship.scholarship_id == Scholarship.id)
-                if filters["scholarship_type"].lower() == "csc":
-                    query = query.filter(Scholarship.name.ilike("%CSC%"))
-                elif filters["scholarship_type"].lower() == "university":
-                    query = query.filter(~Scholarship.name.ilike("%CSC%"))
-                query = query.distinct()
+                # CRITICAL: Filter by scholarship_available = True to only get programs that actually have scholarships
+                # BUT: If scholarship_types is also provided, we should search scholarship_info even if scholarship_available is NULL/False
+                # because scholarship_info might contain the scholarship details even if the flag isn't set
+                has_scholarship_types = filters.get("scholarship_types") or filters.get("scholarship_type")
+                
+                if not has_scholarship_types:
+                    # Only filter by scholarship_available if we're not filtering by specific types
+                    # (scholarship_types filter will handle scholarship_info search)
+                    query = query.filter(ProgramIntake.scholarship_available == True)
+                    count_after = query.count()
+                    print(f"DEBUG: find_program_intakes - After has_scholarship=True filter (scholarship_available=True): {count_after} intakes")
+                else:
+                    # If we have scholarship_types, we'll search scholarship_info directly
+                    # Don't filter by scholarship_available yet - let scholarship_types filter handle it
+                    count_before = query.count()
+                    print(f"DEBUG: find_program_intakes - has_scholarship=True AND scholarship_types provided - will search scholarship_info (count before: {count_before})")
+                    # Still filter by scholarship_available OR scholarship_info is not null
+                    # This allows finding scholarships even if scholarship_available flag isn't set
+                    count_before_has_scholarship = query.count()
+                    print(f"DEBUG: find_program_intakes - Before has_scholarship filter: {count_before_has_scholarship} intakes")
+                    
+                    # Check which intakes have scholarship_available=True vs scholarship_info
+                    from sqlalchemy import case, func
+                    has_scholarship_available = query.filter(ProgramIntake.scholarship_available == True).count()
+                    has_scholarship_info = query.filter(
+                        and_(
+                            ProgramIntake.scholarship_info.isnot(None),
+                            ProgramIntake.scholarship_info != ""
+                        )
+                    ).count()
+                    print(f"DEBUG: find_program_intakes - Intakes with scholarship_available=True: {has_scholarship_available}, with scholarship_info: {has_scholarship_info}")
+                    
+                    query = query.filter(
+                        or_(
+                            ProgramIntake.scholarship_available == True,
+                            ProgramIntake.scholarship_info.isnot(None),
+                            ProgramIntake.scholarship_info != ""
+                        )
+                    )
+                    count_after = query.count()
+                    print(f"DEBUG: find_program_intakes - After has_scholarship=True filter (scholarship_available=True OR scholarship_info not null): {count_after} intakes (filtered out {count_before_has_scholarship - count_after} intakes)")
+                    
+                    # If intakes were filtered out, show which ones
+                    if count_before_has_scholarship > count_after:
+                        filtered_out_query = self.db.query(ProgramIntake).join(Major).join(University).filter(
+                            University.is_partner == True,
+                            ProgramIntake.major_id.in_(filters.get("major_ids", [])),
+                            Major.degree_level == filters.get("degree_level"),
+                            ProgramIntake.intake_term == filters.get("intake_term"),
+                            ProgramIntake.intake_year == filters.get("intake_year"),
+                            ~or_(
+                                ProgramIntake.scholarship_available == True,
+                                ProgramIntake.scholarship_info.isnot(None),
+                                ProgramIntake.scholarship_info != ""
+                            )
+                        ).limit(5)
+                        filtered_out = filtered_out_query.all()
+                        for intake in filtered_out:
+                            print(f"DEBUG: find_program_intakes - Filtered out intake ID={intake.id}, university={intake.university.name if intake.university else 'N/A'}, major={intake.major.name if intake.major else 'N/A'}, scholarship_available={intake.scholarship_available}, has_scholarship_info={bool(intake.scholarship_info)}")
+            # Support both single scholarship_type and list of scholarship_types
+            # CRITICAL: Scholarship info is stored in ProgramIntake.scholarship_info text field, not in Scholarship table
+            # Search the scholarship_info field directly for "Type A", "Type B", "Type C", "CSC", etc.
+            if filters.get("scholarship_type") or filters.get("scholarship_types"):
+                count_before_types = query.count()
+                print(f"DEBUG: find_program_intakes - Before scholarship_types filter: {count_before_types} intakes")
+                
+                # Handle list of scholarship types (Type A, Type B, Type C, CSC)
+                scholarship_types = filters.get("scholarship_types", [])
+                if scholarship_types:
+                    print(f"DEBUG: find_program_intakes - Filtering by scholarship_types: {scholarship_types}")
+                    # Build OR conditions for each scholarship type - search in scholarship_info text field
+                    type_conditions = []
+                    for stype in scholarship_types:
+                        stype_lower = stype.lower()
+                        print(f"DEBUG: find_program_intakes - Processing scholarship type: '{stype}' (lower: '{stype_lower}')")
+                        if stype_lower == "csc":
+                            # Match CSC, CSCA, China Scholarship Council, Chinese Government Scholarship
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%CSC%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%CSCA%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%China Scholarship Council%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%Chinese Government Scholarship%"))
+                            print(f"DEBUG: find_program_intakes - Added CSC patterns for '{stype}'")
+                        elif stype_lower in ["type a", "type-a", "typea", "type a"]:
+                            # Match "Type A", "type a", "type-a", "type A", etc. (case-insensitive)
+                            # CRITICAL: ILIKE is case-insensitive, so we don't need multiple variations, but we'll keep them for clarity
+                            # Match "Type A" (with space), "Type-A" (with hyphen), "type a" (lowercase)
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%Type A%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%type a%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%type-a%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%Type-A%"))
+                            # Also match without space: "TypeA" (though less common)
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%TypeA%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%typea%"))
+                            print(f"DEBUG: find_program_intakes - Added Type A patterns for '{stype}' (6 patterns)")
+                        elif stype_lower in ["type b", "type-b", "typeb", "type b"]:
+                            # Match "Type B", "type b", "type-b", "type B", etc. (case-insensitive)
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%Type B%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%type b%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%type-b%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%Type-B%"))
+                            # Also match without space: "TypeB" (though less common)
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%TypeB%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%typeb%"))
+                            print(f"DEBUG: find_program_intakes - Added Type B patterns for '{stype}' (6 patterns)")
+                        elif stype_lower in ["type c", "type-c", "typec", "type c"]:
+                            # Match "Type C", "type c", "type-c", "type C", etc. (case-insensitive)
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%Type C%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%type c%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%type-c%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%Type-C%"))
+                            # Also match without space: "TypeC" (though less common)
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%TypeC%"))
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike("%typec%"))
+                            print(f"DEBUG: find_program_intakes - Added Type C patterns for '{stype}' (6 patterns)")
+                        else:
+                            # Generic match for other scholarship names
+                            type_conditions.append(ProgramIntake.scholarship_info.ilike(f"%{stype}%"))
+                            print(f"DEBUG: find_program_intakes - Added generic pattern '%{stype}%' for '{stype}'")
+                    
+                    if type_conditions:
+                        print(f"DEBUG: find_program_intakes - Applying {len(type_conditions)} scholarship type conditions (OR)")
+                        query = query.filter(or_(*type_conditions))
+                        count_after = query.count()
+                        print(f"DEBUG: find_program_intakes - After scholarship_types={scholarship_types} filter (searching scholarship_info): {count_after} intakes")
+                        
+                        # DEBUG: Show sample scholarship_info values for debugging
+                        if count_after == 0 and count_before_types > 0:
+                            print(f"DEBUG: find_program_intakes - WARNING: scholarship_types filter returned 0 results, but had {count_before_types} before filter")
+                            # Sample a few records to see what scholarship_info looks like
+                            # Create a new query with the same base filters but without scholarship_types filter
+                            from sqlalchemy.orm import Query
+                            # Get the session from the query
+                            session = query.session if hasattr(query, 'session') else self.db
+                            sample_query = session.query(ProgramIntake).filter(
+                                ProgramIntake.scholarship_info.isnot(None),
+                                ProgramIntake.scholarship_info != ""
+                            )
+                            # Apply the same base filters (major_ids, degree_level, etc.) if they exist
+                            if filters.get("major_ids"):
+                                sample_query = sample_query.filter(ProgramIntake.major_id.in_(filters["major_ids"]))
+                            if filters.get("degree_level"):
+                                sample_query = sample_query.join(Major).filter(Major.degree_level == filters["degree_level"])
+                            if filters.get("intake_term"):
+                                sample_query = sample_query.filter(ProgramIntake.intake_term == filters["intake_term"])
+                            if filters.get("intake_year"):
+                                sample_query = sample_query.filter(ProgramIntake.intake_year == filters["intake_year"])
+                            
+                            samples = sample_query.limit(5).all()
+                            print(f"DEBUG: find_program_intakes - Found {len(samples)} sample records with scholarship_info")
+                            for sample in samples:
+                                scholarship_info_preview = (sample.scholarship_info or "")[:200] if sample.scholarship_info else "NULL"
+                                print(f"DEBUG: find_program_intakes - Sample scholarship_info (ID={sample.id}): {scholarship_info_preview}...")
+                                # Check if it matches any of our patterns
+                                scholarship_info_lower = (sample.scholarship_info or "").lower()
+                                for stype in scholarship_types:
+                                    stype_lower = stype.lower()
+                                    if stype_lower == "csc":
+                                        if "csc" in scholarship_info_lower or "china scholarship council" in scholarship_info_lower:
+                                            print(f"DEBUG: find_program_intakes - Sample matches CSC pattern")
+                                    elif stype_lower in ["type a", "type-a", "typea"]:
+                                        if "type a" in scholarship_info_lower or "type-a" in scholarship_info_lower:
+                                            print(f"DEBUG: find_program_intakes - Sample matches Type A pattern")
+                                    elif stype_lower in ["type b", "type-b", "typeb"]:
+                                        if "type b" in scholarship_info_lower or "type-b" in scholarship_info_lower:
+                                            print(f"DEBUG: find_program_intakes - Sample matches Type B pattern")
+                                    elif stype_lower in ["type c", "type-c", "typec"]:
+                                        if "type c" in scholarship_info_lower or "type-c" in scholarship_info_lower:
+                                            print(f"DEBUG: find_program_intakes - Sample matches Type C pattern")
+                    else:
+                        print(f"DEBUG: find_program_intakes - WARNING: No type_conditions generated for scholarship_types={scholarship_types}")
+                elif filters.get("scholarship_type"):
+                    # Legacy single scholarship_type support - search in scholarship_info
+                    scholarship_type_lower = filters["scholarship_type"].lower()
+                    if scholarship_type_lower == "csc":
+                        query = query.filter(
+                            or_(
+                                ProgramIntake.scholarship_info.ilike("%CSC%"),
+                                ProgramIntake.scholarship_info.ilike("%CSCA%"),
+                                ProgramIntake.scholarship_info.ilike("%China Scholarship Council%"),
+                                ProgramIntake.scholarship_info.ilike("%Chinese Government Scholarship%")
+                            )
+                        )
+                    elif scholarship_type_lower == "university":
+                        # University scholarships (not CSC)
+                        query = query.filter(
+                            and_(
+                                ProgramIntake.scholarship_info.isnot(None),
+                                ~ProgramIntake.scholarship_info.ilike("%CSC%"),
+                                ~ProgramIntake.scholarship_info.ilike("%CSCA%"),
+                                ~ProgramIntake.scholarship_info.ilike("%China Scholarship Council%"),
+                                ~ProgramIntake.scholarship_info.ilike("%Chinese Government Scholarship%")
+                            )
+                        )
             
             # Requirements filters
             if filters.get("bank_statement_amount") is not None:

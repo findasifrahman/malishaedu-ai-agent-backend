@@ -2,7 +2,7 @@
 Slot Schema - Extended PartnerQueryState with all required fields
 """
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 
 @dataclass
@@ -81,6 +81,9 @@ class PartnerQueryState:
     # Other
     wants_earliest: bool = False
     
+    # Scholarship types (Type A, Type B, Type C, CSC) - stored as list of strings
+    _scholarship_types: Optional[List[str]] = field(default_factory=list)
+    
     # Clarification state
     is_clarifying: bool = False  # Whether the agent is currently asking for clarification
     pending_slot: Optional[str] = None  # The slot name that is pending clarification (e.g., "degree_level", "major_or_university")
@@ -128,5 +131,6 @@ class PartnerQueryState:
             "province": self.province,
             "country": self.country,
             "wants_earliest": self.wants_earliest,
+            "_scholarship_types": self._scholarship_types,
         }
 

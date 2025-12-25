@@ -73,42 +73,13 @@ class FAQService:
     
     # FAQ keyword fast-path triggers
     FAQ_KEYWORDS = [
-        # Cost & Living
-        'living cost', 'monthly cost', 'living expense', 'expenses', 'budget', 'affordable',
-        # Safety & Security
-        'safe', 'safety', 'security', 'crime', 'dangerous',
-        # Fees & Charges
-        'service charge', 'service fee', 'hidden charge', 'hidden fee', 'refund', 'refundable',
-        # Documents & Requirements
-        'documents', 'document', 'required', 'requirements', 'need', 'what do i need',
-        # Language Requirements
-        'IELTS', 'HSK', 'TOEFL', 'language', 'chinese', 'english',
-        # Work & Part-time
-        'part-time', 'part time', 'work', 'working', 'job', 'employment',
-        # Process & Duration
-        'process time', 'duration', 'how long', 'time', 'timeline', 'when', 'deadline',
-        # Accommodation & Housing
-        'accommodation', 'dormitory', 'dorm', 'housing', 'room', 'hostel', 'where will i live',
-        # Food & Dietary
-        'halal', 'food', 'eating', 'meal', 'dietary', 'vegetarian',
-        # Services & Support
-        'payment', 'assist', 'help', 'support', 'services', 'what do you provide',
-        # About MalishaEdu
+        'living cost', 'monthly cost', 'living expense', 'safe', 'safety', 'security',
+        'service charge', 'service fee', 'hidden charge', 'hidden fee', 'refund',
+        'documents', 'document', 'required', 'IELTS', 'HSK', 'part-time', 'part time',
+        'process time', 'duration', 'how long', 'accommodation', 'dormitory', 'dorm',
+        'scholarship', 'scholarships', 'halal', 'food', 'payment', 'assist', 'help',
         'students', 'agency', 'consultancy', 'agreement', 'partner', 'partnered', 'partners',
-        'universities', 'work with', 'connected with', 'what is malishaedu', 'about malishaedu',
-        'who are you', 'what do you do', 'contact', 'phone', 'email', 'address', 'location',
-        # Application Process
-        'how to apply', 'application process', 'how do i apply', 'steps', 'procedure',
-        # Visa & Travel
-        'visa', 'travel', 'arrival', 'after arrival', 'post arrival', 'airport',
-        # Insurance & Health
-        'insurance', 'medical', 'health', 'health insurance',
-        # Bank & Financial
-        'bank account', 'bank', 'financial', 'money transfer',
-        # Career & Post-study
-        'job after', 'career', 'after graduation', 'work after', 'future',
-        # General
-        'get started', 'begin', 'start', 'consultation', 'counselor', 'discount', 'feedback'
+        'universities', 'work with', 'connected with'
     ]
     
     def __init__(self, faq_text: Optional[str] = None, docx_path: Optional[str] = None):
@@ -1812,92 +1783,6 @@ Return the JSON object:"""
         else:
             return 'general'
     
-    def classify_query(self, user_message: str, student_state: StudentProfileState) -> Dict[str, Any]:
-        """
-        Deterministic query classification for routing.
-        
-        Returns dict with:
-        - intent: 'csca' | 'program_specific' | 'general_faq' | 'unknown'
-        - needs_db: bool (True for program-specific queries)
-        - needs_csca_rag: bool (True for CSCA questions)
-        - needs_general_rag: bool (True for general FAQ questions)
-        - needs_web: bool (True only if latest policy/current info needed)
-        """
-        user_lower = user_message.lower()
-        
-        # Priority 1: CSCA questions (strict RAG-only rule)
-        csca_keywords = ['csca', 'china scholastic competency assessment']
-        if any(keyword in user_lower for keyword in csca_keywords):
-            return {
-                'intent': 'csca',
-                'needs_db': False,
-                'needs_csca_rag': True,
-                'needs_general_rag': False,
-                'needs_web': False
-            }
-        
-        # Priority 2: Program-specific queries (DB-first)
-        program_specific_keywords = [
-            'tuition', 'fee', 'cost', 'deadline', 'intake', 'march', 'september',
-            'documents required', 'scholarship', 'list universities', 'top ranked university',
-            'best university', 'cheapest', 'lowest cost', 'compare universities',
-            'which university', 'what university', 'show me universities'
-        ]
-        
-        # Check if program-specific (must have specific context)
-        is_program_specific = self._is_program_specific_query(user_message, student_state)
-        
-        # Also check for program-specific patterns with university/major context
-        has_university_context = (
-            student_state.preferred_universities or
-            any(uni['name'].lower() in user_lower for uni in self.all_universities[:20])
-        )
-        has_major_context = student_state.major or any(
-            keyword in user_lower for keyword in ['major', 'subject', 'program', 'degree']
-        )
-        
-        if (any(keyword in user_lower for keyword in program_specific_keywords) and
-            (has_university_context or has_major_context or is_program_specific)):
-            return {
-                'intent': 'program_specific',
-                'needs_db': True,
-                'needs_csca_rag': False,
-                'needs_general_rag': False,
-                'needs_web': False
-            }
-        
-        # Priority 3: General FAQ questions
-        general_faq_keywords = [
-            'bank account', 'halal', 'food', 'safety', 'accommodation', 'dormitory',
-            'living cost', 'part-time', 'work while', 'visa', 'travel', 'insurance',
-            'support services', 'payment', 'service charge', 'hidden charge',
-            'process time', 'how long', 'duration', 'after arrival', 'post arrival',
-            'how to apply', 'application process', 'what is malishaedu', 'about malishaedu',
-            'contact', 'phone', 'address', 'location', 'get started', 'consultation'
-        ]
-        
-        if any(keyword in user_lower for keyword in general_faq_keywords):
-            # Check if user explicitly asks for latest/current/2026 policy
-            needs_latest = any(term in user_lower for term in [
-                'latest', 'current', '2026', '2027', 'updated', 'recent', 'new policy'
-            ])
-            return {
-                'intent': 'general_faq',
-                'needs_db': False,
-                'needs_csca_rag': False,
-                'needs_general_rag': True,
-                'needs_web': needs_latest  # Only if explicitly asking for latest info
-            }
-        
-        # Default: try general FAQ first, then program-specific
-        return {
-            'intent': 'unknown',
-            'needs_db': False,
-            'needs_csca_rag': False,
-            'needs_general_rag': True,
-            'needs_web': False
-        }
-    
     def _is_program_specific_query(self, user_message: str, student_state: StudentProfileState) -> bool:
         """
         Determine if user query is program-specific (requires DB lookup) vs general FAQ question.
@@ -1970,46 +1855,45 @@ Return the JSON object:"""
         
         return False
     
-    def _build_single_lead_question(self, student_state: StudentProfileState) -> Optional[str]:
-        """
-        Build a single lead collection question with priority:
-        1. Nationality (if missing)
-        2. Contact info (if missing)
-        3. Degree level or major (if missing)
+    def _build_faq_cta(self, student_state: StudentProfileState) -> str:
+        """Build CTA after FAQ answer to collect missing lead fields"""
+        cta_parts = []
         
-        Returns None if all important fields are collected.
-        """
+        # Check missing fields
         missing_nationality = not student_state.nationality
-        missing_contact = not (student_state.phone or student_state.email or 
-                               student_state.whatsapp or student_state.wechat)
+        missing_contact = not (student_state.phone or student_state.email or student_state.whatsapp or student_state.wechat)
         missing_degree = not student_state.degree_level
         missing_major = not student_state.major
         
-        # Priority 1: Nationality
+        # Ask for nationality if missing
         if missing_nationality:
-            return "Which country are you from?"
+            cta_parts.append("your nationality")
         
-        # Priority 2: Contact info
+        # Ask for contact if missing
         if missing_contact:
-            return "What's your WhatsApp/WeChat (or email) so our counselor can guide you faster?"
+            if missing_nationality:
+                cta_parts.append("your contact information (phone, email, WhatsApp, or WeChat)")
+            else:
+                cta_parts.append("your contact information (phone, email, WhatsApp, or WeChat)")
         
-        # Priority 3: Degree level or major
+        # Ask for degree level or major if both missing (only one question)
         if missing_degree and missing_major:
-            return "Which level & major are you planning (Bachelor/Master/PhD/Language)?"
+            cta_parts.append("your preferred degree level (Bachelor's, Master's, PhD, or Language program)")
         elif missing_degree:
-            return "Which degree level are you interested in (Bachelor/Master/PhD/Language)?"
+            cta_parts.append("your preferred degree level")
         elif missing_major:
-            return "Which major or subject are you interested in?"
+            cta_parts.append("your preferred major/subject")
         
-        # All important fields collected
-        return None
-    
-    def _build_faq_cta(self, student_state: StudentProfileState) -> str:
-        """Build CTA after FAQ answer to collect missing lead fields (backward compatibility - uses single question)"""
-        lead_question = self._build_single_lead_question(student_state)
-        if lead_question:
-            return lead_question
-        return "If you'd like personalized guidance for your specific situation, please share your study preferences."
+        # Limit to max 2 questions
+        cta_parts = cta_parts[:2]
+        
+        if not cta_parts:
+            return "If you'd like personalized guidance for your specific situation, please share your study preferences (degree level, major, intake) and contact information."
+        
+        if len(cta_parts) == 1:
+            return f"To help you better, could you please share {cta_parts[0]}?"
+        else:
+            return f"To help you better, could you please share {cta_parts[0]} and {cta_parts[1]}?"
     
     def _get_major_ids_by_fuzzy_match(self, major_name: str, degree_level: Optional[str] = None) -> List[int]:
         """
@@ -2759,129 +2643,49 @@ Return the JSON object:"""
                                 # It's a partner - don't mark as non-partner
                                 break
         
-        # Step 0.8: Deterministic Query Classification and Routing
-        query_classification = self.classify_query(user_message, student_state)
-        intent = query_classification['intent']
-        needs_db = query_classification['needs_db']
-        needs_csca_rag = query_classification['needs_csca_rag']
-        needs_general_rag = query_classification['needs_general_rag']
-        needs_web = query_classification['needs_web']
+        # Step 0.8: FAQ Routing - Check if this is a general FAQ question (not program-specific)
+        # Only route to FAQ if:
+        # 1. FAQ service is available
+        # 2. Query is NOT program-specific (doesn't mention specific university/major/intake with cost/deadline)
+        # 3. FAQ match found above threshold OR keyword fast-path triggered
+        faq_match = None
+        faq_score = 0.0
+        is_program_specific = self._is_program_specific_query(user_message, student_state)
         
-        print(f"DEBUG: Query classification - intent={intent}, needs_db={needs_db}, needs_csca_rag={needs_csca_rag}, needs_general_rag={needs_general_rag}, needs_web={needs_web}")
+        print(f"DEBUG: FAQ routing - is_program_specific={is_program_specific}, faq_service_available={self.faq_service is not None}")
         
-        # Priority 1: CSCA questions - RAG only (strict rule)
-        if intent == 'csca' and needs_csca_rag:
-            try:
-                csca_search_query = "CSCA China Scholastic Competency Assessment exam structure subjects registration fee timing 2026 undergraduate bachelor"
-                if any(term in user_message.lower() for term in ['master', 'masters', 'phd', 'doctorate']):
-                    csca_search_query += " masters phd not required"
-                rag_results = self.rag_service.search_similar(self.db, csca_search_query, top_k=5)
-                if rag_results:
-                    rag_context = self.rag_service.format_rag_context(rag_results)
-                    # Generate answer using RAG context only
-                    response = self.openai_service.chat_completion([
-                        {"role": "system", "content": "You are a helpful assistant answering CSCA questions. Use ONLY the provided RAG context as your factual source. Do NOT fabricate information."},
-                        {"role": "user", "content": f"Context:\n{rag_context}\n\nUser question: {user_message}\n\nAnswer the question using ONLY the context above. If context doesn't contain the answer, say 'Our current knowledge base does not specify this detail. CSCA policies are still evolving. We'll check the latest official notice and update you.'"}
-                    ])
-                    answer = response.choices[0].message.content
-                    lead_question = self._build_single_lead_question(student_state)
-                    response_text = answer + (f"\n\n{lead_question}" if lead_question else "")
-                    return {
-                        'response': response_text,
-                        'db_context': '',
-                        'rag_context': rag_context,
-                        'tavily_context': None,
-                        'lead_collected': lead_collected,
-                        'show_lead_form': False,
-                        'lead_form_prefill': {}
-                    }
-            except Exception as e:
-                print(f"CSCA RAG search failed: {e}")
-            # Fall through to continue with normal flow if RAG fails
+        if self.faq_service and not is_program_specific:
+            # Check keyword fast-path first
+            should_try_faq = self.faq_service._should_try_faq_match(user_message)
+            print(f"DEBUG: FAQ keyword fast-path triggered: {should_try_faq}")
+            
+            if should_try_faq:
+                faq_match, faq_score = self.faq_service.match(user_message, threshold=0.62)
+                print(f"DEBUG: FAQ match attempt (threshold=0.62): match={faq_match is not None}, score={faq_score:.2f}")
+            
+            # If no keyword match but still might be FAQ, try matching anyway (lower threshold)
+            if not faq_match:
+                faq_match, faq_score = self.faq_service.match(user_message, threshold=0.55)
+                print(f"DEBUG: FAQ match attempt (threshold=0.55): match={faq_match is not None}, score={faq_score:.2f}")
         
-        # Priority 2: General FAQ questions - FAQService first, then RAG
-        if intent == 'general_faq' and not needs_db:
-            # Try FAQService match first
-            faq_match = None
-            faq_score = 0.0
-            if self.faq_service:
-                should_try_faq = self.faq_service._should_try_faq_match(user_message)
-                if should_try_faq:
-                    faq_match, faq_score = self.faq_service.match(user_message, threshold=0.62)
-                if not faq_match:
-                    faq_match, faq_score = self.faq_service.match(user_message, threshold=0.55)
+        # If FAQ match found and not program-specific, return FAQ answer + CTA
+        if faq_match and not is_program_specific:
+            print(f"DEBUG: FAQ match found (score={faq_score:.2f}): {faq_match['question'][:50]}...")
+            faq_answer = faq_match['answer']
+            cta = self._build_faq_cta(student_state)
             
-            # If FAQ match found, use it
-            if faq_match:
-                print(f"DEBUG: FAQ match found (score={faq_score:.2f}): {faq_match['question'][:50]}...")
-                faq_answer = faq_match['answer']
-                lead_question = self._build_single_lead_question(student_state)
-                response_text = faq_answer + (f"\n\n{lead_question}" if lead_question else "")
-                return {
-                    'response': response_text,
-                    'db_context': '',
-                    'rag_context': None,
-                    'tavily_context': None,
-                    'lead_collected': lead_collected,
-                    'show_lead_form': False,
-                    'lead_form_prefill': {}
-                }
+            # Compose response: FAQ answer + CTA
+            response_text = f"{faq_answer}\n\n{cta}"
             
-            # If no FAQ match but needs_general_rag, try RAG from answer bank
-            if needs_general_rag:
-                try:
-                    rag_results = self.rag_service.search_similar(self.db, user_message, top_k=5)
-                    if rag_results:
-                        rag_context = self.rag_service.format_rag_context(rag_results)
-                        # Generate concise answer using RAG
-                        response = self.openai_service.chat_completion([
-                            {"role": "system", "content": "You are a helpful assistant. Answer the question using ONLY the provided context. Be concise and engaging. Do NOT invent facts not in the context."},
-                            {"role": "user", "content": f"Context:\n{rag_context}\n\nUser question: {user_message}\n\nAnswer concisely using only the context above."}
-                        ])
-                        answer = response.choices[0].message.content
-                        lead_question = self._build_single_lead_question(student_state)
-                        response_text = answer + (f"\n\n{lead_question}" if lead_question else "")
-                        return {
-                            'response': response_text,
-                            'db_context': '',
-                            'rag_context': rag_context,
-                            'tavily_context': None,
-                            'lead_collected': lead_collected,
-                            'show_lead_form': False,
-                            'lead_form_prefill': {}
-                        }
-                except Exception as e:
-                    print(f"General RAG search failed: {e}")
-            
-            # Only use Tavily if explicitly needed (latest policy/current info)
-            if needs_web:
-                try:
-                    # Restrict to malishaedu.com domain
-                    tavily_results = self.tavily_service.search(
-                        f"site:malishaedu.com {user_message}", 
-                        max_results=2
-                    )
-                    if tavily_results:
-                        tavily_context = self.tavily_service.format_search_results(tavily_results)
-                        # Generate answer using Tavily context
-                        response = self.openai_service.chat_completion([
-                            {"role": "system", "content": "Answer using ONLY the provided web search results. Be concise."},
-                            {"role": "user", "content": f"Web search results:\n{tavily_context}\n\nUser question: {user_message}\n\nAnswer concisely."}
-                        ])
-                        answer = response.choices[0].message.content
-                        lead_question = self._build_single_lead_question(student_state)
-                        response_text = answer + (f"\n\n{lead_question}" if lead_question else "")
-                        return {
-                            'response': response_text,
-                            'db_context': '',
-                            'rag_context': None,
-                            'tavily_context': tavily_context,
-                            'lead_collected': lead_collected,
-                            'show_lead_form': False,
-                            'lead_form_prefill': {}
-                        }
-                except Exception as e:
-                    print(f"Tavily search failed: {e}")
+            return {
+                'response': response_text,
+                'db_context': '',
+                'rag_context': None,
+                'tavily_context': None,
+                'lead_collected': lead_collected,
+                'show_lead_form': False,
+                'lead_form_prefill': {}
+            }
         
         # Step 1: Query Database
         # Allow database queries if:
@@ -3185,20 +2989,15 @@ Return the JSON object:"""
         # Step 3: Tavily (skip for program/fee listing - use DB only)
         # Fix: Do NOT use Tavily for program/fee listing - only for visa/policy/lifestyle questions
         tavily_context = None
-        # Tavily usage is now controlled by classify_query needs_web flag
-        # Only use Tavily for latest policy/current info requests, and restrict to malishaedu.com domain
-        skip_tavily_for_programs = sales_intent in ['fees_only', 'fees_compare', 'list_programs', 'earliest_intake'] or intent == 'program_specific'
+        skip_tavily_for_programs = sales_intent in ['fees_only', 'fees_compare', 'list_programs', 'earliest_intake']
         
-        if not skip_tavily_for_programs and needs_web and not db_context and not rag_context:
-            # Only use Tavily if explicitly needed (latest/current info) and restrict to malishaedu.com
-            try:
-                tavily_results = self.tavily_service.search(f"site:malishaedu.com {user_message}", max_results=2)
-                if tavily_results:
-                    tavily_context = self.tavily_service.format_search_results(tavily_results)
-            except Exception as e:
-                print(f"Tavily search failed: {e}")
+        if not skip_tavily_for_programs and not db_context and not rag_context:
+            # Only use Tavily for visa/policy/lifestyle questions, not for program/fee queries
+            tavily_results = self.tavily_service.search(user_message, max_results=2)
+            if tavily_results:
+                tavily_context = self.tavily_service.format_search_results(tavily_results)
         elif skip_tavily_for_programs:
-            print(f"DEBUG: Skipping Tavily for program-specific query (intent={intent}) - using DB only")
+            print(f"DEBUG: Skipping Tavily for program/fee listing (intent={sales_intent}) - using DB only")
         
         # Step 3.5: Detect if user shows interest (should show lead form)
         # Show lead form for: specific university/major questions, scholarship questions, application questions
@@ -3753,13 +3552,6 @@ REMEMBER: Base all concrete fees, deadlines, and program details ONLY on DATABAS
                 tavily_context
             )
             answer = improved_answer
-        
-        # Step 6.5: Add single lead collection question for program-specific queries
-        # (FAQ/CSCA queries already have lead question added in their early returns)
-        if intent == 'program_specific' or needs_db:
-            lead_question = self._build_single_lead_question(student_state)
-            if lead_question:
-                answer = answer + f"\n\n{lead_question}"
         
         # Return response with all context
         # lead_collected is already computed from use_db/profile_complete earlier
