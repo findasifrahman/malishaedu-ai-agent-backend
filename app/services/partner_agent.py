@@ -460,7 +460,7 @@ RULES:
 - For degree_level: "Chinese Language", "English Language", "Mandarin Language", "Language Program", "Language Course", "Foundation Program","Chinese Language Program", "English Language Program", "Mandarin Language Program", "Non-degree Program" should all be set to degree_level="Language". If user says "Chinese Language" or "English Language", it means they want a Language program (degree_level="Language"), NOT a Bachelor/Master/PhD program taught in Chinese/English.
 - For teaching_language: Extract "English" from phrases like "English", "English taught", "English-taught", "taught in English", "English program". Extract "Chinese" from "Chinese", "Chinese taught", "Mandarin", "中文". NOTE: If user says "Chinese Language" or "English Language" as a degree level, set degree_level="Language" and teaching_language can be "Chinese" or "English" respectively.
 - For deadline questions (e.g., "application deadline", "when is the deadline"), set wants_deadline=true and intent can be GENERAL if no other intent is clear.
-- CRITICAL: If user asks "which universities" or "list universities" (even with fee comparison like "lowest fees"), set intent="LIST_UNIVERSITIES" (NOT FEES). Set wants_fees=true if fees are mentioned.
+- CRITICAL: If user asks "which universities" or "list universities" or "how many universities" or "any university" (even with fee comparison like "lowest fees"), set intent="LIST_UNIVERSITIES" (NOT FEES). Set wants_fees=true if fees are mentioned.
 - For fee-related questions (e.g., "tuition fee", "tuition", "fee", "cost", "price", "bank statement amount"), set wants_fees=true and intent=FEES (unless it's a "which universities" query).
 - For scholarship questions (e.g., "scholarship", "scholarship info", "scholarship opportunity", "requiring CSC/CSCA", "requiring CSC", "requiring CSCA"), set wants_scholarship=true and intent=SCHOLARSHIP. Do NOT set wants_requirements=true for CSC/CSCA scholarship queries - "requiring CSC/CSCA" means scholarship requirement, not document requirements.
 - For accommodation questions (e.g., "accommodation", "accommodation facility", "housing", "dormitory"), set wants_fees=true and intent=FEES (accommodation info is part of fees).
@@ -1024,11 +1024,27 @@ Output ONLY valid JSON, no other text:"""
         # Check for "which universities" or "list universities" FIRST (before fees_compare)
         # This ensures list queries take priority over fee comparison
         # Match both singular "university" and plural "universities"
-        if re.search(r'\b(which|what|list|show|all|available)\s+universit(?:y|ies|i)\b', lower):
+        if re.search(r'\b(which|what|list|show|all|available|how\s+many|any)\s+universit(?:y|ies|i)\b', lower):
+            result["wants_list"] = True
+            result["intent"] = "list_universities"
+        # Check for "list a few universities", "provide some universities", "show some universities"
+        elif re.search(r'\b(list|provide|show|give)\s+(a\s+few|some|few)\s+universit(?:y|ies|i)\b', lower):
             result["wants_list"] = True
             result["intent"] = "list_universities"
         # Also check for "which university" (singular) - user wants a list
-        elif re.search(r'\b(which|what)\s+universit(?:y|ies|i)\s+(offer|offers|provide|provides|have|has|give|gives)\b', lower):
+        elif re.search(r'\b(which|what|how\s+many|any)\s+universit(?:y|ies|i)\s+(offer|offers|provide|provides|have|has|give|gives)\b', lower):
+            result["wants_list"] = True
+            result["intent"] = "list_universities"
+        # Check for "is there any university" or "are there any universities"
+        elif re.search(r'\b(is\s+there|are\s+there)\s+any\s+universit(?:y|ies|i)\b', lower):
+            result["wants_list"] = True
+            result["intent"] = "list_universities"
+        # Check for "does any [city] university" or "any [city] university offering"
+        # This handles patterns like "does any beijing university offering mba"
+        elif re.search(r'\b(does|do)\s+any\s+\w+\s+universit(?:y|ies|i)\s+(offer|offers|provide|provides|have|has|give|gives)\b', lower):
+            result["wants_list"] = True
+            result["intent"] = "list_universities"
+        elif re.search(r'\bany\s+\w+\s+universit(?:y|ies|i)\s+(offer|offers|provide|provides|have|has|give|gives)\b', lower):
             result["wants_list"] = True
             result["intent"] = "list_universities"
         elif re.search(r'\b(list|show|all|available|what\s+programs?|which\s+programs?|programs?\s+available|majors?\s+available|offered\s+(?:majors?|subjects?|programs?)|list\s+offered|subjects?\s+offered|majors?\s+offered)\b', lower):
@@ -2321,6 +2337,15 @@ Output ONLY valid JSON, no other text:"""
                 print(f"DEBUG: parse_query_rules detected LIST_UNIVERSITIES intent - overriding LLM intent from {state.intent} to LIST_UNIVERSITIES")
                 state.intent = self.router.INTENT_LIST_UNIVERSITIES
                 state.wants_list = True
+            # CRITICAL: Also check if LLM extracted LIST_PROGRAMS but user asked about universities offering a major
+            # In this case, if intake_term is specified, it should be LIST_UNIVERSITIES to get program intake details
+            elif state.intent == self.router.INTENT_LIST_PROGRAMS and state.intake_term:
+                # If user specified intake_term, they want program intake details, not just major list
+                # Check if the query mentions "university" or "universities" - if so, it's LIST_UNIVERSITIES
+                if "universit" in latest_user_message.lower():
+                    print(f"DEBUG: LIST_PROGRAMS with intake_term and 'university' mention - changing to LIST_UNIVERSITIES to get program intake details")
+                    state.intent = self.router.INTENT_LIST_UNIVERSITIES
+                    state.wants_list = True
                 # Keep wants_fees if it was set (for fee comparison)
                 if extracted.get("wants_fees") or rules_result.get("wants_fees"):
                     state.wants_fees = True
@@ -3711,6 +3736,8 @@ Output ONLY valid JSON, no other text:"""
                     requested_major_ids = sql_params.get("major_ids", [])
                     
                     # Get all majors that belong to these universities
+                    # CRITICAL: Import Major here if not already imported (to avoid UnboundLocalError)
+                    from app.models import Major
                     majors_in_unis = self.db.query(Major).filter(
                         Major.university_id.in_(university_ids)
                     ).all()
@@ -3966,6 +3993,8 @@ Output ONLY valid JSON, no other text:"""
                 if major_ids_to_use and sql_params.get("university_ids"):
                     university_ids = sql_params["university_ids"]
                     # Get all majors that belong to these universities
+                    # CRITICAL: Import Major here to avoid UnboundLocalError
+                    from app.models import Major
                     majors_in_unis = self.db.query(Major).filter(
                         Major.university_id.in_(university_ids)
                     ).all()
@@ -3995,6 +4024,32 @@ Output ONLY valid JSON, no other text:"""
                     upcoming_only=sql_params.get("upcoming_only", True),
                     limit=sql_params.get("limit", 10)
                 )
+                
+                # Enhance results with sample major names when major_ids are specified
+                # This helps the LLM understand which majors are available at each university
+                if major_ids_to_use and results:
+                    # Import ProgramIntake locally to avoid UnboundLocalError (there are local imports later in this function)
+                    from app.models import ProgramIntake
+                    for result in results:
+                        if "university" in result and result.get("program_count", 0) > 0:
+                            uni_id = result["university"].id
+                            # Get one sample intake for this university with the specified majors
+                            sample_query = self.db.query(ProgramIntake).join(Major).filter(
+                                ProgramIntake.university_id == uni_id,
+                                Major.id.in_(major_ids_to_use)
+                            )
+                            if sql_params.get("intake_term"):
+                                sample_query = sample_query.filter(ProgramIntake.intake_term == sql_params["intake_term"])
+                            if sql_params.get("intake_year"):
+                                sample_query = sample_query.filter(ProgramIntake.intake_year == sql_params["intake_year"])
+                            sample_intake = sample_query.first()
+                            
+                            if sample_intake and sample_intake.major:
+                                result["sample_intake"] = {
+                                    "major_name": sample_intake.major.name,
+                                    "intake_term": sample_intake.intake_term.value if hasattr(sample_intake.intake_term, 'value') else str(sample_intake.intake_term),
+                                    "intake_year": sample_intake.intake_year
+                                }
                 
                 # If 0 results, try relaxing filters (especially intake_term/intake_year and upcoming_only)
                 if len(results) == 0:
@@ -4053,17 +4108,50 @@ Output ONLY valid JSON, no other text:"""
                 return results
         
         elif intent == self.router.INTENT_LIST_PROGRAMS:
-            # CRITICAL: For LIST_PROGRAMS (list of majors), query majors table directly, not program_intakes
-            # This shows all available majors regardless of intake availability
-            print(f"DEBUG: LIST_PROGRAMS intent - querying majors table directly")
-            majors_list = self._get_majors_for_list_query(
-                university_id=sql_params.get("university_id"),
-                university_ids=sql_params.get("university_ids"),
-                degree_level=sql_params.get("degree_level"),
-                teaching_language=sql_params.get("teaching_language")
-            )
-            print(f"DEBUG: LIST_PROGRAMS - found {len(majors_list)} majors")
-            return majors_list
+            # CRITICAL: If intake_term or intake_year is specified, OR if university_id is specified,
+            # query program_intakes instead of majors table to get program details (deadlines, requirements, fees, etc.)
+            # This ensures users get full program information when asking about programs at a specific university
+            if sql_params.get("intake_term") or sql_params.get("intake_year") or sql_params.get("university_id") or sql_params.get("university_ids"):
+                print(f"DEBUG: LIST_PROGRAMS with intake_term/intake_year/university_id - querying program_intakes for detailed info")
+                filters = {}
+                if sql_params.get("university_id"):
+                    filters["university_id"] = sql_params["university_id"]
+                if sql_params.get("university_ids"):
+                    filters["university_ids"] = sql_params["university_ids"]
+                if sql_params.get("major_ids"):
+                    filters["major_ids"] = sql_params["major_ids"]
+                if sql_params.get("degree_level"):
+                    filters["degree_level"] = sql_params["degree_level"]
+                if sql_params.get("teaching_language"):
+                    filters["teaching_language"] = sql_params["teaching_language"]
+                if sql_params.get("intake_term"):
+                    filters["intake_term"] = sql_params["intake_term"]
+                if sql_params.get("intake_year"):
+                    filters["intake_year"] = sql_params["intake_year"]
+                
+                # For LIST_PROGRAMS without intake_term, get upcoming intakes to show program details
+                if not filters.get("intake_term") and not filters.get("intake_year"):
+                    filters["upcoming_only"] = True
+                
+                intakes, _ = self.db_service.find_program_intakes(
+                    filters=filters,
+                    limit=sql_params.get("limit", 200),
+                    offset=0,
+                    order_by="deadline"
+                )
+                print(f"DEBUG: LIST_PROGRAMS with university/intake - found {len(intakes)} program intakes")
+                return intakes
+            else:
+                # No intake or university specified - query majors table directly (shows all available majors)
+                print(f"DEBUG: LIST_PROGRAMS intent - querying majors table directly (no university/intake specified)")
+                majors_list = self._get_majors_for_list_query(
+                    university_id=sql_params.get("university_id"),
+                    university_ids=sql_params.get("university_ids"),
+                    degree_level=sql_params.get("degree_level"),
+                    teaching_language=sql_params.get("teaching_language")
+                )
+                print(f"DEBUG: LIST_PROGRAMS - found {len(majors_list)} majors")
+                return majors_list
         
         elif intent in [self.router.INTENT_FEES, 
                         self.router.INTENT_ADMISSION_REQUIREMENTS, self.router.INTENT_SCHOLARSHIP,
@@ -4448,6 +4536,15 @@ Output ONLY valid JSON, no other text:"""
                 if uni.university_ranking:
                     context_parts.append(f"  Ranking: {uni.university_ranking}")
                 context_parts.append(f"  Matching programs: {result.get('program_count', 0)}")
+                
+                # If sample_intake is provided (from fee queries), include major name
+                if "sample_intake" in result and result["sample_intake"]:
+                    sample = result["sample_intake"]
+                    if sample.get("major_name"):
+                        context_parts.append(f"  Major: {sample['major_name']}")
+                        if sample.get("intake_term") and sample.get("intake_year"):
+                            context_parts.append(f"  Intake: {sample['intake_term']} {sample['intake_year']}")
+                
                 context_parts.append("")
             
             elif hasattr(result, 'university') and hasattr(result, 'major'):
