@@ -843,6 +843,11 @@ Style Guidelines:
             ]
         except Exception as e:
             print(f"Error loading universities: {e}")
+            # Rollback any failed transaction to allow subsequent queries
+            try:
+                self.db.rollback()
+            except:
+                pass
             return []
     
     def _load_all_majors(self) -> List[Dict[str, Any]]:
@@ -864,6 +869,11 @@ Style Guidelines:
             ]
         except Exception as e:
             print(f"Error loading majors: {e}")
+            # Rollback any failed transaction to allow subsequent queries
+            try:
+                self.db.rollback()
+            except:
+                pass
             return []
     
     def extract_student_profile_state(self, conversation_history: List[Dict[str, str]]) -> StudentProfileState:
@@ -1812,6 +1822,48 @@ Return the JSON object:"""
         else:
             return 'general'
     
+    def _determine_doc_type_and_audience(self, user_message: str, intent: str) -> tuple[str, Optional[str]]:
+        """
+        Determine doc_type and audience based on user message and intent.
+        
+        Returns: (doc_type, audience)
+        - doc_type: 'csca' | 'b2c_study' | 'b2b_partner' | 'people_contact' | 'service_policy'
+        - audience: 'student' | 'partner' | None
+        """
+        user_lower = user_message.lower()
+        
+        # CSCA questions
+        if intent == 'csca':
+            return ('csca', None)
+        
+        # B2B/Partner questions
+        partner_keywords = [
+            'partnership', 'partner', 'commission', 'reporting', 'success rate',
+            'legal', 'privacy', 'complaint', 'agreement', 'contract',
+            'b2b', 'business partner', 'partner agency'
+        ]
+        if any(keyword in user_lower for keyword in partner_keywords):
+            return ('b2b_partner', 'partner')
+        
+        # People/Contact questions
+        people_keywords = [
+            'chairman', 'dr. maruf', 'dr maruf', 'founder', 'ceo',
+            'contact person', 'who is', 'leadership'
+        ]
+        if any(keyword in user_lower for keyword in people_keywords):
+            return ('people_contact', None)
+        
+        # Service Policy questions
+        service_policy_keywords = [
+            'service charge', 'service fee', 'refund', 'hidden fee', 'hidden charge',
+            'payment method', 'payment policy', 'fee structure', 'pricing'
+        ]
+        if any(keyword in user_lower for keyword in service_policy_keywords):
+            return ('service_policy', None)
+        
+        # Default: B2C study questions
+        return ('b2c_study', None)
+    
     def classify_query(self, user_message: str, student_state: StudentProfileState) -> Dict[str, Any]:
         """
         Deterministic query classification for routing.
@@ -1822,18 +1874,27 @@ Return the JSON object:"""
         - needs_csca_rag: bool (True for CSCA questions)
         - needs_general_rag: bool (True for general FAQ questions)
         - needs_web: bool (True only if latest policy/current info needed)
+        - doc_type: str (determined doc_type)
+        - audience: Optional[str] (determined audience)
         """
         user_lower = user_message.lower()
         
-        # Priority 1: CSCA questions (strict RAG-only rule)
-        csca_keywords = ['csca', 'china scholastic competency assessment']
+        # Priority 1: CSCA/CSC/Chinese Government Scholarship questions (strict RAG-only rule)
+        csca_keywords = [
+            'csca', 'china scholastic competency assessment',
+            'csc scholarship', 'chinese government scholarship', 'chinese goverment scholarship',
+            'csc', 'china scholarship council'
+        ]
         if any(keyword in user_lower for keyword in csca_keywords):
+            doc_type, audience = self._determine_doc_type_and_audience(user_message, 'csca')
             return {
                 'intent': 'csca',
                 'needs_db': False,
                 'needs_csca_rag': True,
                 'needs_general_rag': False,
-                'needs_web': False
+                'needs_web': False,
+                'doc_type': doc_type,
+                'audience': audience
             }
         
         # Priority 2: Program-specific queries (DB-first)
@@ -1858,12 +1919,15 @@ Return the JSON object:"""
         
         if (any(keyword in user_lower for keyword in program_specific_keywords) and
             (has_university_context or has_major_context or is_program_specific)):
+            doc_type, audience = self._determine_doc_type_and_audience(user_message, 'program_specific')
             return {
                 'intent': 'program_specific',
                 'needs_db': True,
                 'needs_csca_rag': False,
                 'needs_general_rag': False,
-                'needs_web': False
+                'needs_web': False,
+                'doc_type': doc_type,
+                'audience': audience
             }
         
         # Priority 3: General FAQ questions
@@ -1881,12 +1945,15 @@ Return the JSON object:"""
             needs_latest = any(term in user_lower for term in [
                 'latest', 'current', '2026', '2027', 'updated', 'recent', 'new policy'
             ])
+            doc_type, audience = self._determine_doc_type_and_audience(user_message, 'general_faq')
             return {
                 'intent': 'general_faq',
                 'needs_db': False,
                 'needs_csca_rag': False,
                 'needs_general_rag': True,
-                'needs_web': needs_latest  # Only if explicitly asking for latest info
+                'needs_web': needs_latest,  # Only if explicitly asking for latest info
+                'doc_type': doc_type,
+                'audience': audience
             }
         
         # Default: try general FAQ first, then program-specific
@@ -1970,15 +2037,29 @@ Return the JSON object:"""
         
         return False
     
-    def _build_single_lead_question(self, student_state: StudentProfileState) -> Optional[str]:
+    def _build_single_lead_question(self, student_state: StudentProfileState, audience: Optional[str] = None) -> Optional[str]:
         """
-        Build a single lead collection question with priority:
+        Build a single lead collection question with priority.
+        
+        For partners (audience='partner'):
+        - Ask for contact (WhatsApp/WeChat/email) if missing
+        
+        For students (default):
         1. Nationality (if missing)
         2. Contact info (if missing)
         3. Degree level or major (if missing)
         
         Returns None if all important fields are collected.
         """
+        # Partner lead collection
+        if audience == 'partner':
+            missing_contact = not (student_state.phone or student_state.email or 
+                                   student_state.whatsapp or student_state.wechat)
+            if missing_contact:
+                return "What's your WhatsApp/WeChat (or email) so we can connect you with our partnership team?"
+            return None
+        
+        # Student lead collection
         missing_nationality = not student_state.nationality
         missing_contact = not (student_state.phone or student_state.email or 
                                student_state.whatsapp or student_state.wechat)
@@ -2766,28 +2847,82 @@ Return the JSON object:"""
         needs_csca_rag = query_classification['needs_csca_rag']
         needs_general_rag = query_classification['needs_general_rag']
         needs_web = query_classification['needs_web']
+        doc_type = query_classification.get('doc_type', 'b2c_study')
+        audience = query_classification.get('audience')
         
-        print(f"DEBUG: Query classification - intent={intent}, needs_db={needs_db}, needs_csca_rag={needs_csca_rag}, needs_general_rag={needs_general_rag}, needs_web={needs_web}")
+        print(f"DEBUG: Query classification - intent={intent}, doc_type={doc_type}, audience={audience}, needs_db={needs_db}, needs_csca_rag={needs_csca_rag}, needs_general_rag={needs_general_rag}, needs_web={needs_web}")
         
-        # Priority 1: CSCA questions - RAG only (strict rule)
+        # Priority 1: CSCA/CSC/Chinese Government Scholarship questions - RAG only (strict rule)
         if intent == 'csca' and needs_csca_rag:
             try:
-                csca_search_query = "CSCA China Scholastic Competency Assessment exam structure subjects registration fee timing 2026 undergraduate bachelor"
-                if any(term in user_message.lower() for term in ['master', 'masters', 'phd', 'doctorate']):
+                # Build comprehensive search query for CSCA/CSC/Chinese Government Scholarship
+                user_lower = user_message.lower()
+                csca_search_query = "CSCA China Scholastic Competency Assessment Chinese Government Scholarship CSC undergraduate bachelor 2026 2027"
+                
+                # Add specific terms based on user question
+                if any(term in user_lower for term in ['master', 'masters', 'phd', 'doctorate']):
                     csca_search_query += " masters phd not required"
-                rag_results = self.rag_service.search_similar(self.db, csca_search_query, top_k=5)
+                if any(term in user_lower for term in ['scholarship', 'csc', 'chinese government']):
+                    csca_search_query += " scholarship application process requirements"
+                if any(term in user_lower for term in ['exam', 'test', 'registration', 'fee']):
+                    csca_search_query += " exam schedule registration fee"
+                
+                # Use filtered retrieval with doc_type='csca'
+                rag_results = self.rag_service.retrieve(self.db, csca_search_query, doc_type='csca', audience=audience, top_k=3)
+                
                 if rag_results:
                     rag_context = self.rag_service.format_rag_context(rag_results)
-                    # Generate answer using RAG context only
+                    
+                    # Check if user is asking for details that might not be in chunks (success rate, testimonials, specific numbers)
+                    asks_for_statistics = any(term in user_lower for term in [
+                        'success rate', 'successful', 'testimonial', 'review', 'experience',
+                        'how many', 'percentage', 'chance', 'probability', 'rate'
+                    ])
+                    
+                    # Generate answer using RAG context only with strict instructions
+                    system_prompt = """You are a helpful assistant answering CSCA/CSC/Chinese Government Scholarship questions. 
+
+CRITICAL RULES:
+1. Use ONLY the provided RAG context as your factual source.
+2. Do NOT fabricate, invent, or guess any information not explicitly stated in the context.
+3. Do NOT provide success rates, testimonials, specific numbers, or statistics unless they are explicitly mentioned in the context.
+4. If the context doesn't contain the answer to the user's question, you MUST use the safe template below.
+5. Do NOT combine information from your training data with the context - use ONLY the context.
+
+Safe template when context doesn't contain the answer:
+I'd be happy to help you with that! To provide you with the most accurate and personalized information about [topic], could you please share:
+- Your nationality
+- Your preferred major/field of study
+- Your target intake (March or September) and year
+
+Once I have these details, I can check the latest official information and provide you with specific guidance tailored to your situation."""
+                    
+                    user_prompt = f"""RAG Context (use ONLY this as your source):
+{rag_context}
+
+User question: {user_message}
+
+Instructions:
+- Answer the question using ONLY the information from the RAG context above.
+- If the context contains the answer, provide it clearly and concisely.
+- If the context does NOT contain the answer (especially for success rates, testimonials, specific statistics, or details not mentioned), use the safe template from the system prompt.
+- Do NOT invent or fabricate any information."""
+                    
                     response = self.openai_service.chat_completion([
-                        {"role": "system", "content": "You are a helpful assistant answering CSCA questions. Use ONLY the provided RAG context as your factual source. Do NOT fabricate information."},
-                        {"role": "user", "content": f"Context:\n{rag_context}\n\nUser question: {user_message}\n\nAnswer the question using ONLY the context above. If context doesn't contain the answer, say 'Our current knowledge base does not specify this detail. CSCA policies are still evolving. We'll check the latest official notice and update you.'"}
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
                     ])
                     answer = response.choices[0].message.content
-                    lead_question = self._build_single_lead_question(student_state)
-                    response_text = answer + (f"\n\n{lead_question}" if lead_question else "")
+                    
+                    # If answer contains the safe template pattern, it already asks for info
+                    # Otherwise, add lead question
+                    if "nationality" not in answer.lower() and "major" not in answer.lower():
+                        lead_question = self._build_single_lead_question(student_state, audience=audience)
+                        if lead_question:
+                            answer = answer + f"\n\n{lead_question}"
+                    
                     return {
-                        'response': response_text,
+                        'response': answer,
                         'db_context': '',
                         'rag_context': rag_context,
                         'tavily_context': None,
@@ -2795,9 +2930,122 @@ Return the JSON object:"""
                         'show_lead_form': False,
                         'lead_form_prefill': {}
                     }
+                else:
+                    # No RAG results found - try Tavily as fallback (MalishaEdu + govt sites only)
+                    print(f"DEBUG: No RAG results for CSCA/CSC question: {user_message}")
+                    print("DEBUG: Attempting Tavily fallback for CSCA question (MalishaEdu + govt sites)")
+                    
+                    tavily_context = None
+                    try:
+                        # Restrict Tavily search to MalishaEdu and government sites using site: operator
+                        # Try multiple searches for different domains
+                        allowed_domains = ["malishaedu.com", "gov.cn", "csc.edu.cn", "chineseembassy.org"]
+                        all_tavily_results = []
+                        
+                        for domain in allowed_domains:
+                            try:
+                                tavily_query = f"{user_message} site:{domain}"
+                                domain_results = self.tavily_service.search(tavily_query, max_results=2)
+                                # Filter to ensure results are from the correct domain
+                                filtered_results = [
+                                    r for r in domain_results 
+                                    if domain in r.get('url', '').lower()
+                                ]
+                                all_tavily_results.extend(filtered_results)
+                                if len(all_tavily_results) >= 3:
+                                    break
+                            except Exception as e:
+                                print(f"DEBUG: Tavily search for {domain} failed: {e}")
+                                continue
+                        
+                        if all_tavily_results and len(all_tavily_results) > 0:
+                            # Limit to top 3 results
+                            all_tavily_results = all_tavily_results[:3]
+                            tavily_context = "\n\nLatest Information from Official Sources:\n"
+                            for i, result in enumerate(all_tavily_results, 1):
+                                tavily_context += f"\n{i}. {result.get('title', 'Source')}\n"
+                                tavily_context += f"   {result.get('content', '')}\n"
+                                tavily_context += f"   URL: {result.get('url', '')}\n"
+                            print(f"DEBUG: Tavily found {len(all_tavily_results)} results for CSCA question")
+                        else:
+                            print("DEBUG: Tavily also returned no results for CSCA question")
+                    except Exception as e:
+                        print(f"DEBUG: Tavily fallback failed: {e}")
+                    
+                    # If Tavily found results, use them; otherwise use safe template
+                    if tavily_context:
+                        system_prompt = """You are a helpful assistant answering CSCA/CSC/Chinese Government Scholarship questions.
+
+Use the provided web search results to answer the user's question. Focus on official information from government websites and MalishaEdu sources. Be accurate and cite sources when possible."""
+                        
+                        user_prompt = f"""Web Search Results:
+{tavily_context}
+
+User question: {user_message}
+
+Please answer the question using the information from the web search results above. If the information is not sufficient, ask for the user's nationality, major, and intake preferences."""
+                        
+                        try:
+                            response = self.openai_service.chat_completion([
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt}
+                            ])
+                            answer = response.choices[0].message.content
+                            
+                            # Add lead question if not already present
+                            if "nationality" not in answer.lower() and "major" not in answer.lower():
+                                lead_question = self._build_single_lead_question(student_state, audience=audience)
+                                if lead_question:
+                                    answer = answer + f"\n\n{lead_question}"
+                            
+                            return {
+                                'response': answer,
+                                'db_context': '',
+                                'rag_context': None,
+                                'tavily_context': tavily_context,
+                                'lead_collected': lead_collected,
+                                'show_lead_form': False,
+                                'lead_form_prefill': {}
+                            }
+                        except Exception as e:
+                            print(f"DEBUG: Failed to generate response from Tavily results: {e}")
+                            # Fall through to safe template
+                    
+                    # Fallback to safe template if Tavily didn't work or returned nothing
+                    safe_template = """I'd be happy to help you with that! To provide you with the most accurate and personalized information about CSCA and Chinese Government Scholarship, could you please share:
+- Your nationality
+- Your preferred major/field of study  
+- Your target intake (March or September) and year
+
+Once I have these details, I can check the latest official information and provide you with specific guidance tailored to your situation."""
+                    
+                    return {
+                        'response': safe_template,
+                        'db_context': '',
+                        'rag_context': None,
+                        'tavily_context': tavily_context,
+                        'lead_collected': lead_collected,
+                        'show_lead_form': False,
+                        'lead_form_prefill': {}
+                    }
             except Exception as e:
                 print(f"CSCA RAG search failed: {e}")
-            # Fall through to continue with normal flow if RAG fails
+                # Use safe template on error
+                safe_template = """I'd be happy to help you with that! To provide you with the most accurate and personalized information about CSCA and Chinese Government Scholarship, could you please share:
+- Your nationality
+- Your preferred major/field of study
+- Your target intake (March or September) and year
+
+Once I have these details, I can check the latest official information and provide you with specific guidance tailored to your situation."""
+                return {
+                    'response': safe_template,
+                    'db_context': '',
+                    'rag_context': None,
+                    'tavily_context': None,
+                    'lead_collected': lead_collected,
+                    'show_lead_form': False,
+                    'lead_form_prefill': {}
+                }
         
         # Priority 2: General FAQ questions - FAQService first, then RAG
         if intent == 'general_faq' and not needs_db:
@@ -2815,7 +3063,7 @@ Return the JSON object:"""
             if faq_match:
                 print(f"DEBUG: FAQ match found (score={faq_score:.2f}): {faq_match['question'][:50]}...")
                 faq_answer = faq_match['answer']
-                lead_question = self._build_single_lead_question(student_state)
+                lead_question = self._build_single_lead_question(student_state, audience=audience)
                 response_text = faq_answer + (f"\n\n{lead_question}" if lead_question else "")
                 return {
                     'response': response_text,
@@ -2839,7 +3087,7 @@ Return the JSON object:"""
                             {"role": "user", "content": f"Context:\n{rag_context}\n\nUser question: {user_message}\n\nAnswer concisely using only the context above."}
                         ])
                         answer = response.choices[0].message.content
-                        lead_question = self._build_single_lead_question(student_state)
+                        lead_question = self._build_single_lead_question(student_state, audience=audience)
                         response_text = answer + (f"\n\n{lead_question}" if lead_question else "")
                         return {
                             'response': response_text,
@@ -2869,7 +3117,7 @@ Return the JSON object:"""
                             {"role": "user", "content": f"Web search results:\n{tavily_context}\n\nUser question: {user_message}\n\nAnswer concisely."}
                         ])
                         answer = response.choices[0].message.content
-                        lead_question = self._build_single_lead_question(student_state)
+                        lead_question = self._build_single_lead_question(student_state, audience=audience)
                         response_text = answer + (f"\n\n{lead_question}" if lead_question else "")
                         return {
                             'response': response_text,
@@ -2940,9 +3188,11 @@ Return the JSON object:"""
                     csca_search_query = "CSCA China Scholastic Competency Assessment exam structure subjects registration fee timing 2026 undergraduate bachelor"
                     if any(term in user_msg_lower for term in ['master', 'masters', 'phd', 'doctorate']):
                         csca_search_query += " masters phd not required"
-                    rag_results = self.rag_service.search_similar(self.db, csca_search_query, top_k=5)
+                    rag_results = self.rag_service.retrieve(self.db, csca_search_query, doc_type='csca', audience=None, top_k=3)
                 else:
-                    rag_results = self.rag_service.search_similar(self.db, user_message, top_k=5)
+                    # Determine doc_type for scholarship questions
+                    scholarship_doc_type = 'b2c_study'  # Default for general scholarship questions
+                    rag_results = self.rag_service.retrieve(self.db, user_message, doc_type=scholarship_doc_type, audience=None, top_k=3)
                 
                 if rag_results:
                     rag_context = self.rag_service.format_rag_context(rag_results)
@@ -2992,7 +3242,7 @@ Return the JSON object:"""
             elif not db_context or len(db_context) < 100:  # DB context is weak
                 # Lead collected but DB context weak: try RAG (only for non-program queries)
                 try:
-                    rag_results = self.rag_service.search_similar(self.db, user_message, top_k=3)
+                    rag_results = self.rag_service.retrieve(self.db, user_message, doc_type=doc_type, audience=audience, top_k=3)
                     if rag_results:
                         rag_context = self.rag_service.format_rag_context(rag_results)
                 except Exception as e:
@@ -3168,9 +3418,11 @@ Return the JSON object:"""
         user_msg_lower = user_message.lower()
         if any(term in user_msg_lower for term in ['service fee', 'service charge']):
             try:
-                cost_rag_results = self.rag_service.search_similar(
+                cost_rag_results = self.rag_service.retrieve(
                     self.db,
                     "MalishaEdu service charges service fee table",
+                    doc_type='service_policy',
+                    audience=None,
                     top_k=3
                 )
                 if cost_rag_results:
@@ -3234,11 +3486,19 @@ Return the JSON object:"""
         mentions_university = False
         if db_context:
             # Check if db_context contains university names
-            universities_in_db = self.db.query(University).all()
-            for uni in universities_in_db:
-                if uni.name.lower() in user_msg_lower:
-                    mentions_university = True
-                    break
+            try:
+                universities_in_db = self.db.query(University).all()
+                for uni in universities_in_db:
+                    if uni.name.lower() in user_msg_lower:
+                        mentions_university = True
+                        break
+            except Exception as e:
+                print(f"Error querying universities: {e}")
+                # Rollback any failed transaction
+                try:
+                    self.db.rollback()
+                except:
+                    pass
         
         # Check if user mentions specific major (including in Bengali/other languages)
         mentions_major = any(term in user_msg_lower for term in [
@@ -3757,7 +4017,7 @@ REMEMBER: Base all concrete fees, deadlines, and program details ONLY on DATABAS
         # Step 6.5: Add single lead collection question for program-specific queries
         # (FAQ/CSCA queries already have lead question added in their early returns)
         if intent == 'program_specific' or needs_db:
-            lead_question = self._build_single_lead_question(student_state)
+            lead_question = self._build_single_lead_question(student_state, audience=audience)
             if lead_question:
                 answer = answer + f"\n\n{lead_question}"
         

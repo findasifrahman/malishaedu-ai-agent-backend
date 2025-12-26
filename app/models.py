@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Date, Boolean, ForeignKey, JSON, Float, Enum as SQLEnum, TypeDecorator
+from sqlalchemy import Column, Integer, BigInteger, String, Text, DateTime, Date, Boolean, ForeignKey, JSON, Float, Enum as SQLEnum, TypeDecorator, SmallInteger
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from pgvector.sqlalchemy import Vector
@@ -400,33 +400,38 @@ class Conversation(Base):
     
     user = relationship("User", back_populates="conversations")
 
-# RAG Documents table
-class RAGDocument(Base):
-    __tablename__ = "rag_documents"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    filename = Column(String)
-    file_type = Column(String)  # pdf, txt, docx, csv
-    content = Column(Text)
-    meta_data = Column(JSON, name="metadata")  # university, program, intake, etc.
-    uploaded_by = Column(Integer, ForeignKey("users.id"))
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    
-    embeddings = relationship("RAGEmbedding", back_populates="document")
 
-# RAG Embeddings table (with pgvector)
-class RAGEmbedding(Base):
-    __tablename__ = "rag_embeddings"
+
+# New filtered-retrieval RAG schema
+class RagSource(Base):
+    __tablename__ = "rag_sources"
     
-    id = Column(Integer, primary_key=True, index=True)
-    document_id = Column(Integer, ForeignKey("rag_documents.id"))
-    chunk_text = Column(Text)
-    embedding = Column(Vector(1536))  # text-embedding-3-small dimension
-    chunk_index = Column(Integer)
-    meta_data = Column(JSON, name="metadata")
+    id = Column(BigInteger, primary_key=True, index=True)
+    name = Column(Text, nullable=False)
+    doc_type = Column(Text, nullable=False)  # csca, b2c_study, b2b_partner, people_contact, service_policy
+    audience = Column(Text, nullable=False, default='student')  # student, partner
+    version = Column(Text, nullable=True)
+    status = Column(Text, nullable=False, default='active')  # active, archived, deprecated
+    source_url = Column(Text, nullable=True)
+    last_verified_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    document = relationship("RAGDocument", back_populates="embeddings")
+    chunks = relationship("RagChunk", back_populates="source", cascade="all, delete-orphan")
+
+class RagChunk(Base):
+    __tablename__ = "rag_chunks"
+    
+    id = Column(BigInteger, primary_key=True, index=True)
+    source_id = Column(BigInteger, ForeignKey("rag_sources.id", ondelete="CASCADE"), nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    chunk_hash = Column(Text, nullable=False, unique=True)  # MD5 hash for deduplication
+    content = Column(Text, nullable=False)
+    embedding = Column(Vector(1536), nullable=False)  # text-embedding-3-small dimension
+    priority = Column(SmallInteger, nullable=False, default=3)  # 1=high, 2=medium, 3=low
+    meta_data = Column(JSON, name="metadata", nullable=False, default={})  # Python attr 'meta_data' maps to DB column 'metadata'
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    source = relationship("RagSource", back_populates="chunks")
 
 # Universities table
 class University(Base):

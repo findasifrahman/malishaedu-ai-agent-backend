@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, List
 from app.database import get_db
-from app.models import RAGDocument, User, UserRole
+from app.models import RagSource, User, UserRole
 from app.routers.auth import get_current_user
 from app.services.rag_service import RAGService
 from app.services.openai_service import OpenAIService
@@ -108,34 +108,36 @@ async def upload_rag_document(
     # But keep original text in content field for reference
     distilled_text = distilled if distilled else text_content
     
-    # Create RAG document
-    rag_doc = RAGDocument(
-        filename=filename,
-        file_type=file_type,
-        content=text_content,  # Store original content
-        metadata={**doc_metadata, "distilled": distilled},
-        uploaded_by=current_user.id
-    )
-    db.add(rag_doc)
-    db.commit()
-    db.refresh(rag_doc)
+    # Use new ingestion method with filtered schema
+    doc_type = doc_metadata.get('doc_type', 'b2c_study')
+    audience = doc_metadata.get('audience', 'student')
+    version = doc_metadata.get('version')
+    source_url = doc_metadata.get('source_url')
+    last_verified_at = doc_metadata.get('last_verified_at')
     
-    # Chunk distilled text and create embeddings (use distilled for better search)
-    chunks = chunk_text(distilled_text)
-    rag_service.create_embeddings_for_document(
-        db=db,
-        document_id=rag_doc.id,
-        chunks=chunks,
-        metadata=doc_metadata
-    )
-    
-    return {
-        "message": "Document uploaded and processed successfully",
-        "document_id": rag_doc.id,
-        "filename": filename,
-        "chunks": len(chunks),
-        "distilled": True
-    }
+    try:
+        result = rag_service.ingest_source(
+            db=db,
+            name=filename,
+            doc_type=doc_type,
+            full_text=distilled_text if distilled else text_content,
+            audience=audience,
+            version=version,
+            source_url=source_url,
+            last_verified_at=last_verified_at
+        )
+        
+        return {
+            "message": "Document uploaded and processed successfully",
+            "source_id": result['source_id'],
+            "filename": filename,
+            "chunks_created": result['chunks_created'],
+            "chunks_skipped": result['chunks_skipped'],
+            "total_chunks": result['total_chunks'],
+            "distilled": bool(distilled)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to ingest document: {str(e)}")
 
 @router.post("/search", response_model=RAGSearchResponse)
 async def search_rag(
@@ -156,38 +158,63 @@ async def list_rag_documents(
     current_user: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
-    """List all RAG documents"""
-    documents = db.query(RAGDocument).all()
+    """List all RAG documents (from new rag_sources table)"""
+    sources = db.query(RagSource).all()
     
     return [
         {
-            "id": doc.id,
-            "filename": doc.filename,
-            "file_type": doc.file_type,
-            "metadata": doc.meta_data,
-            "created_at": doc.created_at.isoformat() if doc.created_at else None,
-            "uploaded_by": doc.uploaded_by
+            "id": source.id,
+            "name": source.name,
+            "doc_type": source.doc_type,
+            "audience": source.audience,
+            "version": source.version,
+            "status": source.status,
+            "source_url": source.source_url,
+            "last_verified_at": source.last_verified_at.isoformat() if source.last_verified_at else None,
+            "created_at": source.created_at.isoformat() if source.created_at else None,
+            "chunk_count": len(source.chunks) if source.chunks else 0
         }
-        for doc in documents
+        for source in sources
     ]
 
-@router.delete("/documents/{document_id}")
-async def delete_rag_document(
-    document_id: int,
+@router.get("/documents/{source_id}/content")
+async def get_rag_document_content(
+    source_id: int,
     current_user: User = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
-    """Delete a RAG document"""
-    document = db.query(RAGDocument).filter(RAGDocument.id == document_id).first()
-    if not document:
+    """Get content of a RAG document by combining all chunks"""
+    source = db.query(RagSource).filter(RagSource.id == source_id).first()
+    if not source:
         raise HTTPException(status_code=404, detail="Document not found")
     
-    # Delete embeddings (cascade should handle this, but explicit is better)
-    from app.models import RAGEmbedding
-    db.query(RAGEmbedding).filter(RAGEmbedding.document_id == document_id).delete()
+    # Get all chunks for this source, sorted by chunk_index
+    chunks = sorted(source.chunks, key=lambda c: c.chunk_index)
+    content = "\n\n".join([chunk.content for chunk in chunks])
     
-    # Delete document
-    db.delete(document)
+    return {
+        "id": source.id,
+        "name": source.name,
+        "doc_type": source.doc_type,
+        "audience": source.audience,
+        "version": source.version,
+        "content": content,
+        "chunk_count": len(chunks)
+    }
+
+@router.delete("/documents/{source_id}")
+async def delete_rag_document(
+    source_id: int,
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Delete a RAG document (source and all its chunks)"""
+    source = db.query(RagSource).filter(RagSource.id == source_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    # Delete source (chunks will be deleted via CASCADE)
+    db.delete(source)
     db.commit()
     
     return {"message": "Document deleted successfully"}

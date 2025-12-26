@@ -165,18 +165,28 @@ def update_conversation_messages(
     assistant_message: str
 ):
     """Update conversation with new messages (keep last 12)"""
-    messages = conversation.messages or []
-    
-    # Add new messages
-    messages.append({"role": "user", "content": user_message})
-    messages.append({"role": "assistant", "content": assistant_message})
-    
-    # Keep only last 12 messages (6 exchanges)
-    if len(messages) > 12:
-        messages = messages[-12:]
-    
-    conversation.messages = messages
-    db.commit()
+    try:
+        messages = conversation.messages or []
+        
+        # Add new messages
+        messages.append({"role": "user", "content": user_message})
+        messages.append({"role": "assistant", "content": assistant_message})
+        
+        # Keep only last 12 messages (6 exchanges)
+        if len(messages) > 12:
+            messages = messages[-12:]
+        
+        conversation.messages = messages
+        db.commit()
+    except Exception as e:
+        print(f"Error updating conversation messages: {e}")
+        # Rollback failed transaction
+        try:
+            db.rollback()
+        except:
+            pass
+        # Re-raise to let caller handle
+        raise
 
 def collect_lead(db: Session, name: Optional[str], email: Optional[str], 
                 phone: Optional[str], country: Optional[str], 

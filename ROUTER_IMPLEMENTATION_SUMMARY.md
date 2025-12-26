@@ -5,11 +5,17 @@ Implemented a comprehensive routing system for SalesAgent that deterministically
 
 ## Files Created/Modified
 
-### 1. New Knowledge Base File
+### 1. New Knowledge Base Files
 **File:** `backend/app/rag_docs/malishaedu_answer_bank.md`
 - Contains approved Q&A answers for all FAQ categories
 - Covers: studying in China requirements, cost, accommodation, safety, application process, MalishaEdu services, partnerships, post-study career
-- Note: This file needs to be ingested into the RAG database via the ingestion pipeline to be searchable
+- Note: This file needs to be ingested into the RAG database via the `/api/rag/upload` endpoint to be searchable
+
+**File:** `backend/app/rag_docs/csca_2026_undergrad_scholarship_faq.md`
+- Contains comprehensive CSCA (China Scholastic Competency Assessment) and Chinese Government Scholarship (CSC) information for 2026/2027 intake
+- Covers: CSCA exam structure, registration, fees, timing, undergraduate scholarship requirements, application process
+- **CRITICAL:** This file MUST be ingested into the RAG database for CSCA/CSC questions to work properly
+- Note: All files in `app/rag_docs/` folder should be indexed via `/api/rag/upload` endpoint
 
 ### 2. Modified: `backend/app/services/sales_agent.py`
 
@@ -71,13 +77,17 @@ Triggers when query mentions:
 
 **Response:** FAQService match → If no match, RAG from answer bank → If latest info needed, Tavily (domain-restricted) → Add 1 lead question
 
-### CSCA Questions (RAG-Only)
-Triggers: Contains "CSCA" or "China Scholastic Competency Assessment"
+### CSCA/CSC/Chinese Government Scholarship Questions (RAG-Only, Strict)
+Triggers: Contains "CSCA", "CSC", "China Scholastic Competency Assessment", "Chinese Government Scholarship", "Chinese Goverment Scholarship", or "China Scholarship Council"
 
-**Response:** RAG search only → Answer from RAG context → Add 1 lead question
+**Response:** RAG search only → Answer from RAG context → Safe template if details missing → Add 1 lead question
+- **STRICT RULE:** Answer ONLY from retrieved RAG chunks
 - NO database queries
 - NO fabrication if RAG doesn't contain answer
-- Must say "we need to check and update" if RAG is empty
+- NO success rates, testimonials, or statistics unless explicitly in chunks
+- If chunks don't contain the requested detail (e.g., success rate, testimonials, specific numbers), use safe template asking for nationality/major/intake
+- If RAG search returns no results, use safe template immediately
+- Safe template: "I'd be happy to help you with that! To provide you with the most accurate and personalized information about CSCA and Chinese Government Scholarship, could you please share: Your nationality, Your preferred major/field of study, Your target intake (March or September) and year"
 
 ### "Top Ranked Universities" Handling
 - MUST only suggest from DB universities table
@@ -117,17 +127,24 @@ Using FAQ_Questions.docx as a test checklist:
 - ✅ "Top ranked universities for Bachelor's in Business"
 - ✅ "Compare costs for PhD programs"
 
-### CSCA Questions (should route to RAG only):
+### CSCA/CSC/Chinese Government Scholarship Questions (should route to RAG only, strict):
 - ✅ "What is CSCA?"
+- ✅ "What is Chinese Government Scholarship?"
 - ✅ "Is CSCA mandatory for Master's programs?"
 - ✅ "CSCA registration process"
+- ✅ "CSC scholarship requirements"
+- ✅ "Success rate of CSCA scholarship" (should use safe template if not in chunks)
+- ✅ "Testimonials from CSCA students" (should use safe template if not in chunks)
 
 ## Next Steps
 
-1. **Ingest malishaedu_answer_bank.md into RAG database**
-   - Use existing ingestion pipeline/interface
-   - File location: `backend/app/rag_docs/malishaedu_answer_bank.md`
-   - Once ingested, RAGService.search_similar() will automatically search it
+1. **Ingest RAG documents into RAG database**
+   - Use `/api/rag/upload` endpoint (admin access required)
+   - Files to ingest:
+     - `backend/app/rag_docs/malishaedu_answer_bank.md` (general FAQ answers)
+     - `backend/app/rag_docs/csca_2026_undergrad_scholarship_faq.md` (CSCA/CSC scholarship info) - **REQUIRED for CSCA questions**
+   - Once ingested, RAGService.search_similar() will automatically search them
+   - **Note:** All markdown files in `app/rag_docs/` folder should be indexed to ensure comprehensive coverage
 
 2. **Test with FAQ_Questions.docx**
    - Extract each question
