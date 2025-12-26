@@ -3148,8 +3148,103 @@ Instructions:
                     ])
                     answer = response.choices[0].message.content
                     
-                    # If answer contains the safe template pattern, it already asks for info
-                    # Otherwise, add lead question
+                    # Check if the answer is using the safe template (asking for lead info)
+                    # If so, try Tavily or domain knowledge instead
+                    is_safe_template = (
+                        ("the provided context does not contain" in answer.lower() or
+                         "does not contain information" in answer.lower() or
+                         "does not contain specific information" in answer.lower()) or
+                        ("nationality" in answer.lower() and 
+                         ("major" in answer.lower() or "field of study" in answer.lower()) and
+                         ("share" in answer.lower() or "please" in answer.lower() or "could you" in answer.lower()))
+                    )
+                    
+                    if is_safe_template:
+                        print(f"DEBUG: RAG context didn't answer the question - trying Tavily/domain knowledge")
+                        # Try Tavily or domain knowledge instead of asking for lead info
+                        # Check if this is a general CSCA question that could benefit from Tavily
+                        asks_for_latest = any(term in user_lower for term in [
+                            'latest', 'current', 'updated', 'recent', 'new policy', 'this month', '2026', '2027'
+                        ]) and any(term in user_lower for term in ['rule', 'policy', 'regulation', 'change'])
+                        
+                        is_general_csca_question = any(term in user_lower for term in [
+                            'after', 'post', 'completing', 'graduation', 'graduate', 'finish', 'complete studies',
+                            'career', 'job', 'work', 'future', 'what happens', 'next steps'
+                        ])
+                        
+                        should_use_tavily = asks_for_latest or is_general_csca_question
+                        
+                        if should_use_tavily:
+                            # Try Tavily
+                            print(f"DEBUG: Attempting Tavily fallback for CSCA question")
+                            tavily_context = None
+                            try:
+                                allowed_domains = ["malishaedu.com", "gov.cn", "csc.edu.cn", "chineseembassy.org"]
+                                all_tavily_results = []
+                                
+                                for domain in allowed_domains:
+                                    try:
+                                        tavily_query = f"{user_message} site:{domain}"
+                                        domain_results = self.tavily_service.search(tavily_query, max_results=2)
+                                        filtered_results = [
+                                            r for r in domain_results 
+                                            if domain in r.get('url', '').lower()
+                                        ]
+                                        all_tavily_results.extend(filtered_results)
+                                        if len(all_tavily_results) >= 3:
+                                            break
+                                    except Exception as e:
+                                        print(f"DEBUG: Tavily search for {domain} failed: {e}")
+                                        continue
+                                
+                                if all_tavily_results and len(all_tavily_results) > 0:
+                                    all_tavily_results = all_tavily_results[:3]
+                                    tavily_context = "\n\nLatest Information from Official Sources:\n"
+                                    for i, result in enumerate(all_tavily_results, 1):
+                                        tavily_context += f"\n{i}. {result.get('title', 'Source')}\n"
+                                        tavily_context += f"   {result.get('content', '')}\n"
+                                        tavily_context += f"   URL: {result.get('url', '')}\n"
+                                    
+                                    system_prompt = """You are a helpful assistant answering CSCA/CSC/Chinese Government Scholarship questions. Use the provided web search results to answer the user's question. Be accurate and informative."""
+                                    user_prompt = f"""Web Search Results:
+{tavily_context}
+
+User question: {user_message}
+
+Please answer the question using the information from the web search results above."""
+                                    
+                                    response = self.openai_service.chat_completion([
+                                        {"role": "system", "content": system_prompt},
+                                        {"role": "user", "content": user_prompt}
+                                    ])
+                                    answer = response.choices[0].message.content
+                                    print(f"DEBUG: Tavily provided answer for CSCA question")
+                                    return {
+                                        'response': answer,
+                                        'db_context': '',
+                                        'rag_context': rag_context,
+                                        'tavily_context': tavily_context,
+                                        'lead_collected': lead_collected,
+                                        'show_lead_form': False,
+                                        'lead_form_prefill': {}
+                                    }
+                            except Exception as e:
+                                print(f"DEBUG: Tavily fallback failed: {e}")
+                        
+                        # Tavily failed or not applicable - use domain knowledge
+                        print(f"DEBUG: Using CSCA domain knowledge answer")
+                        answer = self._provide_csca_domain_knowledge(user_message)
+                        return {
+                            'response': answer,
+                            'db_context': '',
+                            'rag_context': rag_context,
+                            'tavily_context': None,
+                            'lead_collected': lead_collected,
+                            'show_lead_form': False,
+                            'lead_form_prefill': {}
+                        }
+                    
+                    # Answer is good - add lead question if needed
                     if "nationality" not in answer.lower() and "major" not in answer.lower():
                         lead_question = self._build_single_lead_question(student_state, audience=audience)
                         if lead_question:
