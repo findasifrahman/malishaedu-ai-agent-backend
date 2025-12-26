@@ -153,3 +153,4 @@ python -m scripts.ingest_rag_folder app/rag_docs --doc-type b2c_study --audience
 - **Chunk Size**: Default 700 chars (~500-800 chars) with 120 char overlap
 - **Priority**: Chunks have priority (1=high, 2=medium, 3=low) for ranking
 
+

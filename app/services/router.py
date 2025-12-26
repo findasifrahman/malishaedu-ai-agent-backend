@@ -439,9 +439,9 @@ Output ONLY valid JSON, no other text:"""
         
         # Target degree levels with common typos
         degree_targets = {
-            "Bachelor": ["bachelor", "bsc", "bs", "ba", "beng", "b.eng", "undergrad", "undergraduate", "bba","b.b.a","B.A.",
+            "Bachelor": ["bachelor", "bsc", "b.s.", "b.a.", "b.eng", "undergrad", "undergraduate", "bba","b.b.a","B.A.",
                         "bachelov", "bacheller", "bachelar", "bacheler", "bachlor"],
-            "Master": ["master", "masters", "msc", "ms", "ma", "mba", "m.sc", "m.s", "m.a", 
+            "Master": ["master", "masters", "msc", "ms", "m.a.", "mba", "m.sc", "m.s", "m.a", 
                       "postgrad", "postgraduate", "graduate", "masters","m.a.","M.A.","M.A"],
             "PhD": ["phd", "ph.d", "doctorate", "doctoral", "dphil","dr.","Dr.","Dr"],
             "Language": ["language", "nondegree", "non-degree", "foundation", "chinese language", "preparatory", "foundation program"],

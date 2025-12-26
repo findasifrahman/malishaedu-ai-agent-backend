@@ -616,24 +616,38 @@ COST INFORMATION HANDLING (CRITICAL - DB-FIRST APPROACH):
   * Medical insurance: 800–1,200 RMB/year
   * Living cost: 1,500–3,000 RMB/month
 
-Information Sources (in priority order):
-1. DATABASE (ALWAYS FIRST)
+Information Sources (in priority order - CRITICAL ROUTING RULES):
+
+1. DATABASE (ALWAYS FIRST for universities/programs/fees/intakes/scholarships)
+   - If question is about universities/programs/fees/intakes/scholarship availability for a specific university: query DB first.
    - Universities: use DBQueryService.search_universities() and format_university_info().
    - Majors/programs: use DBQueryService.search_majors() and format_major_info().
    - Intakes & requirements: use DBQueryService.search_program_intakes() and format_program_intake_info().
-   Always prefer partner universities (is_partner = True) when suggesting options.
+   - Always prefer partner universities (is_partner = True) when suggesting options.
 
-2. RAG (knowledge base)
-   - Use RAGService.search_similar() to fetch information about:
-     - MalishaEdu services
-     - China education system
-     - Program and scholarship requirements
-     - Application & visa process
-     - Accommodation, living expenses, medical insurance, CSCA, HSK
+2. RAG (knowledge base) - FILTERED BY DOCUMENT TYPE + AUDIENCE
+   - RAG retrieval is ALWAYS filtered by document_type and audience. Never search across all chunks.
+   - Document types: B2C Study, People/Contact, Service Policy, CSCA, B2B Partner
+   - Audience: Student vs Partner (determined from question keywords)
+   - Routing rules:
+     * General study questions (requirements/cost-of-living/accommodation/life-in-china/part-time-work): use RAG doc_type=B2C Study
+     * MalishaEdu office/contact/leaders/Dr Maruf/Korban Ali: use RAG doc_type=People/Contact ONLY. Never use Tavily.
+     * Deposit/refund/service charge/payment policy/complaints/escalation: use RAG doc_type=Service Policy ONLY. Never use Tavily.
+     * CSCA questions: use RAG doc_type=CSCA first. Tavily only if user asks "latest rule updated this month" and RAG has no answer.
+     * Partner questions (commission/MoU/agency): use RAG doc_type=B2B Partner, audience=partner
+   - Return top_k <= 4 chunks only. Do not fetch whole documents.
 
-3. Tavily (web search)
-   - Use TavilyService only if DATABASE + RAG are weak.
-   - Mainly for the latest CSCA policies, scholarship or visa updates, or if the user asks about very specific current news.
+3. Tavily (web search) - LAST RESORT, STRICT GUARDS
+   - Tavily is called ONLY if:
+     (no DB result) AND (no RAG chunk confidence/empty) AND (question is policy/visa/regulation and likely time-sensitive)
+   - NEVER use Tavily for:
+     * People/Contact questions (office, phone, email, Dr Maruf, Korban Ali)
+     * Service Policy questions (deposit, refund, service charge, payment policy)
+     * General study questions (use B2C Study RAG instead)
+   - ONLY use Tavily for:
+     * CSCA: if user explicitly asks "latest rule updated this month" and RAG has no answer
+     * Visa/policy changes: if explicitly asking for latest/current/2026 policy and RAG has no answer
+   - Log whenever Tavily is invoked with a reason.
 
 When answering about programs:
 - ALWAYS check the DATABASE first for specific university/major/intake data
@@ -791,6 +805,12 @@ Style Guidelines:
 - FRIENDLY: Warm, encouraging, but not pushy
 - STRUCTURED: Use bullet points only when listing multiple items (3+ items)
 - VALUE FIRST: Always provide value before asking for contact info or signup
+
+CRITICAL: General Process/FAQ Questions:
+- When user asks general questions like "How do you handle the application process?" or "What is the admission process?", provide GENERAL answers that apply to ALL degree levels (Bachelor, Master, PhD, Language).
+- DO NOT make the answer specific to "Master's programs" or any single degree level unless the user explicitly asks about that specific degree level.
+- For general process questions, use phrases like "For programs in Chinese universities" or "For all degree levels" instead of "For Master's programs".
+- DO NOT append lead collection questions to general process/FAQ answers - these are informational questions that don't require personalization.
 """
 
 
@@ -1135,12 +1155,8 @@ Return the JSON object:"""
                 if state.degree_level is None:
                     state.degree_level = "Language"
             
-            # If user mentioned "master" but degree_level is None, fix it
-            master_keywords = ['master degree', 'master', 'masters', 'master\'s', 'looking for master', 'want master', 'i am looking for master', 'for my masters', 'get admitted', 'admission']
-            if any(keyword in conversation_lower for keyword in master_keywords) and state.degree_level is None:
-                print(f"WARNING: User mentioned 'master' but degree_level was not extracted. Fixing: setting degree_level='Master'")
-                state.degree_level = "Master"
-                state.program_type = "Degree"  # Master's is a degree program
+            # REMOVED: Auto-fix hack for degree_level based on single words
+            # Only set degree_level if explicitly extracted by LLM or provided via lead form
             
             # CRITICAL: Validate major - only keep if explicitly mentioned as something user wants to STUDY
             # Check if user explicitly mentioned a major/subject they want to study (not just asking about it)
@@ -1836,32 +1852,38 @@ Return the JSON object:"""
         if intent == 'csca':
             return ('csca', None)
         
-        # B2B/Partner questions
-        partner_keywords = [
-            'partnership', 'partner', 'commission', 'reporting', 'success rate',
-            'legal', 'privacy', 'complaint', 'agreement', 'contract',
-            'b2b', 'business partner', 'partner agency'
+        # People/Contact questions (HIGHEST PRIORITY after CSCA)
+        # Office location, contact info, leadership questions
+        people_contact_keywords = [
+            'dr. maruf', 'dr maruf', 'maruf', 'korban ali', 'korban', 'chairman', 'founder', 'ceo',
+            'contact person', 'who is', 'leadership', 'office', 'address', 'location',
+            'phone', 'telephone', 'hotline', 'email', 'contact email', 'info@', 'info @',
+            'where is your', 'where are you', 'your office', 'your address', 'your location',
+            'guangzhou', 'headquarters', 'head office'
         ]
-        if any(keyword in user_lower for keyword in partner_keywords):
-            return ('b2b_partner', 'partner')
-        
-        # People/Contact questions
-        people_keywords = [
-            'chairman', 'dr. maruf', 'dr maruf', 'founder', 'ceo',
-            'contact person', 'who is', 'leadership'
-        ]
-        if any(keyword in user_lower for keyword in people_keywords):
+        if any(keyword in user_lower for keyword in people_contact_keywords):
             return ('people_contact', None)
         
-        # Service Policy questions
+        # Service Policy questions (deposit, refund, service charge, payment policy)
         service_policy_keywords = [
-            'service charge', 'service fee', 'refund', 'hidden fee', 'hidden charge',
-            'payment method', 'payment policy', 'fee structure', 'pricing'
+            'service charge', 'service fee', 'refund', 'refundable', 'deposit', 'application deposit',
+            'hidden fee', 'hidden charge', 'payment method', 'payment policy', 'fee structure', 
+            'pricing', 'complaint', 'escalation', 'payment', 'charge', 'fee policy',
+            '80 usd', '80 dollar', 'deposit amount', 'refund policy'
         ]
         if any(keyword in user_lower for keyword in service_policy_keywords):
             return ('service_policy', None)
         
-        # Default: B2C study questions
+        # B2B/Partner questions
+        partner_keywords = [
+            'partnership', 'partner', 'commission', 'reporting', 'success rate',
+            'legal', 'privacy', 'agreement', 'contract', 'mou', 'memorandum',
+            'b2b', 'business partner', 'partner agency', 'agency partner'
+        ]
+        if any(keyword in user_lower for keyword in partner_keywords):
+            return ('b2b_partner', 'partner')
+        
+        # Default: B2C study questions (general study questions)
         return ('b2c_study', None)
     
     def classify_query(self, user_message: str, student_state: StudentProfileState) -> Dict[str, Any]:
@@ -1879,22 +1901,25 @@ Return the JSON object:"""
         """
         user_lower = user_message.lower()
         
-        # Priority 1: CSCA/CSC/Chinese Government Scholarship questions (strict RAG-only rule)
+        # Priority 1: CSCA/CSC/Chinese Government Scholarship questions (strict RAG-first rule)
         csca_keywords = [
             'csca', 'china scholastic competency assessment',
             'csc scholarship', 'chinese government scholarship', 'chinese goverment scholarship',
             'csc', 'china scholarship council'
         ]
         if any(keyword in user_lower for keyword in csca_keywords):
-            doc_type, audience = self._determine_doc_type_and_audience(user_message, 'csca')
+            # Only use Tavily if explicitly asking for latest rules updated this month
+            needs_latest_csca = any(term in user_lower for term in [
+                'latest', 'current', 'updated', 'recent', 'new policy', 'this month', '2026', '2027'
+            ]) and any(term in user_lower for term in ['rule', 'policy', 'regulation', 'change'])
             return {
                 'intent': 'csca',
                 'needs_db': False,
                 'needs_csca_rag': True,
                 'needs_general_rag': False,
-                'needs_web': False,
-                'doc_type': doc_type,
-                'audience': audience
+                'needs_web': needs_latest_csca,  # Only if explicitly asking for latest rules
+                'doc_type': 'csca',
+                'audience': 'student'
             }
         
         # Priority 2: Program-specific queries (DB-first)
@@ -1919,41 +1944,97 @@ Return the JSON object:"""
         
         if (any(keyword in user_lower for keyword in program_specific_keywords) and
             (has_university_context or has_major_context or is_program_specific)):
-            doc_type, audience = self._determine_doc_type_and_audience(user_message, 'program_specific')
+            # Determine audience for program-specific queries
+            determined_audience = None
+            if any(kw in user_lower for kw in ['partner', 'agency', 'commission', 'mou']):
+                determined_audience = 'partner'
+            else:
+                determined_audience = 'student'
             return {
                 'intent': 'program_specific',
                 'needs_db': True,
                 'needs_csca_rag': False,
                 'needs_general_rag': False,
                 'needs_web': False,
-                'doc_type': doc_type,
-                'audience': audience
+                'doc_type': 'b2c_study',  # Program-specific uses B2C Study RAG only for generic definitions
+                'audience': determined_audience
             }
         
-        # Priority 3: General FAQ questions
+        # Priority 3: People/Contact questions (NEVER use Tavily, NEVER use DB)
+        people_contact_keywords = [
+            'dr. maruf', 'dr maruf', 'maruf', 'korban ali', 'korban', 'chairman', 'founder', 'ceo',
+            'contact person', 'who is', 'leadership', 'office', 'address', 'location',
+            'phone', 'telephone', 'hotline', 'email', 'contact email', 'info@', 'info @',
+            'where is your', 'where are you', 'your office', 'your address', 'your location',
+            'guangzhou', 'headquarters', 'head office', 'dhaka office', 'bangladesh office'
+        ]
+        if any(keyword in user_lower for keyword in people_contact_keywords):
+            # Determine audience: check if partner-related keywords
+            determined_audience = None
+            if any(kw in user_lower for kw in ['partner', 'agency', 'commission', 'mou']):
+                determined_audience = 'partner'
+            else:
+                determined_audience = 'student'
+            return {
+                'intent': 'people_contact',
+                'needs_db': False,
+                'needs_csca_rag': False,
+                'needs_general_rag': True,
+                'needs_web': False,  # NEVER use Tavily for People/Contact
+                'doc_type': 'people_contact',
+                'audience': determined_audience
+            }
+        
+        # Priority 4: Service Policy questions (deposit, refund, service charge - NEVER use Tavily, NEVER use DB)
+        service_policy_keywords = [
+            'service charge', 'service fee', 'refund', 'refundable', 'deposit', 'application deposit',
+            'hidden fee', 'hidden charge', 'payment method', 'payment policy', 'fee structure',
+            'pricing', 'complaint', 'escalation', 'payment', 'charge', 'fee policy',
+            '80 usd', '80 dollar', 'deposit amount', 'refund policy', 'application process',
+            'admission process', 'how do you handle', 'how does', 'process', 'procedure'
+        ]
+        if any(keyword in user_lower for keyword in service_policy_keywords):
+            # Determine audience: check if partner-related keywords
+            determined_audience = None
+            if any(kw in user_lower for kw in ['partner', 'agency', 'commission', 'mou']):
+                determined_audience = 'partner'
+            else:
+                determined_audience = 'student'
+            return {
+                'intent': 'service_policy',
+                'needs_db': False,
+                'needs_csca_rag': False,
+                'needs_general_rag': True,
+                'needs_web': False,  # NEVER use Tavily for Service Policy
+                'doc_type': 'service_policy',
+                'audience': determined_audience
+            }
+        
+        # Priority 5: General FAQ questions (B2C Study)
         general_faq_keywords = [
             'bank account', 'halal', 'food', 'safety', 'accommodation', 'dormitory',
             'living cost', 'part-time', 'work while', 'visa', 'travel', 'insurance',
-            'support services', 'payment', 'service charge', 'hidden charge',
-            'process time', 'how long', 'duration', 'after arrival', 'post arrival',
-            'how to apply', 'application process', 'what is malishaedu', 'about malishaedu',
-            'contact', 'phone', 'address', 'location', 'get started', 'consultation'
+            'support services', 'process time', 'how long', 'duration', 'after arrival', 'post arrival',
+            'how to apply', 'application process', 'admission process', 'how do you handle', 'how does',
+            'what is the process', 'what is the procedure', 'how does the process work', 'explain the process',
+            'tell me about the process', 'how it works', 'how does it work', 'steps', 'procedure',
+            'what is malishaedu', 'about malishaedu', 'get started', 'consultation', 'cost of living', 
+            'life in china', 'requirements'
         ]
         
         if any(keyword in user_lower for keyword in general_faq_keywords):
-            # Check if user explicitly asks for latest/current/2026 policy
+            # Check if user explicitly asks for latest/current/2026 policy (only for time-sensitive topics)
             needs_latest = any(term in user_lower for term in [
-                'latest', 'current', '2026', '2027', 'updated', 'recent', 'new policy'
-            ])
-            doc_type, audience = self._determine_doc_type_and_audience(user_message, 'general_faq')
+                'latest', 'current', '2026', '2027', 'updated', 'recent', 'new policy', 'this month'
+            ]) and any(term in user_lower for term in ['visa', 'policy', 'regulation', 'rule'])
             return {
                 'intent': 'general_faq',
                 'needs_db': False,
                 'needs_csca_rag': False,
                 'needs_general_rag': True,
-                'needs_web': needs_latest,  # Only if explicitly asking for latest info
-                'doc_type': doc_type,
-                'audience': audience
+                'needs_web': needs_latest,  # Only if explicitly asking for latest policy/visa info
+                'doc_type': 'b2c_study',
+                'audience': 'student'
             }
         
         # Default: try general FAQ first, then program-specific
@@ -2059,31 +2140,128 @@ Return the JSON object:"""
                 return "What's your WhatsApp/WeChat (or email) so we can connect you with our partnership team?"
             return None
         
-        # Student lead collection
+        # Student lead collection - ask for 3-5 fields only
         missing_nationality = not student_state.nationality
-        missing_contact = not (student_state.phone or student_state.email or 
-                               student_state.whatsapp or student_state.wechat)
         missing_degree = not student_state.degree_level
         missing_major = not student_state.major
+        missing_intake = not student_state.intake_term
+        # Note: We don't ask for contact info here - only after user expresses intent to apply
         
-        # Priority 1: Nationality
+        # Build question asking for 3-5 missing fields
+        missing_fields = []
         if missing_nationality:
-            return "Which country are you from?"
+            missing_fields.append("nationality")
+        if missing_degree:
+            missing_fields.append("degree level")
+        if missing_major:
+            missing_fields.append("major")
+        if missing_intake:
+            missing_fields.append("intake term")
         
-        # Priority 2: Contact info
-        if missing_contact:
-            return "What's your WhatsApp/WeChat (or email) so our counselor can guide you faster?"
-        
-        # Priority 3: Degree level or major
-        if missing_degree and missing_major:
-            return "Which level & major are you planning (Bachelor/Master/PhD/Language)?"
-        elif missing_degree:
-            return "Which degree level are you interested in (Bachelor/Master/PhD/Language)?"
-        elif missing_major:
-            return "Which major or subject are you interested in?"
+        if len(missing_fields) > 0:
+            if len(missing_fields) == 1:
+                field_name = missing_fields[0]
+                if field_name == "nationality":
+                    return "Which country are you from?"
+                elif field_name == "degree level":
+                    return "Which degree level are you interested in (Bachelor/Master/PhD/Language)?"
+                elif field_name == "major":
+                    return "Which major or subject are you interested in?"
+                elif field_name == "intake term":
+                    return "When would you like to start (March or September)?"
+            elif len(missing_fields) <= 3:
+                fields_str = ", ".join(missing_fields[:-1]) + f", and {missing_fields[-1]}"
+                return f"To help you better, could you share your {fields_str}?"
+            else:
+                # Too many missing - ask for top 3
+                top_3 = missing_fields[:3]
+                fields_str = ", ".join(top_3[:-1]) + f", and {top_3[-1]}"
+                return f"To help you better, could you share your {fields_str}?"
         
         # All important fields collected
         return None
+    
+    def _provide_general_knowledge_answer(self, user_message: str) -> str:
+        """Provide helpful general knowledge answer when RAG/Tavily have no results"""
+        user_lower = user_message.lower()
+        
+        # Travel/Transportation
+        if any(term in user_lower for term in ['travel', 'transportation', 'transport', 'getting around']):
+            return """Travel options in China for international students:
+
+• **High-speed trains (高铁)**: Fast, convenient, and affordable for intercity travel. Popular for trips between major cities like Beijing, Shanghai, Guangzhou.
+
+• **Metro/Subway**: Available in major cities (Beijing, Shanghai, Guangzhou, Shenzhen, etc.). Very affordable and efficient for daily commuting.
+
+• **Buses**: Extensive network in all cities. Very cheap (usually 1-2 CNY per ride).
+
+• **Taxis/Ride-hailing**: Didi (similar to Uber) is widely used. Affordable for short distances.
+
+• **Air travel**: For long distances, domestic flights are reasonably priced.
+
+• **Bicycles/E-bikes**: Popular for short distances, especially with shared bike services (Mobike, Ofo, etc.).
+
+Most students use a combination of metro, buses, and ride-hailing apps for daily travel. High-speed trains are great for exploring other cities during holidays.
+
+Is there a specific city or travel scenario you'd like to know more about?"""
+        
+        # Food/Halal
+        elif any(term in user_lower for term in ['food', 'halal', 'eating', 'meal', 'dietary']):
+            return """Food options in China for international students:
+
+• **University cafeterias**: Most universities have cafeterias with diverse options, including halal sections in many institutions.
+
+• **Halal food**: Available in major cities, especially in areas with Muslim communities. Many universities in cities like Beijing, Xi'an, and Guangzhou have halal dining options.
+
+• **Restaurants**: Wide variety from local Chinese cuisine to international options (Western, Middle Eastern, etc.).
+
+• **Cooking**: Most dormitories allow cooking, and students often prepare meals in shared kitchens.
+
+• **Food delivery**: Apps like Meituan and Ele.me offer convenient food delivery with many halal and international options.
+
+• **Cost**: Eating at university cafeterias is very affordable (typically 10-30 CNY per meal). Restaurants vary widely in price.
+
+Would you like to know about halal food availability in a specific city or university?"""
+        
+        # Safety
+        elif any(term in user_lower for term in ['safety', 'safe', 'security', 'crime']):
+            return """Safety in China for international students:
+
+• **General safety**: China is generally very safe for international students. Major cities have low crime rates compared to many countries.
+
+• **Campus security**: Universities have 24/7 security, controlled access to dormitories, and security personnel on campus.
+
+• **Public safety**: Public transportation, streets, and public spaces are generally safe, even at night in most areas.
+
+• **Emergency services**: Police (110), medical (120), and fire (119) services are available nationwide.
+
+• **Precautions**: As in any country, students should take normal precautions: be aware of surroundings, keep valuables secure, and follow local laws and regulations.
+
+• **Support**: Universities provide orientation and safety briefings for new international students.
+
+Is there a specific safety concern you'd like to know more about?"""
+        
+        # Accommodation
+        elif any(term in user_lower for term in ['accommodation', 'dormitory', 'dorm', 'housing', 'where will i live']):
+            return """Accommodation options in China:
+
+• **University dormitories**: Most universities provide international student dormitories with options for single or shared rooms. Facilities typically include basic furniture, internet, and shared bathrooms/kitchens.
+
+• **Room types**: Single rooms, double rooms, or shared rooms (2-4 students). Prices vary by city and university.
+
+• **Facilities**: Common facilities include laundry rooms, shared kitchens, study areas, and sometimes gyms.
+
+• **Cost**: Dormitory fees range from 3,000-12,000 CNY/year depending on city and room type.
+
+• **Off-campus**: Some students choose to rent apartments off-campus, though this is usually more expensive and requires more paperwork.
+
+• **MalishaEdu support**: We can help you with accommodation arrangements and provide guidance on the best options for your budget and preferences.
+
+Would you like to know about accommodation at a specific university or city?"""
+        
+        # Default helpful response
+        else:
+            return f"I'd be happy to help you with information about {user_message}. While I don't have specific details in our knowledge base right now, I can provide general guidance. Could you tell me more about what specifically you'd like to know?"
     
     def _build_faq_cta(self, student_state: StudentProfileState) -> str:
         """Build CTA after FAQ answer to collect missing lead fields (backward compatibility - uses single question)"""
@@ -2868,7 +3046,7 @@ Return the JSON object:"""
                     csca_search_query += " exam schedule registration fee"
                 
                 # Use filtered retrieval with doc_type='csca'
-                rag_results = self.rag_service.retrieve(self.db, csca_search_query, doc_type='csca', audience=audience, top_k=3)
+                rag_results = self.rag_service.retrieve(self.db, csca_search_query, doc_type='csca', audience=audience, top_k=4)
                 
                 if rag_results:
                     rag_context = self.rag_service.format_rag_context(rag_results)
@@ -2931,9 +3109,36 @@ Instructions:
                         'lead_form_prefill': {}
                     }
                 else:
-                    # No RAG results found - try Tavily as fallback (MalishaEdu + govt sites only)
+                    # No RAG results found - try Tavily as fallback ONLY if explicitly asking for latest rules
+                    # Hard guard: Only use Tavily if user explicitly asks for latest/updated rules
+                    asks_for_latest = any(term in user_lower for term in [
+                        'latest', 'current', 'updated', 'recent', 'new policy', 'this month', '2026', '2027'
+                    ]) and any(term in user_lower for term in ['rule', 'policy', 'regulation', 'change'])
+                    
+                    if not asks_for_latest:
+                        print(f"DEBUG: No RAG results for CSCA/CSC question, but not asking for latest rules - skipping Tavily")
+                        # Return safe template without Tavily
+                        safe_answer = """I'd be happy to help you with CSCA/CSC questions! To provide you with the most accurate information, could you please share:
+- Your nationality
+- Your preferred major/field of study  
+- Your target intake (March or September) and year
+
+Once I have these details, I can provide you with specific guidance tailored to your situation."""
+                        lead_question = self._build_single_lead_question(student_state, audience=audience)
+                        if lead_question:
+                            safe_answer = safe_answer + f"\n\n{lead_question}"
+                        return {
+                            'response': safe_answer,
+                            'db_context': '',
+                            'rag_context': None,
+                            'tavily_context': None,
+                            'lead_collected': lead_collected,
+                            'show_lead_form': False,
+                            'lead_form_prefill': {}
+                        }
+                    
                     print(f"DEBUG: No RAG results for CSCA/CSC question: {user_message}")
-                    print("DEBUG: Attempting Tavily fallback for CSCA question (MalishaEdu + govt sites)")
+                    print(f"DEBUG: User explicitly asking for latest rules - attempting Tavily fallback (MalishaEdu + govt sites)")
                     
                     tavily_context = None
                     try:
@@ -3059,11 +3264,52 @@ Once I have these details, I can check the latest official information and provi
                 if not faq_match:
                     faq_match, faq_score = self.faq_service.match(user_message, threshold=0.55)
             
-            # If FAQ match found, use it
+            # Validate FAQ match is semantically relevant
+            if faq_match:
+                # Extract key semantic words from user question and matched FAQ
+                user_lower = user_message.lower()
+                matched_question_lower = faq_match['question'].lower()
+                matched_answer_lower = faq_match['answer'].lower()
+                
+                # Extract meaningful semantic keywords (exclude common stopwords)
+                stopwords = {'what', 'are', 'the', 'your', 'that', 'this', 'with', 'from', 'china', 'chinese', 
+                           'how', 'do', 'you', 'is', 'in', 'for', 'and', 'or', 'to', 'a', 'an', 'of', 'on', 'at',
+                           'monthly', 'average', 'per', 'month', 'depending', 'city', 'lifestyle'}
+                user_keywords = set([w for w in user_lower.split() if len(w) > 3 and w not in stopwords])
+                matched_keywords = set([w for w in matched_question_lower.split() if len(w) > 3 and w not in stopwords])
+                matched_answer_keywords = set([w for w in matched_answer_lower.split() if len(w) > 3 and w not in stopwords])
+                
+                # Check semantic overlap
+                semantic_overlap = user_keywords.intersection(matched_keywords)
+                answer_overlap = user_keywords.intersection(matched_answer_keywords)
+                total_overlap = semantic_overlap.union(answer_overlap)
+                
+                # For low scores, require meaningful semantic overlap
+                # "travel options" should NOT match "living cost" - they share no semantic keywords
+                if faq_score < 0.60:
+                    if not total_overlap:  # Require at least 1 matching keyword in question OR answer
+                        print(f"DEBUG: FAQ match rejected - low score ({faq_score:.2f}) and no semantic overlap. User: '{user_message}' -> Matched: '{faq_match['question']}'. User keywords: {user_keywords}, Matched keywords: {matched_keywords}")
+                        faq_match = None
+                        faq_score = 0.0
+                    elif faq_score < 0.58 and len(total_overlap) < 2:
+                        # For very low scores, require at least 2 matching keywords
+                        print(f"DEBUG: FAQ match rejected - very low score ({faq_score:.2f}) and insufficient semantic overlap ({len(total_overlap)} matches). User: '{user_message}' -> Matched: '{faq_match['question']}'")
+                        faq_match = None
+                        faq_score = 0.0
+            
+            # If FAQ match found and validated, use it
             if faq_match:
                 print(f"DEBUG: FAQ match found (score={faq_score:.2f}): {faq_match['question'][:50]}...")
                 faq_answer = faq_match['answer']
-                lead_question = self._build_single_lead_question(student_state, audience=audience)
+                # Skip lead question for general process/FAQ questions
+                is_general_process_question = any(phrase in user_message.lower() for phrase in [
+                    'how do you handle', 'how does', 'what is the process', 'what is the procedure',
+                    'how does the process work', 'explain the process', 'tell me about the process',
+                    'application process', 'admission process', 'how it works', 'how does it work'
+                ]) and not any(phrase in user_message.lower() for phrase in [
+                    'my', 'for me', 'my application', 'my admission', 'i want', 'i need'
+                ])
+                lead_question = None if is_general_process_question else self._build_single_lead_question(student_state, audience=audience)
                 response_text = faq_answer + (f"\n\n{lead_question}" if lead_question else "")
                 return {
                     'response': response_text,
@@ -3078,16 +3324,24 @@ Once I have these details, I can check the latest official information and provi
             # If no FAQ match but needs_general_rag, try RAG from answer bank
             if needs_general_rag:
                 try:
-                    rag_results = self.rag_service.search_similar(self.db, user_message, top_k=5)
+                    rag_results = self.rag_service.retrieve(self.db, user_message, doc_type=doc_type, audience=audience, top_k=4)
                     if rag_results:
                         rag_context = self.rag_service.format_rag_context(rag_results)
                         # Generate concise answer using RAG
                         response = self.openai_service.chat_completion([
-                            {"role": "system", "content": "You are a helpful assistant. Answer the question using ONLY the provided context. Be concise and engaging. Do NOT invent facts not in the context."},
+                            {"role": "system", "content": "You are a helpful assistant. Answer the question using ONLY the provided context. Be concise and engaging. Do NOT invent facts not in the context. For general process questions, provide general answers that apply to ALL degree levels, not just one specific degree level."},
                             {"role": "user", "content": f"Context:\n{rag_context}\n\nUser question: {user_message}\n\nAnswer concisely using only the context above."}
                         ])
                         answer = response.choices[0].message.content
-                        lead_question = self._build_single_lead_question(student_state, audience=audience)
+                        # Skip lead question for general process/FAQ questions
+                        is_general_process_question = any(phrase in user_message.lower() for phrase in [
+                            'how do you handle', 'how does', 'what is the process', 'what is the procedure',
+                            'how does the process work', 'explain the process', 'tell me about the process',
+                            'application process', 'admission process', 'how it works', 'how does it work'
+                        ]) and not any(phrase in user_message.lower() for phrase in [
+                            'my', 'for me', 'my application', 'my admission', 'i want', 'i need'
+                        ])
+                        lead_question = None if is_general_process_question else self._build_single_lead_question(student_state, audience=audience)
                         response_text = answer + (f"\n\n{lead_question}" if lead_question else "")
                         return {
                             'response': response_text,
@@ -3098,11 +3352,127 @@ Once I have these details, I can check the latest official information and provi
                             'show_lead_form': False,
                             'lead_form_prefill': {}
                         }
+                    else:
+                        # RAG returned no results
+                        # For people/contact/service_policy: use fallback
+                        if intent in ['people_contact', 'service_policy']:
+                            fallback = "For the most accurate information, please contact us:\n- Hotline: [check RAG for phone]\n- Email: info@malishaedu.com\n- Which country/city are you from? Our local team can assist you better."
+                            return {
+                                'response': fallback,
+                                'db_context': '',
+                                'rag_context': None,
+                                'tavily_context': None,
+                                'lead_collected': lead_collected,
+                                'show_lead_form': False,
+                                'lead_form_prefill': {}
+                            }
+                        # For general knowledge questions (travel, food, safety, etc.): use Tavily
+                        elif intent == 'general_faq':
+                            # Check if this is a general knowledge question (not policy/process)
+                            is_general_knowledge = any(term in user_message.lower() for term in [
+                                'travel', 'transportation', 'transport', 'food', 'halal', 'safety', 'security',
+                                'accommodation', 'dormitory', 'housing', 'life in china', 'cost of living',
+                                'bank account', 'part-time', 'work while', 'insurance', 'medical'
+                            ])
+                            if is_general_knowledge:
+                                print(f"DEBUG: RAG returned no results for general knowledge question - using Tavily")
+                                try:
+                                    tavily_results = self.tavily_service.search(
+                                        f"site:malishaedu.com {user_message}",
+                                        max_results=2
+                                    )
+                                    if tavily_results:
+                                        tavily_context = self.tavily_service.format_search_results(tavily_results)
+                                        response = self.openai_service.chat_completion([
+                                            {"role": "system", "content": "You are a helpful assistant. Answer the question using the provided web search results. Be concise and informative. If the results don't fully answer the question, provide a helpful general answer based on common knowledge about studying in China."},
+                                            {"role": "user", "content": f"Web search results:\n{tavily_context}\n\nUser question: {user_message}\n\nAnswer concisely."}
+                                        ])
+                                        answer = response.choices[0].message.content
+                                        # Don't ask for lead info for general knowledge questions
+                                        return {
+                                            'response': answer,
+                                            'db_context': '',
+                                            'rag_context': None,
+                                            'tavily_context': tavily_context,
+                                            'lead_collected': lead_collected,
+                                            'show_lead_form': False,
+                                            'lead_form_prefill': {}
+                                        }
+                                    else:
+                                        # No Tavily results - provide helpful general answer
+                                        print(f"DEBUG: Tavily also returned no results - providing general domain knowledge answer")
+                                        general_answer = self._provide_general_knowledge_answer(user_message)
+                                        return {
+                                            'response': general_answer,
+                                            'db_context': '',
+                                            'rag_context': None,
+                                            'tavily_context': None,
+                                            'lead_collected': lead_collected,
+                                            'show_lead_form': False,
+                                            'lead_form_prefill': {}
+                                        }
+                                except Exception as e:
+                                    print(f"Tavily search failed: {e}")
+                                    # Fallback to general knowledge answer
+                                    general_answer = self._provide_general_knowledge_answer(user_message)
+                                    return {
+                                        'response': general_answer,
+                                        'db_context': '',
+                                        'rag_context': None,
+                                        'tavily_context': None,
+                                        'lead_collected': lead_collected,
+                                        'show_lead_form': False,
+                                        'lead_form_prefill': {}
+                                    }
+                        # For other questions, provide helpful response without asking for lead info unnecessarily
+                        helpful_response = f"I'd be happy to help you with that! While I don't have specific information about '{user_message}' in our knowledge base right now, I can provide general guidance. Could you tell me more about what specifically you'd like to know?"
+                        return {
+                            'response': helpful_response,
+                            'db_context': '',
+                            'rag_context': None,
+                            'tavily_context': None,
+                            'lead_collected': lead_collected,
+                            'show_lead_form': False,
+                            'lead_form_prefill': {}
+                        }
                 except Exception as e:
                     print(f"General RAG search failed: {e}")
+                    # Fallback for people/contact/service_policy
+                    if intent in ['people_contact', 'service_policy']:
+                        fallback = "For the most accurate information, please contact us:\n- Hotline: [check RAG for phone]\n- Email: info@malishaedu.com\n- Which country/city are you from? Our local team can assist you better."
+                        return {
+                            'response': fallback,
+                            'db_context': '',
+                            'rag_context': None,
+                            'tavily_context': None,
+                            'lead_collected': lead_collected,
+                            'show_lead_form': False,
+                            'lead_form_prefill': {}
+                        }
+                    # For other errors, provide helpful response
+                    helpful_response = f"I'd be happy to help you with that! Could you tell me more about what specifically you'd like to know?"
+                    return {
+                        'response': helpful_response,
+                        'db_context': '',
+                        'rag_context': None,
+                        'tavily_context': None,
+                        'lead_collected': lead_collected,
+                        'show_lead_form': False,
+                        'lead_form_prefill': {}
+                    }
             
-            # Only use Tavily if explicitly needed (latest policy/current info)
-            if needs_web:
+            # Only use Tavily if explicitly needed (latest policy/current info) AND not People/Contact or Service Policy
+            # Hard guard: Never use Tavily for People/Contact or Service Policy
+            never_use_tavily = (
+                intent == 'people_contact' or 
+                intent == 'service_policy' or
+                doc_type == 'people_contact' or
+                doc_type == 'service_policy'
+            )
+            
+            if needs_web and not never_use_tavily:
+                print(f"DEBUG: Tavily guard passed - calling Tavily for latest policy question")
+                print(f"DEBUG: Reason: needs_web=True, intent={intent}, doc_type={doc_type}")
                 try:
                     # Restrict to malishaedu.com domain
                     tavily_results = self.tavily_service.search(
@@ -3111,6 +3481,7 @@ Once I have these details, I can check the latest official information and provi
                     )
                     if tavily_results:
                         tavily_context = self.tavily_service.format_search_results(tavily_results)
+                        print(f"DEBUG: Tavily returned {len(tavily_results)} results")
                         # Generate answer using Tavily context
                         response = self.openai_service.chat_completion([
                             {"role": "system", "content": "Answer using ONLY the provided web search results. Be concise."},
@@ -3128,40 +3499,31 @@ Once I have these details, I can check the latest official information and provi
                             'show_lead_form': False,
                             'lead_form_prefill': {}
                         }
+                    else:
+                        print(f"DEBUG: Tavily returned no results")
                 except Exception as e:
                     print(f"Tavily search failed: {e}")
+            elif never_use_tavily:
+                print(f"DEBUG: Hard guard - skipping Tavily for {intent}/{doc_type} question")
         
-        # Step 1: Query Database
-        # Allow database queries if:
-        # 1. use_db=True (lead collected), OR
-        # 2. User has all required info (degree_level, major, nationality, intake_term, intake_year) for comparison
-        has_all_info_for_comparison = (
-            student_state.degree_level and
-            student_state.major and
-            student_state.nationality and
-            student_state.intake_term and
-            student_state.intake_year
-        )
-        
-        # Check if user is asking for specific info that requires database
-        asks_for_specific_info = any(term in user_message.lower() for term in [
-            'cost', 'fee', 'tuition', 'price', 'scholarship', 'deadline', 'application process',
-            'documents', 'university', 'compare', 'comparison', 'show me', 'tell me about',
-            'which university', 'what university', 'best university', 'lowest cost', 'good university'
-        ])
-        
-        # Fix 1: Always allow DB reads (allow_db_read = True)
-        # Query database for partner universities/majors/intakes
-        db_context, matched_programs = self._query_database_with_state(
-            user_message, 
-            student_state, 
-            conversation_slice, 
-            lead_collected, 
-            is_simple_info_query,
-            sales_intent=sales_intent,
-            current_date=current_date
-        )
-        print(f"DEBUG: DB query executed - context_length={len(db_context)}, matched_programs_count={len(matched_programs.split('MATCHED_PROGRAMS')) if matched_programs else 0}")
+        # Step 1: Query Database - ONLY if needs_db=True
+        # CRITICAL: Never run DB queries for general questions (needs_db=False)
+        db_context = ""
+        matched_programs = ""
+        if needs_db:
+            # Query database for partner universities/majors/intakes
+            db_context, matched_programs = self._query_database_with_state(
+                user_message, 
+                student_state, 
+                conversation_slice, 
+                lead_collected, 
+                is_simple_info_query,
+                sales_intent=sales_intent,
+                current_date=current_date
+            )
+            print(f"DEBUG: DB query executed - context_length={len(db_context)}, matched_programs_count={len(matched_programs.split('MATCHED_PROGRAMS')) if matched_programs else 0}")
+        else:
+            print(f"DEBUG: Skipping DB query - needs_db=False (intent={intent})")
         
         # Step 2: Detect CSCA/scholarship questions - prioritize RAG for these topics
         user_msg_lower = user_message.lower()
@@ -3188,11 +3550,11 @@ Once I have these details, I can check the latest official information and provi
                     csca_search_query = "CSCA China Scholastic Competency Assessment exam structure subjects registration fee timing 2026 undergraduate bachelor"
                     if any(term in user_msg_lower for term in ['master', 'masters', 'phd', 'doctorate']):
                         csca_search_query += " masters phd not required"
-                    rag_results = self.rag_service.retrieve(self.db, csca_search_query, doc_type='csca', audience=None, top_k=3)
+                    rag_results = self.rag_service.retrieve(self.db, csca_search_query, doc_type='csca', audience=None, top_k=4)
                 else:
                     # Determine doc_type for scholarship questions
                     scholarship_doc_type = 'b2c_study'  # Default for general scholarship questions
-                    rag_results = self.rag_service.retrieve(self.db, user_message, doc_type=scholarship_doc_type, audience=None, top_k=3)
+                    rag_results = self.rag_service.retrieve(self.db, user_message, doc_type=scholarship_doc_type, audience=None, top_k=4)
                 
                 if rag_results:
                     rag_context = self.rag_service.format_rag_context(rag_results)
@@ -3230,7 +3592,8 @@ Once I have these details, I can check the latest official information and provi
             # Only use RAG for non-program queries (CSCA, scholarships, general questions)
             if not allow_lead_write:  # Stranger: Use RAG for general questions
                 try:
-                    rag_results = self.rag_service.search_similar(self.db, user_message, top_k=5)
+                    # Use filtered retrieval with determined doc_type and audience
+                    rag_results = self.rag_service.retrieve(self.db, user_message, doc_type=doc_type, audience=audience, top_k=4)
                     if rag_results:
                         rag_context = self.rag_service.format_rag_context(rag_results)
                         # Add related majors context if available
@@ -3242,7 +3605,7 @@ Once I have these details, I can check the latest official information and provi
             elif not db_context or len(db_context) < 100:  # DB context is weak
                 # Lead collected but DB context weak: try RAG (only for non-program queries)
                 try:
-                    rag_results = self.rag_service.retrieve(self.db, user_message, doc_type=doc_type, audience=audience, top_k=3)
+                    rag_results = self.rag_service.retrieve(self.db, user_message, doc_type=doc_type, audience=audience, top_k=4)
                     if rag_results:
                         rag_context = self.rag_service.format_rag_context(rag_results)
                 except Exception as e:
@@ -3423,7 +3786,7 @@ Once I have these details, I can check the latest official information and provi
                     "MalishaEdu service charges service fee table",
                     doc_type='service_policy',
                     audience=None,
-                    top_k=3
+                    top_k=4
                 )
                 if cost_rag_results:
                     cost_rag_context = self.rag_service.format_rag_context(cost_rag_results)
@@ -3434,21 +3797,44 @@ Once I have these details, I can check the latest official information and provi
             except Exception as e:
                 print(f"RAG service charge search failed: {e}")
         
-        # Step 3: Tavily (skip for program/fee listing - use DB only)
-        # Fix: Do NOT use Tavily for program/fee listing - only for visa/policy/lifestyle questions
+        # Step 3: Tavily (LAST RESORT with hard guards)
+        # Hard guards: NEVER use Tavily for People/Contact, Service Policy, or general study questions
         tavily_context = None
-        # Tavily usage is now controlled by classify_query needs_web flag
-        # Only use Tavily for latest policy/current info requests, and restrict to malishaedu.com domain
         skip_tavily_for_programs = sales_intent in ['fees_only', 'fees_compare', 'list_programs', 'earliest_intake'] or intent == 'program_specific'
         
-        if not skip_tavily_for_programs and needs_web and not db_context and not rag_context:
-            # Only use Tavily if explicitly needed (latest/current info) and restrict to malishaedu.com
-            try:
-                tavily_results = self.tavily_service.search(f"site:malishaedu.com {user_message}", max_results=2)
-                if tavily_results:
-                    tavily_context = self.tavily_service.format_search_results(tavily_results)
-            except Exception as e:
-                print(f"Tavily search failed: {e}")
+        # Hard guard: Never use Tavily for People/Contact or Service Policy questions
+        never_use_tavily = (
+            intent == 'people_contact' or 
+            intent == 'service_policy' or
+            doc_type == 'people_contact' or
+            doc_type == 'service_policy'
+        )
+        
+        if never_use_tavily:
+            print(f"DEBUG: Hard guard - skipping Tavily for {intent}/{doc_type} question (People/Contact and Service Policy never use Tavily)")
+        elif not skip_tavily_for_programs and needs_web and not db_context and not rag_context:
+            # Only use Tavily if:
+            # 1. No DB result
+            # 2. No RAG chunk confidence/empty
+            # 3. Question is policy/visa/regulation and likely time-sensitive
+            is_time_sensitive = any(term in user_message.lower() for term in [
+                'visa', 'policy', 'regulation', 'rule', 'latest', 'current', 'updated', 'recent', 'new policy', 'this month'
+            ])
+            
+            if is_time_sensitive:
+                print(f"DEBUG: Tavily guard passed - calling Tavily for time-sensitive policy/visa question")
+                print(f"DEBUG: Reason: no DB context, no RAG context, time-sensitive question")
+                try:
+                    tavily_results = self.tavily_service.search(f"site:malishaedu.com {user_message}", max_results=2)
+                    if tavily_results:
+                        tavily_context = self.tavily_service.format_search_results(tavily_results)
+                        print(f"DEBUG: Tavily returned {len(tavily_results)} results")
+                    else:
+                        print(f"DEBUG: Tavily returned no results")
+                except Exception as e:
+                    print(f"Tavily search failed: {e}")
+            else:
+                print(f"DEBUG: Tavily guard failed - question is not time-sensitive policy/visa/regulation")
         elif skip_tavily_for_programs:
             print(f"DEBUG: Skipping Tavily for program-specific query (intent={intent}) - using DB only")
         
@@ -3842,10 +4228,10 @@ REMEMBER: Base all concrete fees, deadlines, and program details ONLY on DATABAS
                 context_instruction += "\n   - If user wants Master's in Computer Science, ONLY suggest universities that have Master's programs in Computer Science or related fields"
                 context_instruction += "\n   - DO NOT suggest a university just because it's in the same city or is a partner - it MUST have the matching program"
                 context_instruction += "\n   - Use fuzzy matching: Finance can match Financial Management, Corporate Finance, etc. - but the university MUST have that specific program at the requested degree level"
-                context_instruction += "\n5. If DATABASE MATCHES is empty or insufficient, say: 'I need to check our partner university database for [major] programs. Let me search for MalishaEdu partner universities offering [major] for [degree_level].'"
+                context_instruction += "\n5. If DATABASE MATCHES is empty or user mentions Tsinghua/Peking/etc (not in DB), say: 'We can only recommend from our listed partner universities. If you tell me your major/degree/intake I'll shortlist the best options we have.'"
                 context_instruction += "\n6. DO NOT invent or suggest any university names that are not in DATABASE MATCHES"
-                context_instruction += "\n7. If you have partner universities in DATABASE MATCHES, list them and explain why they are good options for the user's major/degree level"
-                context_instruction += "\n8. If a university is listed in DATABASE MATCHES but doesn't have the matching program, DO NOT suggest it - only suggest universities with actual matching programs"
+                context_instruction += "\n7. NEVER suggest universities outside the DATABASE UNIVERSITIES list."
+                context_instruction += "\n8. If you have partner universities in DATABASE MATCHES, list them and explain why they are good options for the user's major/degree level"
             
             if is_first_interaction:
                 context_instruction += "\n\nIMPORTANT: This appears to be a first interaction. Be BRIEF and CONCISE. Introduce MalishaEdu first. Check the dynamic profile instruction above - only ask about fields marked as 'missing', and at most 2 at a time. Do NOT ask for fields that are already in the profile. Do NOT provide all details upfront."
@@ -4016,7 +4402,16 @@ REMEMBER: Base all concrete fees, deadlines, and program details ONLY on DATABAS
         
         # Step 6.5: Add single lead collection question for program-specific queries
         # (FAQ/CSCA queries already have lead question added in their early returns)
-        if intent == 'program_specific' or needs_db:
+        # Skip lead question for general process/FAQ questions that don't require personalization
+        is_general_process_question = any(phrase in user_message.lower() for phrase in [
+            'how do you handle', 'how does', 'what is the process', 'what is the procedure',
+            'how does the process work', 'explain the process', 'tell me about the process',
+            'application process', 'admission process', 'how it works', 'how does it work'
+        ]) and not any(phrase in user_message.lower() for phrase in [
+            'my', 'for me', 'my application', 'my admission', 'i want', 'i need'
+        ])
+        
+        if (intent == 'program_specific' or needs_db) and not is_general_process_question:
             lead_question = self._build_single_lead_question(student_state, audience=audience)
             if lead_question:
                 answer = answer + f"\n\n{lead_question}"
@@ -4745,10 +5140,12 @@ IMPORTANT:
                 if major_name and db_degree_level:
                     partner_search_query = f"MalishaEdu partner universities {major_name} {db_degree_level}"
                     try:
-                        partner_rag_results = self.rag_service.search_similar(
+                        partner_rag_results = self.rag_service.retrieve(
                             self.db,
                             partner_search_query,
-                            top_k=5
+                            doc_type='b2b_partner',
+                            audience='partner',
+                            top_k=4
                         )
                         if partner_rag_results:
                             partner_rag_context = self.rag_service.format_rag_context(partner_rag_results)
@@ -5155,10 +5552,12 @@ IMPORTANT:
         
         # Not found in partner universities
         try:
-            rag_results = self.rag_service.search_similar(
+            rag_results = self.rag_service.retrieve(
                 self.db, 
                 f"MalishaEdu partner university {university_name}",
-                top_k=5
+                doc_type='b2c_study',
+                audience=None,
+                top_k=4
             )
             if rag_results:
                 # Check if any RAG result mentions this university as a partner
@@ -5205,10 +5604,12 @@ IMPORTANT:
     def _get_partner_universities_from_rag(self) -> List[str]:
         """Get list of MalishaEdu partner universities from RAG"""
         try:
-            rag_results = self.rag_service.search_similar(
+            rag_results = self.rag_service.retrieve(
                 self.db,
                 "MalishaEdu partner universities list 31",
-                top_k=5
+                doc_type='b2c_study',
+                audience=None,
+                top_k=4
             )
             universities = []
             if rag_results:
@@ -5228,10 +5629,12 @@ IMPORTANT:
     def _get_malishaedu_majors_from_rag(self) -> List[str]:
         """Get list of MalishaEdu majors from RAG"""
         try:
-            rag_results = self.rag_service.search_similar(
+            rag_results = self.rag_service.retrieve(
                 self.db,
                 "MalishaEdu majors subjects 150",
-                top_k=5
+                doc_type='b2c_study',
+                audience=None,
+                top_k=4
             )
             majors = []
             if rag_results:

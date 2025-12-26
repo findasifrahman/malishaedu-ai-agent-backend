@@ -52,10 +52,30 @@ class RAGService:
             params = {"doc_type": doc_type, "top_k": top_k}
             
             if audience:
-                where_conditions.append("s.audience = :audience")
+                # Allow exact audience match OR audience='Both' (if exists)
+                where_conditions.append("(s.audience = :audience OR s.audience = 'Both')")
                 params["audience"] = audience
             
             where_clause = " AND ".join(where_conditions)
+            
+            # Get highest version for this doc_type + audience combination
+            # First, find the highest version (handle NULL versions)
+            version_where = " AND ".join([wc for wc in where_conditions])
+            version_params = {k: v for k, v in params.items() if k != "top_k"}
+            version_query = text(f"""
+                SELECT MAX(s.version) as max_version
+                FROM rag_sources s
+                WHERE {version_where}
+            """)
+            version_result = db.execute(version_query, version_params)
+            max_version_row = version_result.fetchone()
+            max_version = max_version_row[0] if max_version_row and max_version_row[0] else None
+            
+            # If version exists, filter by it; otherwise get all versions (including NULL)
+            if max_version:
+                where_conditions.append("(s.version = :max_version OR s.version IS NULL)")
+                params["max_version"] = max_version
+                where_clause = " AND ".join(where_conditions)
             
             # Vector similarity search with filtering
             # Use cosine distance with HNSW index (vector_cosine_ops)
@@ -121,7 +141,7 @@ class RAGService:
             return []
     
     def format_rag_context(self, results: List[Dict]) -> str:
-        """Format RAG search results into context string"""
+        """Format RAG search results into context string - summarize chunks, don't paste large blocks"""
         if not results:
             return "No relevant information found in knowledge base."
         
@@ -129,11 +149,14 @@ class RAGService:
         for i, result in enumerate(results, 1):
             source_name = result.get('source_name', 'Unknown')
             doc_type = result.get('doc_type', '')
-            context += f"Source {i} ({source_name}, {doc_type}):\n"
-            if result.get('metadata'):
-                context += f"Metadata: {result['metadata']}\n"
-            context += f"{result['content']}\n"
-            context += f"(Similarity: {result.get('similarity', 0):.2f})\n\n"
+            content = result.get('content', '')
+            # Summarize if chunk is too long (>500 chars), otherwise use as-is
+            if len(content) > 500:
+                # Extract key sentences (first 300 chars + last 200 chars)
+                summary = content[:300] + "...[truncated]..." + content[-200:] if len(content) > 500 else content
+                context += f"Source {i} ({source_name}, {doc_type}):\n{summary}\n(Similarity: {result.get('similarity', 0):.2f})\n\n"
+            else:
+                context += f"Source {i} ({source_name}, {doc_type}):\n{content}\n(Similarity: {result.get('similarity', 0):.2f})\n\n"
         
         return context
     
