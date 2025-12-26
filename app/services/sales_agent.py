@@ -2181,6 +2181,62 @@ Return the JSON object:"""
         # All important fields collected
         return None
     
+    def _provide_csca_domain_knowledge(self, user_message: str) -> str:
+        """Provide helpful CSCA domain knowledge answer when RAG/Tavily have no results"""
+        user_lower = user_message.lower()
+        
+        # Post-study / After graduation
+        if any(term in user_lower for term in ['after', 'post', 'completing', 'graduation', 'graduate', 'finish', 'complete studies', 'what happens']):
+            return """After completing studies under the CSCA scholarship:
+
+• **Degree Recognition**: Your degree from a Chinese university is recognized internationally. You'll receive your degree certificate and graduation certificate upon successful completion.
+
+• **Career Options**:
+  - Return to your home country: Many graduates return and work in their home country, where their Chinese degree and language skills are valuable.
+  - Work in China: Graduates can apply for work permits in China, though this requires employer sponsorship and meeting specific requirements.
+  - Further Studies: Some graduates pursue Master's or PhD programs in China or other countries.
+  - International Companies: Your bilingual skills and international experience are valuable for multinational companies.
+
+• **Scholarship Obligations**: CSCA scholarship recipients typically need to maintain good academic performance and follow university regulations throughout their studies.
+
+• **Alumni Network**: Many universities have active international student alumni networks that can help with career connections.
+
+• **Documentation**: Keep all your academic documents, transcripts, and certificates safe - you'll need them for future applications and job opportunities.
+
+Would you like to know more about work opportunities in China after graduation, or about further studies?"""
+        
+        # CSCA exam / registration
+        elif any(term in user_lower for term in ['csca exam', 'take csca', 'csca registration', 'register', 'how to apply csca']):
+            return """CSCA (China Scholastic Competency Assessment) Registration:
+
+• **Purpose**: CSCA is an assessment exam that some universities use as part of their admission process for international students.
+
+• **Registration**: Students typically register online through the official CSCA website (www.csca.cn) or as directed by their target universities.
+
+• **Requirements**: You'll need to create an account, upload required documents (photo, ID), choose your test session and subjects, and pay the exam fee.
+
+• **Timing**: Registration deadlines and exam dates vary by university and intake. Check with your target universities or MalishaEdu for specific dates.
+
+• **Support**: MalishaEdu can guide you through the CSCA registration process and help ensure you meet all requirements.
+
+Would you like to know which universities require CSCA, or do you have a specific university in mind?"""
+        
+        # General CSCA information
+        else:
+            return """CSCA (China Scholastic Competency Assessment) Information:
+
+• **What is CSCA**: CSCA is an assessment exam used by some Chinese universities as part of their international student admission process.
+
+• **Who needs it**: Not all universities require CSCA. Requirements vary by university, major, and degree level. Some universities use it for scholarship eligibility assessment.
+
+• **Exam Structure**: The exam typically assesses academic competency and may include subject-specific tests depending on your chosen major.
+
+• **Scholarship Connection**: Some universities use CSCA results as part of their scholarship evaluation process.
+
+• **Support**: MalishaEdu can help you determine if your target universities require CSCA and guide you through the registration and preparation process.
+
+Would you like to know which universities require CSCA, or do you have specific questions about the exam format or registration?"""
+    
     def _provide_general_knowledge_answer(self, user_message: str) -> str:
         """Provide helpful general knowledge answer when RAG/Tavily have no results"""
         user_lower = user_message.lower()
@@ -3109,26 +3165,26 @@ Instructions:
                         'lead_form_prefill': {}
                     }
                 else:
-                    # No RAG results found - try Tavily as fallback ONLY if explicitly asking for latest rules
-                    # Hard guard: Only use Tavily if user explicitly asks for latest/updated rules
+                    # No RAG results found - try Tavily as fallback for CSCA questions
+                    # Use Tavily for: 1) latest rules explicitly asked, OR 2) general CSCA questions not in RAG
                     asks_for_latest = any(term in user_lower for term in [
                         'latest', 'current', 'updated', 'recent', 'new policy', 'this month', '2026', '2027'
                     ]) and any(term in user_lower for term in ['rule', 'policy', 'regulation', 'change'])
                     
-                    if not asks_for_latest:
-                        print(f"DEBUG: No RAG results for CSCA/CSC question, but not asking for latest rules - skipping Tavily")
-                        # Return safe template without Tavily
-                        safe_answer = """I'd be happy to help you with CSCA/CSC questions! To provide you with the most accurate information, could you please share:
-- Your nationality
-- Your preferred major/field of study  
-- Your target intake (March or September) and year
-
-Once I have these details, I can provide you with specific guidance tailored to your situation."""
-                        lead_question = self._build_single_lead_question(student_state, audience=audience)
-                        if lead_question:
-                            safe_answer = safe_answer + f"\n\n{lead_question}"
+                    # For general CSCA questions (post-study, career, etc.), also try Tavily
+                    is_general_csca_question = any(term in user_lower for term in [
+                        'after', 'post', 'completing', 'graduation', 'graduate', 'finish', 'complete studies',
+                        'career', 'job', 'work', 'future', 'what happens', 'next steps'
+                    ])
+                    
+                    should_use_tavily = asks_for_latest or is_general_csca_question
+                    
+                    if not should_use_tavily:
+                        print(f"DEBUG: No RAG results for CSCA/CSC question, but not a general/latest question - providing domain knowledge")
+                        # Provide helpful domain knowledge answer
+                        csca_answer = self._provide_csca_domain_knowledge(user_message)
                         return {
-                            'response': safe_answer,
+                            'response': csca_answer,
                             'db_context': '',
                             'rag_context': None,
                             'tavily_context': None,
@@ -3138,7 +3194,7 @@ Once I have these details, I can provide you with specific guidance tailored to 
                         }
                     
                     print(f"DEBUG: No RAG results for CSCA/CSC question: {user_message}")
-                    print(f"DEBUG: User explicitly asking for latest rules - attempting Tavily fallback (MalishaEdu + govt sites)")
+                    print(f"DEBUG: Attempting Tavily fallback (MalishaEdu + govt sites)")
                     
                     tavily_context = None
                     try:
@@ -3216,16 +3272,11 @@ Please answer the question using the information from the web search results abo
                             print(f"DEBUG: Failed to generate response from Tavily results: {e}")
                             # Fall through to safe template
                     
-                    # Fallback to safe template if Tavily didn't work or returned nothing
-                    safe_template = """I'd be happy to help you with that! To provide you with the most accurate and personalized information about CSCA and Chinese Government Scholarship, could you please share:
-- Your nationality
-- Your preferred major/field of study  
-- Your target intake (March or September) and year
-
-Once I have these details, I can check the latest official information and provide you with specific guidance tailored to your situation."""
-                    
+                    # Fallback to domain knowledge if Tavily didn't work or returned nothing
+                    print(f"DEBUG: Tavily also returned no results - providing CSCA domain knowledge answer")
+                    csca_answer = self._provide_csca_domain_knowledge(user_message)
                     return {
-                        'response': safe_template,
+                        'response': csca_answer,
                         'db_context': '',
                         'rag_context': None,
                         'tavily_context': tavily_context,
@@ -3235,15 +3286,11 @@ Once I have these details, I can check the latest official information and provi
                     }
             except Exception as e:
                 print(f"CSCA RAG search failed: {e}")
-                # Use safe template on error
-                safe_template = """I'd be happy to help you with that! To provide you with the most accurate and personalized information about CSCA and Chinese Government Scholarship, could you please share:
-- Your nationality
-- Your preferred major/field of study
-- Your target intake (March or September) and year
-
-Once I have these details, I can check the latest official information and provide you with specific guidance tailored to your situation."""
+                # Error occurred - provide helpful domain knowledge answer
+                print(f"DEBUG: CSCA RAG search failed - providing CSCA domain knowledge answer")
+                csca_answer = self._provide_csca_domain_knowledge(user_message)
                 return {
-                    'response': safe_template,
+                    'response': csca_answer,
                     'db_context': '',
                     'rag_context': None,
                     'tavily_context': None,
