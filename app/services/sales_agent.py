@@ -407,6 +407,8 @@ CURRENT DATE AWARENESS:
 - Always suggest FUTURE intake dates that make sense relative to the current date
 - For deadlines, calculate days remaining from CURRENT DATE to the deadline
 
+
+
 USER TYPES:
 - Stranger: no structured lead info collected yet (nationality + contact info + study interest not all provided). For strangers, you MAY use database to provide limited summaries (2–3 options + tuition range). Avoid overwhelming details. Ask for signup/contact for exact personalized guidance. Use RAG for general process / living cost / visa / CSCA explanations, not for tuition when DB has values.
 - Lead: user has provided nationality + contact info (phone/email/whatsapp/wechat) + study interest, and lead was automatically collected. For leads, use the database to give exact fees, deadlines, scholarship_info, and documents_required (if their major/university matches MalishaEdu supported options).
@@ -542,27 +544,19 @@ BAD first response (too much detail):
 EXAMPLE: User already provided information
 User: "I am a CSE student of bachelor. I want to continue from 2nd year at Beihang University. I'm Bangladeshi."
 
-GOOD response:
-"Thanks for the details! Since you're a Bangladeshi CSE student wanting to continue from 2nd year at Beihang University, I can help you with the re-admission process. Let me check the specific requirements and transfer options for your case."
-
-BAD response (asking for info already provided):
-"Could you tell me your major? What's your nationality? Which university are you interested in?"
-
-EXAMPLE: User states major in first message (works for ANY major - Biology, Physics, Chemistry, etc.)
-User (Message 1): "I want to study Mechanical Engineering in china. I already completed my D.sc from bangladesh. What the early intake?"
-OR: "I want to study Biology in china..."
-OR: "I want to study Physics in china..."
-Agent: [Responds about that specific major's Master's programs]
-
-User (Message 2): "I want to study masters"
-
-GOOD response (for ANY major):
-"Perfect! For Master's in [the major they mentioned - Mechanical Engineering/Biology/Physics/etc.], let me check the earliest available intakes for you. [Provide specific intake dates and deadlines from database]"
-
-BAD response (re-asking major):
-"Thanks for letting me know! You're interested in studying a Master's program in China. To help you find the best options, could you please tell me: Your preferred major field of study for your Master's?"
-
-This applies to ALL majors: Biology, Physics, Chemistry, Computer Science, Mechanical Engineering, Business, Medicine, Material Science, etc.
+JOB, INTERNSHIP, VISA, AND POST-STUDY QUESTIONS (CRITICAL RULES):
+- For job, internship, visa, and post-study questions:
+  1) Never give generic answers.
+  2) Always anchor to MalishaEdu + Malisha Group (Easylink, Al-barakah) context.
+  3) Clearly distinguish:
+     - What MalishaEdu directly provides
+     - What depends on student eligibility, visa type, and employer
+  4) Be legally accurate:
+     - X1 visa holders may transition to Z visa with job offer
+     - X2 visa holders cannot transition to work visa
+  5) Do not promise job placement.
+  6) Emphasize language skill and academic performance.
+  7) End with a clear next step (profile details or consultation).
 
 MalishaEdu Services (mention when relevant, not all at once):
 - 100% admission support for Bachelor, Master, PhD & Diploma programs
@@ -1909,15 +1903,19 @@ Return the JSON object:"""
         ]
         if any(keyword in user_lower for keyword in csca_keywords):
             # Only use Tavily if explicitly asking for latest rules updated this month
-            needs_latest_csca = any(term in user_lower for term in [
-                'latest', 'current', 'updated', 'recent', 'new policy', 'this month', '2026', '2027'
-            ]) and any(term in user_lower for term in ['rule', 'policy', 'regulation', 'change'])
+            # OR if user provides a government URL and asks to check it
+            has_government_url = any(domain in user_lower for domain in ['gov.cn', 'csc.edu.cn', 'chineseembassy.org'])
+            needs_latest_csca = (
+                (any(term in user_lower for term in ['latest', 'current', 'updated', 'recent', 'new rule', 'new policy', 'this month']) and
+                 any(term in user_lower for term in ['rule', 'policy', 'regulation', 'change'])) or
+                (has_government_url and any(term in user_lower for term in ['check', 'verify', 'confirm', 'look up']))
+            )
             return {
                 'intent': 'csca',
                 'needs_db': False,
                 'needs_csca_rag': True,
                 'needs_general_rag': False,
-                'needs_web': needs_latest_csca,  # Only if explicitly asking for latest rules
+                'needs_web': needs_latest_csca,  # Only if explicitly asking for latest rules or checking gov URL
                 'doc_type': 'csca',
                 'audience': 'student'
             }
@@ -2180,6 +2178,38 @@ Return the JSON object:"""
         
         # All important fields collected
         return None
+    
+    def _provide_csca_fallback_answer(self, user_message: str) -> str:
+        """Provide short practical CSCA fallback answer when RAG context is empty or low confidence"""
+        user_lower = user_message.lower()
+        
+        # Post-study / After graduation
+        if any(term in user_lower for term in ['after', 'post', 'completing', 'graduation', 'graduate', 'finish', 'complete studies', 'what happens']):
+            return """After completing studies under the CSCA scholarship, you'll graduate with your degree. The scholarship typically ends upon graduation. Your next steps depend on your goals: you can return to your home country, pursue further studies, or explore legal work opportunities in China (work permit requirements vary)."""
+        
+        # General CSCA information
+        else:
+            return """CSCA (China Scholastic Competency Assessment) is used by some Chinese universities as part of their international student admission and scholarship evaluation process. Requirements vary by university, major, and degree level."""
+    
+    def _build_csca_lead_question(self, student_state: StudentProfileState) -> str:
+        """Build CSCA-specific lead question asking for degree level, scholarship category, and university"""
+        missing_fields = []
+        if not student_state.degree_level:
+            missing_fields.append("degree level")
+        if not student_state.preferred_universities:
+            missing_fields.append("target university")
+        
+        if len(missing_fields) == 1:
+            if missing_fields[0] == "degree level":
+                return "Which degree level are you interested in (Bachelor/Master/PhD)?"
+            else:
+                return "Which university are you considering?"
+        elif len(missing_fields) >= 2:
+            fields_str = ", ".join(missing_fields[:-1]) + f", and {missing_fields[-1]}"
+            return f"To provide more specific guidance, could you share your {fields_str}?"
+        else:
+            # All fields collected, ask about scholarship category
+            return "Are you specifically interested in CSCA scholarship programs, or other Chinese Government Scholarship options?"
     
     def _provide_csca_domain_knowledge(self, user_message: str) -> str:
         """Provide helpful CSCA domain knowledge answer when RAG/Tavily have no results"""
@@ -3114,33 +3144,23 @@ Would you like to know about accommodation at a specific university or city?"""
                     ])
                     
                     # Generate answer using RAG context only with strict instructions
-                    system_prompt = """You are a helpful assistant answering CSCA/CSC/Chinese Government Scholarship questions. 
+                    # CRITICAL: NEVER mention tools, search results, embeddings, browsing, or retrieval
+                    system_prompt = """You are a helpful assistant answering CSCA/CSC/Chinese Government Scholarship questions.
 
 CRITICAL RULES:
-1. Use ONLY the provided RAG context as your factual source.
-2. Do NOT fabricate, invent, or guess any information not explicitly stated in the context.
-3. Do NOT provide success rates, testimonials, specific numbers, or statistics unless they are explicitly mentioned in the context.
-4. If the context doesn't contain the answer to the user's question, you MUST use the safe template below.
-5. Do NOT combine information from your training data with the context - use ONLY the context.
-
-Safe template when context doesn't contain the answer:
-I'd be happy to help you with that! To provide you with the most accurate and personalized information about [topic], could you please share:
-- Your nationality
-- Your preferred major/field of study
-- Your target intake (March or September) and year
-
-Once I have these details, I can check the latest official information and provide you with specific guidance tailored to your situation."""
+1. Answer naturally and conversationally. NEVER mention tools, search results, embeddings, browsing, retrieval, or how you found information.
+2. NEVER say "I couldn't find", "search results do not", "the provided context does not contain", or similar meta-talk about retrieval.
+3. Use ONLY the provided information as your factual source.
+4. If the information doesn't fully answer the question, provide a helpful, practical answer based on what you know, then ask for specific details to provide more personalized guidance.
+5. Keep answers concise (2-5 sentences for most questions).
+6. Always end with a relevant follow-up question to collect lead information (degree level, scholarship category, university preference)."""
                     
-                    user_prompt = f"""RAG Context (use ONLY this as your source):
+                    user_prompt = f"""Information about CSCA/CSC/Chinese Government Scholarship:
 {rag_context}
 
 User question: {user_message}
 
-Instructions:
-- Answer the question using ONLY the information from the RAG context above.
-- If the context contains the answer, provide it clearly and concisely.
-- If the context does NOT contain the answer (especially for success rates, testimonials, specific statistics, or details not mentioned), use the safe template from the system prompt.
-- Do NOT invent or fabricate any information."""
+Answer the question naturally and conversationally. Use the information provided above. If the information doesn't fully cover the question, provide a helpful practical answer and ask for specific details to give more personalized guidance. NEVER mention tools, search, or how information was found."""
                     
                     response = self.openai_service.chat_completion([
                         {"role": "system", "content": system_prompt},
@@ -3148,18 +3168,29 @@ Instructions:
                     ])
                     answer = response.choices[0].message.content
                     
-                    # Check if the answer is using the safe template (asking for lead info)
-                    # If so, try Tavily or domain knowledge instead
-                    is_safe_template = (
-                        ("the provided context does not contain" in answer.lower() or
-                         "does not contain information" in answer.lower() or
-                         "does not contain specific information" in answer.lower()) or
-                        ("nationality" in answer.lower() and 
-                         ("major" in answer.lower() or "field of study" in answer.lower()) and
-                         ("share" in answer.lower() or "please" in answer.lower() or "could you" in answer.lower()))
-                    )
+                    # Check if answer contains tool meta-talk or indicates low confidence
+                    tool_meta_phrases = [
+                        "the provided context does not contain",
+                        "does not contain information",
+                        "does not contain specific information",
+                        "search results do not",
+                        "search results do not explicitly",
+                        "i couldn't find",
+                        "i was unable to find",
+                        "the information provided does not",
+                        "based on the search results",
+                        "according to the search results",
+                        "the retrieved information",
+                        "the embedded context"
+                    ]
                     
-                    if is_safe_template:
+                    has_tool_meta = any(phrase in answer.lower() for phrase in tool_meta_phrases)
+                    
+                    # Check if RAG context is empty or very short (low confidence)
+                    rag_context_empty_or_low = not rag_context or len(rag_context.strip()) < 50
+                    
+                    # If tool meta-talk detected or low confidence, use fallback
+                    if has_tool_meta or rag_context_empty_or_low:
                         print(f"DEBUG: RAG context didn't answer the question - trying Tavily/domain knowledge")
                         # Try Tavily or domain knowledge instead of asking for lead info
                         # Check if this is a general CSCA question that could benefit from Tavily
@@ -3205,7 +3236,13 @@ Instructions:
                                         tavily_context += f"   {result.get('content', '')}\n"
                                         tavily_context += f"   URL: {result.get('url', '')}\n"
                                     
-                                    system_prompt = """You are a helpful assistant answering CSCA/CSC/Chinese Government Scholarship questions. Use the provided web search results to answer the user's question. Be accurate and informative."""
+                                    system_prompt = """You are a helpful assistant answering CSCA/CSC/Chinese Government Scholarship questions.
+
+CRITICAL RULES:
+1. Answer naturally and conversationally. NEVER mention tools, search results, browsing, or how you found information.
+2. NEVER say "search results show", "according to the search", or similar meta-talk.
+3. Use the provided information to answer the question directly and concisely (2-5 sentences).
+4. Always end with a relevant follow-up question to collect lead information."""
                                     user_prompt = f"""Web Search Results:
 {tavily_context}
 
@@ -3231,22 +3268,30 @@ Please answer the question using the information from the web search results abo
                             except Exception as e:
                                 print(f"DEBUG: Tavily fallback failed: {e}")
                         
-                        # Tavily failed or not applicable - use domain knowledge
-                        print(f"DEBUG: Using CSCA domain knowledge answer")
-                        answer = self._provide_csca_domain_knowledge(user_message)
+                        # Tavily failed or not applicable - use CSCA fallback template
+                        print(f"DEBUG: Using CSCA fallback template")
+                        answer = self._provide_csca_fallback_answer(user_message)
+                        # Add lead question
+                        lead_question = self._build_csca_lead_question(student_state)
+                        if lead_question:
+                            answer = answer + f"\n\n{lead_question}"
                         return {
                             'response': answer,
                             'db_context': '',
-                            'rag_context': rag_context,
+                            'rag_context': rag_context if not rag_context_empty_or_low else None,
                             'tavily_context': None,
                             'lead_collected': lead_collected,
                             'show_lead_form': False,
                             'lead_form_prefill': {}
                         }
                     
-                    # Answer is good - add lead question if needed
-                    if "nationality" not in answer.lower() and "major" not in answer.lower():
-                        lead_question = self._build_single_lead_question(student_state, audience=audience)
+                    # Answer is good - add CSCA-specific lead question if needed
+                    # Check if answer already asks for lead info
+                    already_asks_for_info = any(term in answer.lower() for term in [
+                        'nationality', 'major', 'degree level', 'scholarship category', 'university'
+                    ])
+                    if not already_asks_for_info:
+                        lead_question = self._build_csca_lead_question(student_state)
                         if lead_question:
                             answer = answer + f"\n\n{lead_question}"
                     
